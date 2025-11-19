@@ -2,7 +2,6 @@ const builtin = @import("builtin");
 const std = @import("std");
 
 const safe_mode = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
-const single_threaded = builtin.single_threaded;
 
 const BlockPoolConfig = struct {
     block_size: usize = 64 * 1024,
@@ -17,11 +16,6 @@ fn BlockPoolType(comptime config: BlockPoolConfig) type {
     return struct {
         const Pool = @This();
         pub const block_size = config.block_size;
-
-        const DummyMutex = struct {
-            fn lock(_: *DummyMutex) void {}
-            fn unlock(_: *DummyMutex) void {}
-        };
 
         const Segment = struct {
             capacity: usize,
@@ -54,7 +48,7 @@ fn BlockPoolType(comptime config: BlockPoolConfig) type {
         reserve: ?Segment,
         capacity: usize,
         n_free: usize,
-        mutex: if (single_threaded) DummyMutex else std.Thread.Mutex,
+        mutex: std.Thread.Mutex,
 
         pub fn init(gpa: std.mem.Allocator) Pool {
             return .{
@@ -66,7 +60,7 @@ fn BlockPoolType(comptime config: BlockPoolConfig) type {
                 .reserve = null,
                 .capacity = 0,
                 .n_free = 0,
-                .mutex = if (single_threaded) DummyMutex{} else std.Thread.Mutex{},
+                .mutex = std.Thread.Mutex{},
             };
         }
 

@@ -1,5 +1,9 @@
 const std = @import("std");
 
+const BlockPool = @import("block_pool.zig").BlockPool;
+
+const log = std.log.scoped(.ecs);
+
 pub const Key = enum(u64) {
     nil = 0,
     _,
@@ -76,27 +80,130 @@ pub fn Context(comptime Spec: type) type {
             break :blk @Type(info);
         };
 
-        pub fn PageView(comptime raw_query: RawQuery) type {
-            return struct {
-                const _PageView = @This();
-                const query = raw_query.reify();
-
-                page: *Page,
+        pub const Page = struct {
+            const Header = struct {
+                keys: [*]Key,
+                components: [n_components]usize,
+                capacity: usize,
+                len: usize,
             };
-        }
+            header: Header,
+            data: [BlockPool.block_size - @sizeOf(Header)]u8,
 
-        pub fn EntityView(comptime raw_query: RawQuery) type {
-            return struct {
-                const _EntityView = @This();
-                const query = raw_query.reify();
+            fn create(pool: *BlockPool, set: ComponentSet) !*Page {
+                const page = try pool.create(Page);
+                page.header.capacity = 0;
+                page.header.len = 0;
 
+                var sz: usize = @sizeOf(usize);
+                inline for (0..n_components) |i| {
+                    const c: Component = @enumFromInt(i);
+                    if (set.contains(c)) {
+                        sz += @sizeOf(ComponentType(c));
+                    }
+                }
+
+                page.header.capacity = page.data.len / sz;
+                while (true) {
+                    var ptr = @intFromPtr(&page.data[0]);
+                    ptr = std.mem.alignForward(usize, ptr, @alignOf(Key));
+                    page.header.keys = @ptrFromInt(ptr);
+                    ptr += @sizeOf(Key) * page.header.capacity;
+                    inline for (0..n_components) |i| {
+                        const c: Component = @enumFromInt(i);
+                        if (set.contains(c)) {
+                            const C = ComponentType(c);
+                            ptr = std.mem.alignForward(usize, ptr, @alignOf(C));
+                            page.header.components[i] = ptr;
+                            ptr += @sizeOf(C) * page.header.capacity;
+                        } else {
+                            page.header.components[i] = 0;
+                        }
+                    }
+                    if (ptr <= @intFromPtr(&page.data[0]) + page.data.len) break;
+                    page.header.capacity -= 1;
+                    log.debug("capacity overestimate for archetype {}", .{set});
+                }
+
+                return page;
+            }
+
+            fn append(page: *Page, key: Key, record: Record) usize {
+                std.debug.assert(page.header.len < page.header.capacity);
+                page.header.keys[page.header.len] = key;
+                inline for (std.meta.fields(Record), 0..) |field, i| {
+                    if (@field(record, field.name) != null) {
+                        const c: Component = @enumFromInt(i);
+                        page.component(c)[page.header.len] = @field(record, field.name).?;
+                    }
+                }
+                const index = page.header.len;
+                page.header.len += 1;
+                return index;
+            }
+
+            /// returns the key to the entity that was relocated (or nil if no relocation)
+            fn erase(page: *Page, index: usize) Key {
+                const end = page.header.len - 1;
+                if (index == end) {
+                    // easy special case with no swap
+                    page.header.len -= 1;
+                    return .nil;
+                }
+
+                const moved = page.header.keys[end];
+                page.header.keys[index] = page.header.keys[end];
+                inline for (page.header.components, 0..) |a, i| {
+                    if (a != 0) {
+                        const c: Component = @enumFromInt(i);
+                        const data = page.component(c);
+                        data[index] = data[end];
+                    }
+                }
+                page.header.len -= 1;
+                return moved;
+            }
+
+            fn componentSet(page: Page) ComponentSet {
+                var set = ComponentSet.initEmpty();
+                for (page.header.components, 0..) |a, i| {
+                    if (a != 0) set.insert(@as(Component, @enumFromInt(i)));
+                }
+                return set;
+            }
+
+            fn hasComponent(page: Page, c: Component) bool {
+                return page.header.components[@intFromEnum(c)] != 0;
+            }
+
+            fn component(page: *Page, comptime c: Component) [*]ComponentType(c) {
+                const a = page.header.components[@intFromEnum(c)];
+                std.debug.assert(a != 0);
+                return @ptrFromInt(a);
+            }
+
+            fn get(page: *Page, comptime c: Component, ix: usize) ComponentType(c) {
+                return page.component(c)[ix];
+            }
+
+            fn getPtr(page: *Page, comptime c: Component, ix: usize) *ComponentType(c) {
+                return &page.component(c)[ix];
+            }
+
+            fn getOptional(page: *Page, comptime c: Component, ix: usize) ?ComponentType(c) {
+                if (page.header.components[@intFromEnum(c)] == 0) return null;
+                return page.component(c)[ix];
+            }
+
+            fn getOptionalPtr(
                 page: *Page,
-                index: usize,
-            };
-        }
-
-        pub const World = struct {};
-        pub const Page = struct {};
+                comptime c: Component,
+                ix: usize,
+            ) ?*ComponentType(c) {
+                if (page.header.components[@intFromEnum(c)] == 0) return null;
+                return &page.component(c)[ix];
+            }
+        };
         const PageInfo = struct { page: *Page, set: ComponentSet };
 
         const RawQuery = struct {
@@ -123,10 +230,62 @@ pub fn Context(comptime Spec: type) type {
             exclude: ComponentSet,
         };
 
-        gpa: std.mem.Allocator,
-        keygen: KeyGenerator,
+        pub fn PageView(comptime raw_query: RawQuery) type {
+            return struct {
+                const _PageView = @This();
+                const query = raw_query.reify();
 
-        pages: std.MultiArrayList(PageInfo), // first cache_size slots form fifo cache
-        map: std.AutoHashMap(Key, EntityView(.{})),
+                page: *Page,
+            };
+        }
+
+        pub fn EntityView(comptime raw_query: RawQuery) type {
+            return struct {
+                const _EntityView = @This();
+                const query = raw_query.reify();
+
+                page: *Page,
+                index: usize,
+
+                pub fn get(view: _EntityView, comptime c: Component) ComponentType(c) {
+                    comptime std.debug.assert(query.include.contains(c));
+                    return view.page.get(c, view.index);
+                }
+
+                pub fn getPtr(view: _EntityView, comptime c: Component) *ComponentType(c) {
+                    comptime std.debug.assert(query.include.contains(c));
+                    return view.page.getPtr(c, view.index);
+                }
+
+                pub fn getOptional(view: _EntityView, comptime c: Component) ?ComponentType(c) {
+                    return view.page.getOptional(c, view.index);
+                }
+
+                pub fn getOptionalPtr(view: _EntityView, comptime c: Component) ?*ComponentType(c) {
+                    return view.page.getOptionalPtr(c, view.index);
+                }
+
+                pub fn record(view: _EntityView) Record {
+                    var rec = Record{};
+                    inline for (0..n_components) |i| {
+                        const c: Component = @enumFromInt(i);
+                        @field(rec, @tagName(c)) = view.getOptional(c);
+                    }
+                    return rec;
+                }
+
+                pub fn key(view: _EntityView) Key {
+                    return view.page.header.keys[view.index];
+                }
+            };
+        }
+
+        pub const World = struct {
+            pages: std.MultiArrayList(PageInfo), // first cache_size slots form fifo cache
+            map: std.AutoHashMap(Key, EntityView(.{})),
+        };
+
+        keygen: KeyGenerator,
+        pool: BlockPool,
     };
 }
