@@ -19,7 +19,11 @@ pub const UntypedAggregateQueue = struct {
             page.header.head = 0;
             page.header.tail = 0;
             page.header.capacity = page.bytes.len / @sizeOf(T) - 1;
-            page.header._values = std.mem.alignForward(usize, @intFromPtr(&page.bytes[0]), @alignOf(T));
+            page.header._values = std.mem.alignForward(
+                usize,
+                @intFromPtr(&page.bytes[0]),
+                @alignOf(T),
+            );
             page.header.next = null;
             return page;
         }
@@ -30,7 +34,7 @@ pub const UntypedAggregateQueue = struct {
             page.header.tail += 1;
         }
 
-        fn peek(page: *Page, comptime T: type) ?T {
+        fn peek(page: *const Page, comptime T: type) ?T {
             if (page.header.head == page.header.tail) return null;
             return page.values(T)[page.header.head];
         }
@@ -42,12 +46,20 @@ pub const UntypedAggregateQueue = struct {
             return value;
         }
 
-        fn full(page: *Page) bool {
+        fn full(page: *const Page) bool {
             return page.header.tail == page.header.capacity;
         }
 
         fn values(page: *Page, comptime T: type) [*]T {
             return @ptrFromInt(page.header._values);
+        }
+
+        fn debugPrint(page: *const Page, comptime T: type) void {
+            std.debug.print("  Page: ", .{});
+            for (page.header.head..page.header.tail) |i| {
+                std.debug.print("{} ", .{@constCast(page).values(T)[i]});
+            }
+            std.debug.print("\n", .{});
         }
     };
     comptime {
@@ -110,6 +122,7 @@ pub const UntypedAggregateQueue = struct {
         return .{
             .pool = pool,
             .head = null,
+            .tail = null,
             .mutex = .{},
         };
     }
@@ -124,7 +137,13 @@ pub const UntypedAggregateQueue = struct {
     }
 
     pub fn acquireQueue(aggregate_queue: *UntypedAggregateQueue) UntypedQueue {
-        return .{ .pool = aggregate_queue.pool, .head = null };
+        return .{
+            .pool = aggregate_queue.pool,
+            .head = null,
+            .tail = null,
+            .end = null,
+            .capacity = 0,
+        };
     }
 
     pub fn releaseQueue(aggregate_queue: *UntypedAggregateQueue, queue: *UntypedQueue) void {
@@ -134,31 +153,83 @@ pub const UntypedAggregateQueue = struct {
 
         if (aggregate_queue.tail) |tail| {
             tail.header.next = queue.head;
+            aggregate_queue.tail = queue.tail;
         } else {
-            aggregate_queue.tail = queue.head;
+            aggregate_queue.head = queue.head;
+            aggregate_queue.tail = queue.tail;
         }
         queue.* = undefined;
     }
 
     /// not thread-safe
-    pub fn peek(aggregate_queue: *UntypedAggregateQueue, comptime T: type) ?T {
+    pub fn peek(aggregate_queue: UntypedAggregateQueue, comptime T: type) ?T {
         const head = aggregate_queue.head orelse return null;
         return head.peek(T);
     }
 
     /// not thread-safe
     pub fn pop(aggregate_queue: *UntypedAggregateQueue, comptime T: type) ?T {
-        const head = aggregate_queue.head orelse return null;
-        const value = head.pop(T) orelse return null;
-        if (head.header.head == head.header.capacity) {
-            aggregate_queue.head = head.header.next;
-            if (aggregate_queue.head == null) {
-                // if our head ran out of capacity, and it was also end, null out the tail/end
-                aggregate_queue.tail = null;
-                aggregate_queue.end = null;
-            }
-            aggregate_queue.pool.destroy(head);
+        while (true) {
+            const head = aggregate_queue.head orelse return null;
+            return head.pop(T) orelse {
+                // page is empty move to next
+                if (head.header.next == null) {
+                    aggregate_queue.head = null;
+                    aggregate_queue.tail = null;
+                } else {
+                    aggregate_queue.head = head.header.next;
+                }
+                aggregate_queue.pool.destroy(head);
+                continue;
+            };
         }
-        return value;
+    }
+
+    pub fn debugPrint(aggregate_queue: UntypedAggregateQueue, comptime T: type) void {
+        std.debug.print("UntypedAggregateQueue <u32>\n", .{});
+        var walk: ?*Page = aggregate_queue.head;
+        while (walk) |page| {
+            walk = page.header.next;
+            page.debugPrint(T);
+        }
     }
 };
+
+test "aggregate queue fuzz" {
+    var pool = BlockPool.init(std.testing.allocator);
+    defer pool.deinit();
+    var aq = UntypedAggregateQueue.init(&pool);
+    defer aq.deinit();
+
+    var rng = std.Random.DefaultPrng.init(@bitCast(std.time.microTimestamp()));
+    const rand = rng.random();
+
+    for (0..10) |_| {
+        var q0 = aq.acquireQueue();
+        var q1 = aq.acquireQueue();
+
+        var acc: u32 = 0;
+        for (0..BlockPool.block_size / @sizeOf(u32) + 10) |_| {
+            const x = rand.int(u32);
+            const h = std.hash.XxHash32.hash(1337, std.mem.asBytes(&x));
+            acc ^= h;
+
+            if (rand.boolean()) {
+                try q0.push(u32, x);
+            } else {
+                try q1.push(u32, x);
+            }
+        }
+
+        aq.releaseQueue(&q0);
+        aq.releaseQueue(&q1);
+
+        var ref: u32 = 0;
+        while (aq.pop(u32)) |x| {
+            const h = std.hash.XxHash32.hash(1337, std.mem.asBytes(&x));
+            ref ^= h;
+        }
+
+        try std.testing.expect(ref == acc);
+    }
+}
