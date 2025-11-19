@@ -66,7 +66,7 @@ pub const UntypedAggregateQueue = struct {
         std.debug.assert(@sizeOf(Page) <= BlockPool.block_size);
     }
 
-    pub const UntypedQueue = struct {
+    pub const SubQueue = struct {
 
         // NOTE we have a singly linked list of pages
         // the page with the first value is at head, and is the actual head of the linked list
@@ -80,7 +80,7 @@ pub const UntypedAggregateQueue = struct {
         end: ?*Page,
         capacity: usize,
 
-        fn ensureCapacity(queue: *UntypedQueue, comptime T: type, n: usize) !void {
+        fn ensureCapacity(queue: *SubQueue, comptime T: type, n: usize) !void {
             if (queue.end == null) {
                 std.debug.assert(queue.head == null);
                 std.debug.assert(queue.tail == null);
@@ -98,14 +98,14 @@ pub const UntypedAggregateQueue = struct {
             }
         }
 
-        pub fn push(queue: *UntypedQueue, comptime T: type, value: T) !void {
+        pub fn push(queue: *SubQueue, comptime T: type, value: T) !void {
             try queue.ensureCapacity(T, 1);
             if (queue.tail.?.full()) queue.tail = queue.tail.?.header.next;
             queue.tail.?.push(T, value);
             queue.capacity -= 1;
         }
 
-        pub fn pushAssumeCapacity(queue: *UntypedQueue, comptime T: type, value: T) void {
+        pub fn pushAssumeCapacity(queue: *SubQueue, comptime T: type, value: T) void {
             std.debug.assert(queue.capacity >= 1);
             if (queue.tail.?.full()) queue.tail = queue.tail.?.header.next;
             queue.tail.?.push(T, value);
@@ -136,7 +136,7 @@ pub const UntypedAggregateQueue = struct {
         aggregate_queue.* = undefined;
     }
 
-    pub fn acquireQueue(aggregate_queue: *UntypedAggregateQueue) UntypedQueue {
+    pub fn acquire(aggregate_queue: *UntypedAggregateQueue) SubQueue {
         return .{
             .pool = aggregate_queue.pool,
             .head = null,
@@ -146,19 +146,19 @@ pub const UntypedAggregateQueue = struct {
         };
     }
 
-    pub fn releaseQueue(aggregate_queue: *UntypedAggregateQueue, queue: *UntypedQueue) void {
+    pub fn release(aggregate_queue: *UntypedAggregateQueue, sub_queue: *SubQueue) void {
         // ideally this should be lock-free and made so we can read concurrently
         aggregate_queue.mutex.lock();
         defer aggregate_queue.mutex.unlock();
 
         if (aggregate_queue.tail) |tail| {
-            tail.header.next = queue.head;
-            aggregate_queue.tail = queue.tail;
+            tail.header.next = sub_queue.head;
+            aggregate_queue.tail = sub_queue.tail;
         } else {
-            aggregate_queue.head = queue.head;
-            aggregate_queue.tail = queue.tail;
+            aggregate_queue.head = sub_queue.head;
+            aggregate_queue.tail = sub_queue.tail;
         }
-        queue.* = undefined;
+        sub_queue.* = undefined;
     }
 
     /// not thread-safe
@@ -205,8 +205,8 @@ test "aggregate queue fuzz" {
     const rand = rng.random();
 
     for (0..10) |_| {
-        var q0 = aq.acquireQueue();
-        var q1 = aq.acquireQueue();
+        var q0 = aq.acquire();
+        var q1 = aq.acquire();
 
         var acc: u32 = 0;
         for (0..BlockPool.block_size / @sizeOf(u32) + 10) |_| {
@@ -221,8 +221,8 @@ test "aggregate queue fuzz" {
             }
         }
 
-        aq.releaseQueue(&q0);
-        aq.releaseQueue(&q1);
+        aq.release(&q0);
+        aq.release(&q1);
 
         var ref: u32 = 0;
         while (aq.pop(u32)) |x| {
