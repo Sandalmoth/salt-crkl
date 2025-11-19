@@ -281,6 +281,10 @@ pub fn Context(comptime Spec: type) type {
         }
 
         pub const World = struct {
+            const cache_size = 32;
+
+            rng: std.Random.DefaultPrng,
+
             pages: std.MultiArrayList(PageInfo), // first cache_size slots form fifo cache
             map: std.AutoHashMap(Key, EntityView(.{})),
         };
