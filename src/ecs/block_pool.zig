@@ -43,7 +43,7 @@ fn BlockPoolType(comptime config: BlockPoolConfig) type {
             std.debug.assert(@sizeOf(Block) == block_size);
         }
 
-        alloc: std.mem.Allocator,
+        gpa: std.mem.Allocator,
         segments: std.PriorityQueue(Segment, void, Segment.lessThan),
         reserve: ?Segment,
         capacity: usize,
@@ -52,7 +52,7 @@ fn BlockPoolType(comptime config: BlockPoolConfig) type {
 
         pub fn init(gpa: std.mem.Allocator) Pool {
             return .{
-                .alloc = gpa,
+                .gpa = gpa,
                 .segments = std.PriorityQueue(Segment, void, Segment.lessThan).init(
                     gpa,
                     {},
@@ -65,8 +65,8 @@ fn BlockPoolType(comptime config: BlockPoolConfig) type {
         }
 
         pub fn deinit(pool: *Pool) void {
-            for (pool.segments.items) |segment| pool.alloc.free(segment.bytes);
-            if (pool.reserve) |reserve| pool.alloc.free(reserve.bytes);
+            for (pool.segments.items) |segment| pool.gpa.free(segment.bytes);
+            if (pool.reserve) |reserve| pool.gpa.free(reserve.bytes);
             pool.segments.deinit();
             pool.* = undefined;
         }
@@ -119,10 +119,10 @@ fn BlockPoolType(comptime config: BlockPoolConfig) type {
             } else {
                 const reserve = pool.reserve.?;
                 if (reserve.capacity < segment.capacity) {
-                    pool.alloc.free(reserve.bytes);
+                    pool.gpa.free(reserve.bytes);
                     pool.reserve = segment;
                 } else {
-                    pool.alloc.free(segment.bytes);
+                    pool.gpa.free(segment.bytes);
                 }
             }
         }
@@ -147,7 +147,7 @@ fn BlockPoolType(comptime config: BlockPoolConfig) type {
                 .capacity = 0,
                 .n_free = 0,
                 .free = null,
-                .bytes = try pool.alloc.alloc(u8, block_size * (n_new + 1)),
+                .bytes = try pool.gpa.alloc(u8, block_size * (n_new + 1)),
             };
             var ptr = @intFromPtr(segment.bytes.ptr);
             for (0..n_new) |_| {

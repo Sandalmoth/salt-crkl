@@ -146,7 +146,7 @@ pub const UntypedAggregateQueue = struct {
         };
     }
 
-    pub fn release(aggregate_queue: *UntypedAggregateQueue, sub_queue: *SubQueue) void {
+    pub fn submit(aggregate_queue: *UntypedAggregateQueue, sub_queue: *SubQueue) void {
         // ideally this should be lock-free and made so we can read concurrently
         aggregate_queue.mutex.lock();
         defer aggregate_queue.mutex.unlock();
@@ -221,8 +221,8 @@ test "aggregate queue fuzz" {
             }
         }
 
-        aq.release(&q0);
-        aq.release(&q1);
+        aq.submit(&q0);
+        aq.submit(&q1);
 
         var ref: u32 = 0;
         while (aq.pop(u32)) |x| {

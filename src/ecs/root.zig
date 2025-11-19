@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const BlockPool = @import("block_pool.zig").BlockPool;
+const UntypedAggregateQueue = @import("aggregate_queue.zig").UntypedAggregateQueue;
 
 const log = std.log.scoped(.ecs);
 
@@ -261,7 +262,10 @@ pub fn Context(comptime Spec: type) type {
                     return view.page.getOptional(c, view.index);
                 }
 
-                pub fn getOptionalPtr(view: _EntityView, comptime c: Component) ?*ComponentType(c) {
+                pub fn getOptionalPtr(
+                    view: _EntityView,
+                    comptime c: Component,
+                ) ?*ComponentType(c) {
                     return view.page.getOptionalPtr(c, view.index);
                 }
 
@@ -283,13 +287,49 @@ pub fn Context(comptime Spec: type) type {
         pub const World = struct {
             const cache_size = 32;
 
-            rng: std.Random.DefaultPrng,
+            context: *Context,
 
-            pages: std.MultiArrayList(PageInfo), // first cache_size slots form fifo cache
-            map: std.AutoHashMap(Key, EntityView(.{})),
+            cache_rng_state: u64,
+            pages: std.MultiArrayList(PageInfo), // first cache_size slots form cache
+            map: std.AutoHashMapUnmanaged(Key, EntityView(.{})),
+
+            create_queue: UntypedAggregateQueue,
+            destroy_queue: UntypedAggregateQueue,
+            insert_queues: std.EnumArray(Component, UntypedAggregateQueue),
+            remove_queues: std.EnumArray(Component, UntypedAggregateQueue),
+
+            pub fn destroy(world: *World) void {
+                world.pages.deinit(world.context.pool.gpa);
+                world.map.deinit(world.context.pool.gpa);
+                world.create_queue.deinit();
+                world.destroy_queue.deinit();
+                var it_insert = world.insert_queues.iterator();
+                while (it_insert.next()) |kv| kv.value.deinit();
+                var it_remove = world.remove_queues.iterator();
+                while (it_remove.next()) |kv| kv.value.deinit();
+                world.pool.gpa.destroy(world);
+            }
         };
 
         keygen: KeyGenerator,
         pool: BlockPool,
+
+        pub fn createWorld(context: *_Context) !*World {
+            const world = try context.pool.gpa.create(World);
+            world.context = context;
+            world.cache_rng_state = @intFromEnum(context.keygen.next()); // use as random number
+            world.pages = .empty;
+            world.map = .empty;
+            const empty_queue = UntypedAggregateQueue.init(context.pool); // POD when empty
+            world.create_queue = empty_queue;
+            world.destroy_queue = empty_queue;
+            world.insert_queues = std.EnumArray(Component, UntypedAggregateQueue)
+                .initFill(empty_queue);
+            world.remove_queues = std.EnumArray(Component, UntypedAggregateQueue)
+                .initFill(empty_queue);
+            return world;
+        }
     };
 }
+
+// 0x9e3779b97f4a7c55;
