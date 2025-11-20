@@ -462,6 +462,74 @@ pub fn Context(comptime Spec: type) type {
             }
 
             // maybe have a mutex-protected direct push to the queues for convenience
+
+            pub fn resolveQueues(world: *World) !void {
+                while (world.create_queue.peek(CreateQueue.CreateQueueEntry)) |q| {
+                    try world.map.ensureUnusedCapacity(world.context.pool.gpa, 1);
+                    var set = ComponentSet.initEmpty();
+                    inline for (std.meta.fields(Record), 0..) |field, i| {
+                        if (@field(q.template, field.name) != null) set.insert(
+                            @as(Component, @enumFromInt(i)),
+                        );
+                    }
+                    const page = try world.getPage(set);
+                    const index = page.append(q.key, q.record);
+                    world.map.putAssumeCapacity(q.key, .{ .index = index, .page = page });
+                    _ = world.create_queue.pop(CreateQueue.CreateQueueEntry);
+                }
+
+                while (world.destroy_queue.peek(Key)) |q| {
+                    const location = world.map.get(q.key) orelse continue;
+                    world.map.remove(q.key);
+                    const moved = location.page.erase(location.index);
+                    if (moved != .nil) world.map.putAssumeCapacity(
+                        moved,
+                        .{ location.page, location.index },
+                    ); // overwrites, hence there is capacity by definition
+                    _ = world.destroy_queue.pop(Key);
+                }
+
+                inline for (0..n_components) |i| {
+                    const c: Component = @enumFromInt(i);
+                    const C = ComponentType(c);
+                    const insert_queue = world.insert_queues.getPtr(c);
+                    const remove_queue = world.remove_queues.getPtr(c);
+
+                    while (insert_queue.peek(InsertQueue(c).InsertQueueEntry)) |q| {
+                        const location = world.map.get(q.key) orelse continue;
+                        if (location.page.hasComponent(C)) continue; // NOTE double insert is noop
+                        var set = location.page.componentSet();
+                        set.insert(c);
+                        const page = try world.getPage(set);
+                        var record = location.record();
+                        @field(record, @tagName(c)) = q.value;
+                        const index = page.append(q.key, record);
+                        world.map.putAssumeCapacity(q.key, .{ .page = page, .index = index });
+                        const moved = location.page.erase(location.index);
+                        if (moved != .nil) {
+                            world.map.putAssumeCapacity(moved, .{ location.page, location.index });
+                        }
+                        _ = insert_queue.pop(InsertQueue(c).InsertQueueEntry);
+                    }
+
+                    while (remove_queue.peek(Key)) |q| {
+                        const location = world.map.get(q.key) orelse continue;
+                        if (!location.page.hasComponent(C)) continue;
+                        var set = location.page.componentSet();
+                        set.remove(c);
+                        const page = try world.getPage(set);
+                        var record = location.record();
+                        @field(record, @tagName(c)) = null;
+                        const index = page.append(q.key, record);
+                        world.map.putAssumeCapacity(q.key, .{ .page = page, .index = index });
+                        const moved = location.page.erase(location.index);
+                        if (moved != .nil) {
+                            world.map.putAssumeCapacity(moved, .{ location.page, location.index });
+                        }
+                        _ = remove_queue.pop(Key);
+                    }
+                }
+            }
         };
 
         keygen: KeyGenerator,
