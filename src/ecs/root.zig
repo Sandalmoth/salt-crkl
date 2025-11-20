@@ -237,6 +237,26 @@ pub fn Context(comptime Spec: type) type {
                 const query = raw_query.reify();
 
                 page: *Page,
+
+                pub fn keys(view: _PageView) []Key {
+                    return view.page.header.keys[0..view.page.header.len];
+                }
+
+                pub fn get(
+                    view: _PageView,
+                    comptime component: Component,
+                ) []ComponentType(component) {
+                    comptime std.debug.assert(query.include.contains(component));
+                    return view.page.component(component)[0..view.page.header.len];
+                }
+
+                pub fn getOptional(
+                    view: _PageView,
+                    comptime component: Component,
+                ) ?[]ComponentType(component) {
+                    if (!view.page.hasComponent(component)) return null;
+                    return view.page.component(component)[0..view.page.header.len];
+                }
             };
         }
 
@@ -247,6 +267,10 @@ pub fn Context(comptime Spec: type) type {
 
                 page: *Page,
                 index: usize,
+
+                pub fn key(view: _EntityView) Key {
+                    return view.page.header.keys[view.index];
+                }
 
                 pub fn get(view: _EntityView, comptime c: Component) ComponentType(c) {
                     comptime std.debug.assert(query.include.contains(c));
@@ -278,8 +302,13 @@ pub fn Context(comptime Spec: type) type {
                     return rec;
                 }
 
-                pub fn key(view: _EntityView) Key {
-                    return view.page.header.keys[view.index];
+                pub fn reference(view: _EntityView) Reference {
+                    var ref = Reference{};
+                    inline for (0..n_components) |i| {
+                        const c: Component = @enumFromInt(i);
+                        @field(ref, @tagName(c)) = view.getOptionalPtr(c);
+                    }
+                    return ref;
                 }
             };
         }
@@ -287,16 +316,89 @@ pub fn Context(comptime Spec: type) type {
         pub const World = struct {
             const cache_size = 32;
 
-            context: *Context,
+            const CreateQueue = struct {
+                const CreateQueueEntry = struct {
+                    key: Key,
+                    record: Record,
+                };
 
-            cache_rng_state: u64,
-            pages: std.MultiArrayList(PageInfo), // first cache_size slots form cache
-            map: std.AutoHashMapUnmanaged(Key, EntityView(.{})),
+                keygen: *KeyGenerator,
+                queue: UntypedAggregateQueue.SubQueue,
+
+                pub fn create(queue: *CreateQueue, record: Record) !Key {
+                    const key = queue.keygen.next();
+                    try queue.queue.push(CreateQueueEntry, .{ .key = key, .record = record });
+                    return key;
+                }
+            };
+            const DestroyQueue = struct {
+                queue: UntypedAggregateQueue.SubQueue,
+
+                pub fn destroy(queue: *DestroyQueue, key: Key) !void {
+                    std.debug.assert(key != .nil);
+                    try queue.queue.push(Key, key);
+                }
+            };
+            fn InsertQueue(comptime component: Component) type {
+                return struct {
+                    const Self = @This();
+                    const InsertQueueEntry = struct {
+                        key: Key,
+                        value: ComponentType(component),
+                    };
+
+                    queue: UntypedAggregateQueue.SubQueue,
+
+                    pub fn insert(
+                        queue: *Self,
+                        key: Key,
+                        value: ComponentType(component),
+                    ) !void {
+                        std.debug.assert(key != .nil);
+                        try queue.queue.push(
+                            InsertQueueEntry,
+                            .{ .key = key, .value = value },
+                        );
+                    }
+                };
+            }
+            const RemoveQueue = struct {
+                const Self = @This();
+
+                queue: UntypedAggregateQueue.SubQueue,
+
+                pub fn remove(queue: *Self, key: Key) !void {
+                    std.debug.assert(key != .nil);
+                    try queue.queue.push(Key, key);
+                }
+            };
+
+            context: *Context,
 
             create_queue: UntypedAggregateQueue,
             destroy_queue: UntypedAggregateQueue,
             insert_queues: std.EnumArray(Component, UntypedAggregateQueue),
             remove_queues: std.EnumArray(Component, UntypedAggregateQueue),
+
+            cache_rng_state: u64,
+            pages: std.MultiArrayList(PageInfo), // first cache_size slots form cache
+            map: std.AutoHashMapUnmanaged(Key, EntityView(.{})),
+
+            pub fn create(context: *_Context) !*World {
+                const world = try context.pool.gpa.create(World);
+                world.context = context;
+                world.cache_rng_state = @intFromEnum(context.keygen.next()); // it's free rng
+                world.pages = .empty;
+                world.map = .empty;
+                const empty_queue = UntypedAggregateQueue.init(context.pool); // POD when empty
+                world.create_queue = empty_queue;
+                world.destroy_queue = empty_queue;
+                world.insert_queues = std.EnumArray(Component, UntypedAggregateQueue)
+                    .initFill(empty_queue);
+                world.remove_queues = std.EnumArray(Component, UntypedAggregateQueue)
+                    .initFill(empty_queue);
+                return world;
+            }
 
             pub fn destroy(world: *World) void {
                 world.pages.deinit(world.context.pool.gpa);
@@ -307,28 +409,63 @@ pub fn Context(comptime Spec: type) type {
                 while (it_insert.next()) |kv| kv.value.deinit();
                 var it_remove = world.remove_queues.iterator();
                 while (it_remove.next()) |kv| kv.value.deinit();
-                world.pool.gpa.destroy(world);
+                world.context.pool.gpa.destroy(world);
             }
+
+            pub fn entity(world: *World, key: Key) ?EntityView(.{}) {
+                return world.map.get(key);
+            }
+
+            // pub fn pageIterator() PageIterator(raw_query) {}
+            // pub fn entityIterator() EntityIterator(raw_query) {}
+
+            pub fn acquireCreateQueue(world: *World) CreateQueue {
+                return .{
+                    .keygen = world.context.keygen,
+                    .queue = world.create_queue.acquire(),
+                };
+            }
+            pub fn submitCreateQueue(world: *World, queue: *CreateQueue) void {
+                world.create_queue.submit(queue.queue);
+            }
+
+            pub fn acquireDestroyQueue(world: *World) DestroyQueue {
+                return .{ .queue = world.destroy_queue.acquire() };
+            }
+            pub fn submitDestroyQueue(world: *World, queue: *DestroyQueue) void {
+                world.destroy_queue.submit(queue.queue);
+            }
+
+            pub fn acquireInsertQueue(
+                world: *World,
+                comptime component: Component,
+            ) InsertQueue(component) {
+                return .{ .queue = world.insert_queues.getPtr(component).acquire() };
+            }
+            pub fn submitInsertQueue(
+                world: *World,
+                comptime component: Component,
+                queue: *InsertQueue(component),
+            ) void {
+                world.insert_queues.getPtr(component).submit(queue.queue);
+            }
+
+            pub fn acquireRemoveQueue(world: *World, comptime component: Component) RemoveQueue {
+                return .{ .queue = world.remove_queues.getPtr(component).acquire() };
+            }
+            pub fn submitRemoveQueue(
+                world: *World,
+                comptime component: Component,
+                queue: *RemoveQueue,
+            ) void {
+                world.remove_queues.getPtr(component).submit(queue.queue);
+            }
+
+            // maybe have a mutex-protected direct push to the queues for convenience
         };
 
         keygen: KeyGenerator,
         pool: BlockPool,
-
-        pub fn createWorld(context: *_Context) !*World {
-            const world = try context.pool.gpa.create(World);
-            world.context = context;
-            world.cache_rng_state = @intFromEnum(context.keygen.next()); // use as random number
-            world.pages = .empty;
-            world.map = .empty;
-            const empty_queue = UntypedAggregateQueue.init(context.pool); // POD when empty
-            world.create_queue = empty_queue;
-            world.destroy_queue = empty_queue;
-            world.insert_queues = std.EnumArray(Component, UntypedAggregateQueue)
-                .initFill(empty_queue);
-            world.remove_queues = std.EnumArray(Component, UntypedAggregateQueue)
-                .initFill(empty_queue);
-            return world;
-        }
     };
 }
 
