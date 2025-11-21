@@ -36,7 +36,7 @@ pub const UntypedAggregateQueue = struct {
 
         fn peek(page: *const Page, comptime T: type) ?T {
             if (page.header.head == page.header.tail) return null;
-            return page.values(T)[page.header.head];
+            return @constCast(page).values(T)[page.header.head];
         }
 
         fn pop(page: *Page, comptime T: type) ?T {
