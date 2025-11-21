@@ -313,65 +313,115 @@ pub fn Context(comptime Spec: type) type {
             };
         }
 
+        fn PageIterator(comptime raw_query: RawQuery) type {
+            return struct {
+                const _PageIterator = @This();
+                const query = raw_query.reify();
+
+                world: *World,
+                cursor: usize,
+
+                pub fn next(it: *_PageIterator) ?PageView(raw_query) {
+                    while (it.cursor < it.world.pages.len) {
+                        const page = it.world.pages.items(.page)[it.cursor];
+                        const set = it.world.pages.items(.set)[it.cursor];
+                        it.cursor += 1;
+                        if (query.include.subsetOf(set) and
+                            query.exclude.intersectWith(set).count() == 0)
+                        {
+                            return .{ .page = page };
+                        }
+                    }
+                    return null;
+                }
+            };
+        }
+
+        fn EntityIterator(comptime raw_query: RawQuery) type {
+            return struct {
+                const _EntityIterator = @This();
+                const query = raw_query.reify();
+
+                page_iterator: PageIterator(raw_query),
+                page: ?*Page,
+                cursor: usize,
+
+                pub fn next(it: *_EntityIterator) ?EntityView(raw_query) {
+                    if (it.page) |page| {
+                        if (it.cursor < page.header.len) {
+                            const index = it.cursor;
+                            it.cursor += 1;
+                            return .{ .page = page, .index = index };
+                        }
+                        it.page = null;
+                    } else {
+                        it.page = (it.page_iterator.next() orelse return null).page;
+                        it.cursor = 0;
+                    }
+                    return it.next();
+                }
+            };
+        }
+
+        const CreateQueue = struct {
+            const CreateQueueEntry = struct {
+                key: Key,
+                record: Record,
+            };
+
+            keygen: *KeyGenerator,
+            queue: UntypedAggregateQueue.SubQueue,
+
+            pub fn create(queue: *CreateQueue, record: Record) !Key {
+                const key = queue.keygen.next();
+                try queue.queue.push(CreateQueueEntry, .{ .key = key, .record = record });
+                return key;
+            }
+        };
+        const DestroyQueue = struct {
+            queue: UntypedAggregateQueue.SubQueue,
+
+            pub fn destroy(queue: *DestroyQueue, key: Key) !void {
+                std.debug.assert(key != .nil);
+                try queue.queue.push(Key, key);
+            }
+        };
+        fn InsertQueue(comptime component: Component) type {
+            return struct {
+                const Self = @This();
+                const InsertQueueEntry = struct {
+                    key: Key,
+                    value: ComponentType(component),
+                };
+
+                queue: UntypedAggregateQueue.SubQueue,
+
+                pub fn insert(
+                    queue: *Self,
+                    key: Key,
+                    value: ComponentType(component),
+                ) !void {
+                    std.debug.assert(key != .nil);
+                    try queue.queue.push(
+                        InsertQueueEntry,
+                        .{ .key = key, .value = value },
+                    );
+                }
+            };
+        }
+        const RemoveQueue = struct {
+            const Self = @This();
+
+            queue: UntypedAggregateQueue.SubQueue,
+
+            pub fn remove(queue: *Self, key: Key) !void {
+                std.debug.assert(key != .nil);
+                try queue.queue.push(Key, key);
+            }
+        };
+
         pub const World = struct {
             const cache_size = 32;
-
-            const CreateQueue = struct {
-                const CreateQueueEntry = struct {
-                    key: Key,
-                    record: Record,
-                };
-
-                keygen: *KeyGenerator,
-                queue: UntypedAggregateQueue.SubQueue,
-
-                pub fn create(queue: *CreateQueue, record: Record) !Key {
-                    const key = queue.keygen.next();
-                    try queue.queue.push(CreateQueueEntry, .{ .key = key, .record = record });
-                    return key;
-                }
-            };
-            const DestroyQueue = struct {
-                queue: UntypedAggregateQueue.SubQueue,
-
-                pub fn destroy(queue: *DestroyQueue, key: Key) !void {
-                    std.debug.assert(key != .nil);
-                    try queue.queue.push(Key, key);
-                }
-            };
-            fn InsertQueue(comptime component: Component) type {
-                return struct {
-                    const Self = @This();
-                    const InsertQueueEntry = struct {
-                        key: Key,
-                        value: ComponentType(component),
-                    };
-
-                    queue: UntypedAggregateQueue.SubQueue,
-
-                    pub fn insert(
-                        queue: *Self,
-                        key: Key,
-                        value: ComponentType(component),
-                    ) !void {
-                        std.debug.assert(key != .nil);
-                        try queue.queue.push(
-                            InsertQueueEntry,
-                            .{ .key = key, .value = value },
-                        );
-                    }
-                };
-            }
-            const RemoveQueue = struct {
-                const Self = @This();
-
-                queue: UntypedAggregateQueue.SubQueue,
-
-                pub fn remove(queue: *Self, key: Key) !void {
-                    std.debug.assert(key != .nil);
-                    try queue.queue.push(Key, key);
-                }
-            };
 
             context: *_Context,
 
@@ -416,8 +466,23 @@ pub fn Context(comptime Spec: type) type {
                 return world.map.get(key);
             }
 
-            // pub fn pageIterator() PageIterator(raw_query) {}
-            // pub fn entityIterator() EntityIterator(raw_query) {}
+            pub fn pageIterator(
+                world: *World,
+                comptime raw_query: RawQuery,
+            ) PageIterator(raw_query) {
+                return .{ .world = world, .cursor = 0 };
+            }
+
+            pub fn entityIterator(
+                world: *World,
+                comptime raw_query: RawQuery,
+            ) EntityIterator(raw_query) {
+                return .{
+                    .page_iterator = world.pageIterator(raw_query),
+                    .page = null,
+                    .cursor = 0,
+                };
+            }
 
             pub fn acquireCreateQueue(world: *World) CreateQueue {
                 return .{
@@ -482,11 +547,21 @@ pub fn Context(comptime Spec: type) type {
                 while (world.destroy_queue.peek(Key)) |q| {
                     const location = world.map.get(q) orelse continue;
                     _ = world.map.remove(q);
-                    const moved = location.page.erase(location.index);
-                    if (moved != .nil) world.map.putAssumeCapacity(
-                        moved,
-                        .{ .page = location.page, .index = location.index },
-                    ); // overwrites, hence there is capacity by definition
+                    if (location.page.header.len > 1) {
+                        const moved = location.page.erase(location.index);
+                        if (moved != .nil) world.map.putAssumeCapacity(
+                            moved,
+                            .{ .page = location.page, .index = location.index },
+                        ); // overwrites, hence there is capacity by definition
+                    } else {
+                        // page is empty, destroy entirely
+                        for (world.pages.items(.page), 0..) |p, i| {
+                            if (p == location.page) {
+                                world.pages.swapRemove(i);
+                                break;
+                            }
+                        }
+                    }
                     _ = world.destroy_queue.pop(Key);
                 }
 
@@ -599,6 +674,9 @@ test "basic create insert remove destroy functionality" {
     world.submitCreateQueue(&create_queue);
     try world.resolveQueues();
 
+    // var it = world.entityIterator(.{});
+    // while (it.next()) |e| std.debug.print("{} {}\n", .{ e.key(), e.record() });
+
     try std.testing.expectEqual(null, world.entity(e0).?.getOptional(.x));
     try std.testing.expectEqual(null, world.entity(e0).?.getOptional(.y));
     try std.testing.expectEqual(1, world.entity(e1).?.getOptional(.x).?);
@@ -626,6 +704,9 @@ test "basic create insert remove destroy functionality" {
     world.submitRemoveQueue(.y, &y_remove_queue);
     try world.resolveQueues();
 
+    // it = world.entityIterator(.{});
+    // while (it.next()) |e| std.debug.print("{} {}\n", .{ e.key(), e.record() });
+
     try std.testing.expectEqual(99, world.entity(e0).?.getOptional(.x).?);
     try std.testing.expectEqual(99.5, world.entity(e0).?.getOptional(.y).?);
     try std.testing.expectEqual(null, world.entity(e1).?.getOptional(.x));
@@ -642,6 +723,9 @@ test "basic create insert remove destroy functionality" {
     try destroy_queue.destroy(e3);
     world.submitDestroyQueue(&destroy_queue);
     try world.resolveQueues();
+
+    // it = world.entityIterator(.{});
+    // while (it.next()) |e| std.debug.print("{} {}\n", .{ e.key(), e.record() });
 
     try std.testing.expectEqual(null, world.entity(e0));
     try std.testing.expectEqual(null, world.entity(e1));
