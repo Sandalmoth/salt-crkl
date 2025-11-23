@@ -19,8 +19,13 @@ pub fn build(b: *std.Build) void {
             .imports = &.{},
         }),
     });
+    _ = pl_exe;
 
-    b.installArtifact(pl_exe);
+    const ecs = b.addModule("ecs", .{
+        .root_source_file = b.path("src/ecs/root.zig"),
+        .target = target,
+    });
+    _ = ecs;
 }
 
 // // Although this function looks imperative, it does not perform the build

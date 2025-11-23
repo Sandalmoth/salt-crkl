@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const BlockPool = @import("block_pool.zig").BlockPool;
-const UntypedAggregateQueue = @import("aggregate_queue.zig").UntypedAggregateQueue;
+pub const UntypedAggregateQueue = @import("aggregate_queue.zig").UntypedAggregateQueue;
 
 const log = std.log.scoped(.ecs);
 
@@ -14,9 +14,17 @@ pub const Key = enum(u64) {
         return @truncate(@intFromEnum(key) >> 32); // TODO what are the best bits?
     }
 
-    pub fn hash(key: Key) u64 {
-        return @intFromEnum(key); // it's already random
-    }
+    const HashContext = struct {
+        pub fn hash(ctx: HashContext, key: Key) u64 {
+            _ = ctx;
+            return @intFromEnum(key); // *% 0x9e3779b97f4a7c55; // it's already random
+        }
+
+        pub fn eql(ctx: HashContext, a: Key, b: Key) bool {
+            _ = ctx;
+            return a == b;
+        }
+    };
 };
 
 pub const KeyGenerator = struct {
@@ -432,7 +440,8 @@ pub fn Context(comptime Spec: type) type {
 
             cache_rng_state: u64,
             pages: std.MultiArrayList(PageInfo), // first cache_size slots form cache
-            map: std.AutoHashMapUnmanaged(Key, EntityView(.{})),
+            // map: std.AutoHashMapUnmanaged(Key, EntityView(.{})),
+            map: std.HashMapUnmanaged(Key, EntityView(.{}), Key.HashContext, 80),
 
             pub fn create(context: *_Context) !*World {
                 const world = try context.pool.gpa.create(World);
@@ -654,8 +663,6 @@ pub fn Context(comptime Spec: type) type {
         }
     };
 }
-
-// 0x9e3779b97f4a7c55 = 2**64/phi
 
 test "basic create insert remove destroy functionality" {
     const Ctx = Context(struct { x: i32, y: f32 });
