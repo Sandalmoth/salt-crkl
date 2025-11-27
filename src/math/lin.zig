@@ -3,19 +3,19 @@ const std = @import("std");
 // the linear algebra part here is influenced by zmath
 // zmath is available at https://github.com/zig-gamedev/zmath under the MIT license (2025-11-27)
 
-const Vec32 = @Vector(4, f32);
-const Vec64 = @Vector(4, f64);
+pub const Vec32 = @Vector(4, f32);
+pub const Vec64 = @Vector(4, f64);
 
-const Quat32 = struct {
+pub const Quat32 = struct {
     data: @Vector(4, f32),
 
-    const identity: Quat32 = .{ 0, 0, 0, 1 };
+    pub const identity: Quat32 = .{ 0, 0, 0, 1 };
 };
 
-const Mat32 = struct {
+pub const Mat32 = struct {
     data: [4]@Vector(4, f32),
 
-    const identity: Mat32 = .{
+    pub const identity: Mat32 = .{
         .{ 1, 0, 0, 0 },
         .{ 0, 1, 0, 0 },
         .{ 0, 0, 1, 0 },
