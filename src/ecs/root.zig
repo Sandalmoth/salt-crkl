@@ -2,6 +2,8 @@ const std = @import("std");
 
 pub const BlockPool = @import("block_pool.zig").BlockPool;
 pub const UntypedAggregateQueue = @import("aggregate_queue.zig").UntypedAggregateQueue;
+pub const serialize = @import("serializer.zig").serialize;
+pub const deserialize = @import("serializer.zig").deserialize;
 
 const log = std.log.scoped(.ecs);
 
@@ -11,7 +13,7 @@ pub const Key = enum(u64) {
 
     /// iid random (for a set of keys) byte, could be useful for caching
     pub fn fingerprint(key: Key) u8 {
-        return @truncate(@intFromEnum(key) >> 32); // TODO what are the best bits?
+        return @as(u8, @truncate(@intFromEnum(key) >> 32)) *% 157; // TODO what are the best bits?
     }
 
     const HashContext = struct {
@@ -647,6 +649,34 @@ pub fn World(comptime Spec: type) type {
                 std.mem.swap(ComponentSet, &sets[world.pages.len - 1], &sets[slot]);
             }
             return page;
+        }
+
+        fn serialize(world: *_World, writer: *std.Io.Writer, ctx: anytype) !void {
+            var it = world.entityIterator(.{});
+            while (it.next()) |e| {
+                std.debug.assert(e.key() != .nil);
+                @import("serializer.zig").serialize(writer, ctx, e.key());
+                @import("serializer.zig").serialize(writer, ctx, e.record());
+            }
+            @import("serializer.zig").serialize(writer, ctx, Key.nil);
+            try writer.flush();
+        }
+
+        fn deserialize(world: *_World, reader: *std.Io.Reader, ctx: anytype) !void {
+            var create_queue = world.acquireCreateQueue();
+            while (true) {
+                const old_key = try @import("serializer").deserialize(reader, ctx, Key);
+                if (old_key == .nil) break;
+                const new_key = try create_queue.create(
+                    try @import("serializer.zig").deserialize(reader, ctx, Record),
+                );
+                _ = new_key;
+                // ctx needs to contain a map from old -> new keys
+                // but how can we do that and allow for a custom ctx?
+                // we could just make the deserializer take both a ctx and a map
+                // and then do the new key remap automatically
+            }
+            world.submitCreateQueue(create_queue);
         }
     };
 }

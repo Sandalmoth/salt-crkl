@@ -1,5 +1,8 @@
 const std = @import("std");
 
+const Key = @import("root.zig").Key;
+const KeyGen = @import("root.zig").KeyGen;
+
 pub fn serialize(writer: *std.Io.Writer, ctx: anytype, value: anytype) !void {
     const T: type = @TypeOf(value);
 
