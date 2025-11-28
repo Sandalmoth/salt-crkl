@@ -41,6 +41,14 @@ pub const Mat32 = struct {
     }
 };
 
+pub fn vec2f(x: f32, y: f32) Vec32 {
+    return .{ x, y, 0.0, 0.0 };
+}
+
+pub fn vec2d(x: f64, y: f64) Vec64 {
+    return .{ x, y, 0.0, 0.0 };
+}
+
 pub fn vec3f(x: f32, y: f32, z: f32) Vec32 {
     return .{ x, y, z, 0.0 };
 }
