@@ -123,14 +123,66 @@ const Queue = struct {
     }
 };
 
+pub const Handle = struct {
+    name: [:0]const u8,
+    thread_id: std.Thread.Id,
+    scope_id: i64,
+    start_time: u64,
+    failed_begin: bool,
+
+    pub fn end(handle: Handle) void {
+        if (handle.failed_begin) return;
+        queue.push(.{
+            .name = handle.name.ptr,
+            .thread_id = handle.thread_id,
+            .time = @max(handle.start_time + 1, timer.read()), // guarantee begin-end order
+            .scope_id = -handle.scope_id,
+        }) catch {};
+    }
+};
+
+var timer: AtomicTimer = undefined;
 var queue: Queue = undefined;
+var scope_id: i64 = 1;
 
 pub fn init(gpa: std.mem.Allocator) !void {
+    timer = try .start();
     queue = try .init(gpa);
 }
 
 pub fn deinit() void {
     queue.deinit();
+}
+
+pub fn begin(name: [:0]const u8) Handle {
+    var handle: Handle = .{
+        .name = name,
+        .thread_id = std.Thread.getCurrentId(),
+        .scope_id = @atomicRmw(i64, &scope_id, .Add, 1, .monotonic),
+        .start_time = timer.read(),
+        .failed_begin = false,
+    };
+    queue.push(.{
+        .name = handle.name.ptr,
+        .thread_id = handle.thread_id,
+        .time = handle.start_time,
+        .scope_id = handle.scope_id,
+    }) catch {
+        handle.failed_begin = true;
+        log.debug("allocation failure in begin", .{});
+    };
+    return handle;
+}
+
+pub fn mark(name: [:0]const u8) void {
+    queue.push(.{
+        .name = name.ptr,
+        .thread_id = std.Thread.getCurrentId(),
+        .time = timer.read(),
+        .scope_id = 0,
+    }) catch {
+        log.debug("allocation failure in push", .{});
+    };
 }
 
 test "scratch" {
@@ -143,6 +195,10 @@ test "scratch" {
         try std.testing.expect(ts != null);
     }
     try std.testing.expectEqual(null, queue.pop());
+
+    const h = begin("a");
+    h.end();
+    mark("b");
 }
 
 // const Timestamp = struct {
