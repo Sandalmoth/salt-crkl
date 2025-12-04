@@ -43,7 +43,7 @@ const Queue = struct {
     pool_mutex: std.Thread.Mutex,
     push_mutex: std.Thread.Mutex,
 
-    fn init(gpa: std.mem.Allocator) !Queue {
+    fn init() !Queue {
         var q: Queue = undefined;
         q.pool = .init(gpa);
         q.pool_mutex = .{};
@@ -141,17 +141,67 @@ pub const Handle = struct {
     }
 };
 
+pub const Scope = struct {
+    name: []const u8,
+    start: u64,
+    end: u64,
+    depth: u32,
+    parent: ?*Scope,
+};
+
+pub const Stats = struct {
+    const Data = struct {
+        mean: f32 = 0.0,
+        std: f32 = 0.0,
+        min: f32 = 0.0,
+        max: f32 = 0.0,
+    };
+
+    data: std.MultiArrayList(Data) = .empty,
+    cursor: usize = 0,
+    last_used: usize = 0,
+
+    fn init() !Stats {
+        var s: Stats = .{};
+        try s.data.ensureTotalCapacity(gpa, history);
+        for (0..history) |_| s.data.appendAssumeCapacity(.{});
+        return s;
+    }
+
+    fn deinit(s: *Stats) void {
+        s.data.deinit(gpa);
+        s.* = undefined;
+    }
+};
+
+var gpa: std.mem.Allocator = undefined;
+var history: usize = undefined;
+
 var timer: AtomicTimer = undefined;
 var queue: Queue = undefined;
-var scope_id: i64 = 1;
+var scope_id: i64 = 1; // used to generate a unique id, incremented on every begin
 
-pub fn init(gpa: std.mem.Allocator) !void {
+var scope_pool: std.heap.MemoryPool(Scope) = undefined;
+var stacks: std.AutoHashMapUnmanaged(std.Thread.Id, std.ArrayList(*Scope)) = .empty;
+var scopes: std.AutoHashMapUnmanaged(std.Thread.Id, std.ArrayList(*Scope)) = .empty;
+var stats: std.StringHashMapUnmanaged(Stats) = .empty;
+
+// so stats is a bit tricky to store?
+// for each name (used for begin/end) we want to
+// store the past N stats, preferably in one contiguous array per stat
+// but if some name hasn't been used in the last N frames, i guess we should remove it
+
+pub fn init(_gpa: std.mem.Allocator, _history: usize) !void {
+    gpa = _gpa;
+    history = _history;
     timer = try .start();
-    queue = try .init(gpa);
+    queue = try .init();
+    scope_pool = .init(_gpa);
 }
 
 pub fn deinit() void {
     queue.deinit();
+    scope_pool.deinit();
 }
 
 pub fn begin(name: [:0]const u8) Handle {
@@ -186,7 +236,7 @@ pub fn mark(name: [:0]const u8) void {
 }
 
 test "scratch" {
-    try init(std.testing.allocator);
+    try init(std.testing.allocator, 100);
     defer deinit();
 
     for (0..100_000) |_| try queue.push(undefined);
