@@ -147,14 +147,17 @@ pub const Scope = struct {
     end: u64,
     depth: u32,
     parent: ?*Scope,
+    id: i64,
 };
 
 pub const Stats = struct {
     const Data = struct {
-        mean: f32 = 0.0,
+        mean: f32 = std.math.nan(f32),
         std: f32 = 0.0,
-        min: f32 = 0.0,
-        max: f32 = 0.0,
+        min: f32 = std.math.inf(f32),
+        max: f32 = -std.math.inf(f32),
+        total: f32 = 0.0,
+        count: f32 = 0.0,
     };
 
     data: std.MultiArrayList(Data) = .empty,
@@ -183,8 +186,8 @@ var scope_id: i64 = 1; // used to generate a unique id, incremented on every beg
 
 var scope_pool: std.heap.MemoryPool(Scope) = undefined;
 var stacks: std.AutoHashMapUnmanaged(std.Thread.Id, std.ArrayList(*Scope)) = .empty;
-var scopes: std.AutoHashMapUnmanaged(std.Thread.Id, std.ArrayList(*Scope)) = .empty;
-var stats: std.StringHashMapUnmanaged(Stats) = .empty;
+pub var timelines: std.AutoHashMapUnmanaged(std.Thread.Id, std.ArrayList(*Scope)) = .empty;
+pub var stats: std.StringHashMapUnmanaged(Stats) = .empty;
 
 // so stats is a bit tricky to store?
 // for each name (used for begin/end) we want to
@@ -202,6 +205,18 @@ pub fn init(_gpa: std.mem.Allocator, _history: usize) !void {
 pub fn deinit() void {
     queue.deinit();
     scope_pool.deinit();
+
+    var it_timelines = timelines.iterator();
+    while (it_timelines.next()) |kv| kv.value_ptr.deinit(gpa);
+    timelines.deinit(gpa);
+
+    var it_stacks = stacks.iterator();
+    while (it_stacks.next()) |kv| kv.value_ptr.deinit(gpa);
+    stacks.deinit(gpa);
+
+    var it_stats = stats.iterator();
+    while (it_stats.next()) |kv| kv.value_ptr.deinit();
+    stats.deinit(gpa);
 }
 
 pub fn begin(name: [:0]const u8) Handle {
@@ -219,7 +234,7 @@ pub fn begin(name: [:0]const u8) Handle {
         .scope_id = handle.scope_id,
     }) catch {
         handle.failed_begin = true;
-        log.debug("allocation failure in begin", .{});
+        log.debug("allocation failure in begin, timestamp discarded", .{});
     };
     return handle;
 }
@@ -231,250 +246,133 @@ pub fn mark(name: [:0]const u8) void {
         .time = timer.read(),
         .scope_id = 0,
     }) catch {
-        log.debug("allocation failure in push", .{});
+        log.debug("allocation failure in mark, timestamp discarded", .{});
     };
 }
 
-test "scratch" {
-    try init(std.testing.allocator, 100);
-    defer deinit();
+pub fn beginFrame() !void {
+    // this function allocates quite a lot with the timelines especially
+    // should be no big deal but could be improved
 
-    for (0..100_000) |_| try queue.push(undefined);
-    for (0..100_000) |_| {
-        const ts = queue.pop();
-        try std.testing.expect(ts != null);
+    // delete all the old scopes
+    var it_timelines = timelines.iterator();
+    while (it_timelines.next()) |kv| {
+        for (kv.value_ptr.items) |scope| scope_pool.destroy(scope);
+        kv.value_ptr.deinit(gpa);
     }
-    try std.testing.expectEqual(null, queue.pop());
+    timelines.clearRetainingCapacity();
 
-    const h = begin("a");
-    h.end();
-    mark("b");
+    // parse the timestamp stream into a hierarchy of timed scopes and marks
+    while (queue.pop()) |ts| {
+        const stack = blk: {
+            const result = try stacks.getOrPut(gpa, ts.thread_id);
+            if (!result.found_existing) result.value_ptr.* = .empty;
+            break :blk result.value_ptr;
+        };
+        const timeline = blk: {
+            const result = try timelines.getOrPut(gpa, ts.thread_id);
+            if (!result.found_existing) result.value_ptr.* = .empty;
+            break :blk result.value_ptr;
+        };
+
+        if (ts.scope_id == 0) {
+            // just append the marker to the timeline
+            const scope = try scope_pool.create();
+            scope.* = .{
+                .name = std.mem.span(ts.name),
+                .start = ts.time,
+                .end = ts.time,
+                .depth = @intCast(stack.items.len),
+                .parent = null,
+                .id = ts.scope_id,
+            };
+            try timeline.append(gpa, scope);
+            continue;
+        }
+
+        const top = stack.getLastOrNull();
+        if (top == null or top.?.id != -ts.scope_id) {
+            // open new scope
+            if (top != null) std.debug.assert(top.?.id > 0);
+            const scope = try scope_pool.create();
+            scope.* = .{
+                .name = std.mem.span(ts.name),
+                .start = ts.time,
+                .end = undefined,
+                .depth = @intCast(stack.items.len),
+                .parent = top,
+                .id = ts.scope_id,
+            };
+            try stack.append(gpa, scope);
+        } else {
+            // close scope
+            std.debug.assert(top.?.id > 0);
+            std.debug.assert(ts.scope_id < 0);
+            top.?.end = ts.time;
+            _ = stack.pop();
+            try timeline.append(gpa, top.?);
+        }
+    }
+
+    // for each scope, compute stats
+    var it_stats = stats.iterator();
+    while (it_stats.next()) |kv| {
+        kv.value_ptr.cursor = (kv.value_ptr.cursor + 1) % history;
+        kv.value_ptr.last_used += 1;
+        kv.value_ptr.data.set(kv.value_ptr.cursor, .{});
+    }
+
+    it_timelines = timelines.iterator();
+    while (it_timelines.next()) |kv| {
+        for (kv.value_ptr.items) |scope| {
+            if (scope.id == 0) continue; // duration stats don't make sense for markers
+            var stat = blk: {
+                const result = try stats.getOrPut(gpa, scope.name);
+                if (!result.found_existing) result.value_ptr.* = try .init();
+                break :blk result.value_ptr;
+            };
+            const data = stat.data.slice();
+            var dt: f32 = @floatFromInt(scope.end - scope.start);
+            dt *= 1e-6; // convert to ms
+            data.items(.count)[stat.cursor] += 1.0;
+            data.items(.total)[stat.cursor] += dt;
+            data.items(.std)[stat.cursor] += dt * dt;
+            data.items(.max)[stat.cursor] = @max(data.items(.max)[stat.cursor], dt);
+            data.items(.min)[stat.cursor] = @min(data.items(.min)[stat.cursor], dt);
+        }
+    }
+
+    it_stats = stats.iterator();
+    while (it_stats.next()) |kv| {
+        const cursor = kv.value_ptr.cursor;
+        const data = kv.value_ptr.data.slice();
+        const mean = data.items(.total)[cursor] / data.items(.count)[cursor];
+        data.items(.mean)[cursor] = mean;
+        data.items(.std)[cursor] = @sqrt(
+            @max(data.items(.std)[cursor] / data.items(.count)[cursor] - mean * mean, 0.0),
+        );
+    }
 }
 
-// const Timestamp = struct {
-//     name: [*:0]const u8,
-//     time: u64,
-//     thread_id: std.Thread.Id,
-//     scope_id: i64,
-
-//     fn lessThan(ctx: void, a: Timestamp, b: Timestamp) bool {
-//         _ = ctx;
-//         if (a.thread_id == b.thread_id) return a.time < b.time;
-//         return a.thread_id < b.thread_id;
-//     }
-// };
-
-// const Frame = struct {
-//     const Segment = struct {
-//         prev: ?*Segment,
-//         next: ?*Segment,
-//         cursor: usize,
-//         timestamps: [1024]Timestamp, // geometric growth would probably be better
-//     };
-
-//     const Scope = struct {
-//         start: u64,
-//         end: u64,
-//         depth: u32,
-//         parent: u32,
-//         name: []const u8,
-//         id: i64,
-//         thread_id: std.Thread.Id,
-//     };
-
-//     arena_struct: std.heap.ArenaAllocator,
-//     segment: *Segment,
-//     mutex: std.Thread.Mutex,
-
-//     timestamps: std.ArrayList(Timestamp), // sorted with unpaired bedings/ends removed
-//     scopes: std.ArrayList(Frame.Scope), // sorted by thread id
-
-//     fn reset(frame: *Frame) !void {
-//         _ = frame.arena_struct.reset(.retain_capacity);
-//         frame.segment = try frame.arena_struct.allocator().create(Segment);
-//         frame.segment.prev = null;
-//         frame.segment.next = null;
-//         frame.segment.cursor = 0;
-//     }
-
-//     fn append(frame: *Frame, timestamp: Timestamp) !void {
-//         const segment = @atomicLoad(*Segment, &frame.segment, .acquire);
-//         const index = @atomicRmw(usize, &segment.cursor, .Add, 1, .monotonic);
-//         if (index < segment.timestamps.len) {
-//             segment.timestamps[index] = timestamp;
-//             return;
-//         }
-
-//         frame.mutex.lock();
-//         defer frame.mutex.unlock();
-
-//         // test if someone else already did the mutex part
-//         const maybe_new_segment = @atomicLoad(*Segment, &frame.segment, .acquire);
-//         if (segment != maybe_new_segment) {
-//             try frame.append(timestamp);
-//             return;
-//         }
-
-//         // we are first, add new segment
-//         const new_segment = try frame.arena_struct.allocator().create(Segment);
-//         segment.prev = new_segment;
-//         new_segment.prev = null;
-//         new_segment.next = segment;
-//         new_segment.cursor = 1;
-//         new_segment.timestamps[0] = timestamp;
-//         @atomicStore(*Segment, &frame.segment, new_segment, .release);
-//     }
-
-//     fn finalize(frame: *Frame) !void {
-//         var n_timestamps: usize = 0;
-//         var walk: *Segment = frame.segment;
-//         while (true) {
-//             n_timestamps += @min(walk.timestamps.len, walk.cursor);
-//             if (walk.next == null) break;
-//             walk = walk.next.?;
-//         }
-
-//         const arena = frame.arena_struct.allocator();
-//         frame.timestamps = try .initCapacity(arena, n_timestamps);
-//         frame.scopes = try .initCapacity(arena, (n_timestamps + 1) / 2);
-//         var stack: std.ArrayList(u32) = try .initCapacity(arena, (n_timestamps + 1) / 2);
-
-//         while (true) {
-//             for (walk.timestamps[0..@min(walk.timestamps.len, walk.cursor)]) |timestamp| {
-//                 frame.timestamps.appendAssumeCapacity(timestamp);
-//             }
-//             if (walk.prev == null) break;
-//             walk = walk.prev.?;
-//         }
-//         std.sort.block(Timestamp, frame.timestamps.items, {}, Timestamp.lessThan);
-//         for (frame.timestamps.items) |timestamp| {
-//             std.debug.print("{}\n", .{timestamp});
-//         }
-
-//         var thread_slice_begin: usize = 0;
-//         while (thread_slice_begin < frame.timestamps.items.len) {
-//             var thread_slice_end: usize = thread_slice_begin;
-//             while (thread_slice_end < frame.timestamps.items.len and
-//                 frame.timestamps.items[thread_slice_end].thread_id ==
-//                     frame.timestamps.items[thread_slice_begin].thread_id) : (thread_slice_end += 1)
-//             {}
-
-//             for (frame.timestamps.items[thread_slice_begin..thread_slice_end]) |timestamp| {
-//                 std.debug.print("---\n{}\n", .{timestamp});
-//                 std.debug.print("{any}\n", .{frame.scopes.items});
-//                 std.debug.print("{any}\n", .{stack.items});
-//                 std.debug.assert(timestamp.scope_id != 0);
-//                 if (timestamp.scope_id > 0) {
-//                     const ix_scope: u32 = @intCast(stack.items.len);
-//                     frame.scopes.appendAssumeCapacity(.{
-//                         .depth = @intCast(stack.items.len),
-//                         .start = timestamp.time,
-//                         .end = undefined,
-//                         .name = std.mem.span(timestamp.name),
-//                         .parent = stack.getLastOrNull() orelse @intCast(frame.scopes.items.len),
-//                         .id = timestamp.scope_id,
-//                         .thread_id = timestamp.thread_id,
-//                     });
-//                     stack.appendAssumeCapacity(ix_scope);
-//                 } else {
-//                     const ix_scope = stack.getLastOrNull() orelse {
-//                         log.debug("missing begin scope for timestamp {}", .{timestamp});
-//                         std.debug.print("1\n", .{});
-//                         continue;
-//                     };
-//                     const scope = &frame.scopes.items[ix_scope];
-//                     if (-scope.id != timestamp.scope_id) {
-//                         log.debug("timestamp stack structure is corrupt", .{});
-//                         std.debug.print("2\n", .{});
-//                         continue;
-//                     }
-//                     std.debug.assert(scope.thread_id == timestamp.thread_id);
-//                     scope.end = timestamp.time;
-//                     _ = stack.pop();
-//                 }
-//             }
-//             var it = std.mem.reverseIterator(stack.items);
-//             while (it.next()) |ix_scope| {
-//                 log.debug("missing end scope for scope {}", .{frame.scopes.items[ix_scope]});
-//                 // TODO erase the unclosed scopes but: are they guaranteed to be in order?
-//                 // if not, then erasing becomes very tricky
-//             }
-
-//             thread_slice_begin = thread_slice_end;
-//         }
-//     }
-// };
-
-// pub const Scope = struct {
-//     name: [:0]const u8,
-//     thread_id: std.Thread.Id,
-//     scope_id: i64,
-//     start_time: u64,
-
-//     pub fn end(scope: Scope) void {
-//         frames[cursor].append(.{
-//             .name = scope.name.ptr,
-//             .thread_id = scope.thread_id,
-//             .time = @max(scope.start_time + 1, timer.read()), // guarantee begin-end order
-//             .scope_id = -scope.scope_id,
-//         }) catch {};
-//     }
-// };
-
-// var timer: AtomicTimer = undefined;
-// var frames: []Frame = &.{};
-// var cursor: usize = 0;
-// var scope_id: i64 = 1;
-
-// pub fn init(gpa: std.mem.Allocator, n_frames: usize) !void {
-//     timer = try .start();
-//     frames = try gpa.alloc(Frame, n_frames);
-//     for (0..frames.len) |i| {
-//         frames[i].arena_struct = .init(gpa);
-//         try frames[i].reset();
-//     }
-// }
-
-// pub fn deinit(gpa: std.mem.Allocator) void {
-//     for (0..frames.len) |i| frames[i].arena_struct.deinit();
-//     gpa.free(frames);
-// }
-
-// pub fn begin(name: [:0]const u8) Scope {
-//     const scope: Scope = .{
-//         .name = name,
-//         .thread_id = std.Thread.getCurrentId(),
-//         .scope_id = @atomicRmw(i64, &scope_id, .Add, 1, .monotonic),
-//         .start_time = timer.read(),
-//     };
-//     frames[cursor].append(.{
-//         .name = scope.name.ptr,
-//         .thread_id = scope.thread_id,
-//         .time = scope.start_time,
-//         .scope_id = scope.scope_id,
-//     }) catch {};
-//     return scope;
-// }
-
-// test "basic functionality" {
-//     try init(std.testing.allocator, 100);
-//     defer deinit(std.testing.allocator);
+// test "scratch" {
+//     try init(std.testing.allocator, 10);
+//     defer deinit();
 
 //     const A = struct {
 //         fn a() void {
 //             for (0..2) |_| {
-//                 std.Thread.sleep(100_000_000);
 //                 const scope = begin("a");
 //                 defer scope.end();
+//                 std.Thread.sleep(100_000_000);
 //                 b();
 //             }
 //         }
 
 //         fn b() void {
 //             for (0..2) |_| {
-//                 std.Thread.sleep(10_000_000);
 //                 const scope = begin("b");
 //                 defer scope.end();
+//                 std.Thread.sleep(10_000_000);
 //             }
 //         }
 //     };
@@ -483,20 +381,29 @@ test "scratch" {
 //     A.a();
 //     t0.join();
 
-//     try frames[cursor].finalize();
-//     for (frames[cursor].timestamps.items) |timestamp| {
-//         std.debug.print("{}\n", .{timestamp});
-//     }
-//     for (frames[cursor].scopes.items) |scope| {
-//         std.debug.print("{}\n", .{scope});
+//     const z = begin("z");
+//     try beginFrame();
+//     z.end();
+//     const t1 = try std.Thread.spawn(.{}, A.a, .{});
+//     t1.join();
+
+//     try beginFrame();
+//     try beginFrame();
+
+//     var it = timelines.iterator();
+//     while (it.next()) |kv| {
+//         std.debug.print("--- {} ---\n", .{kv.key_ptr.*});
+//         for (kv.value_ptr.items) |scope| std.debug.print("{}\n", .{scope});
 //     }
 
-//     // var walk: ?*Frame.Segment = frames[cursor].segment;
-//     // while (walk) |segment| {
-//     //     var it = std.mem.reverseIterator(
-//     //         segment.timestamps[0..@min(segment.timestamps.len, segment.cursor)],
-//     //     );
-//     //     while (it.next()) |timestamp| std.debug.print("{}\n", .{timestamp});
-//     //     walk = segment.next;
-//     // }
+//     var it2 = stats.iterator();
+//     while (it2.next()) |kv| {
+//         std.debug.print("--- {s} ---\n", .{kv.key_ptr.*});
+//         std.debug.print("mean {any}\n", .{kv.value_ptr.data.items(.mean)});
+//         std.debug.print("std {any}\n", .{kv.value_ptr.data.items(.std)});
+//         std.debug.print("min {any}\n", .{kv.value_ptr.data.items(.min)});
+//         std.debug.print("max {any}\n", .{kv.value_ptr.data.items(.max)});
+//         std.debug.print("total {any}\n", .{kv.value_ptr.data.items(.total)});
+//         std.debug.print("count {any}\n", .{kv.value_ptr.data.items(.count)});
+//     }
 // }
