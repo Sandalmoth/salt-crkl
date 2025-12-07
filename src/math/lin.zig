@@ -15,12 +15,12 @@ pub const Quat32 = struct {
 pub const Mat32 = struct {
     data: [4]@Vector(4, f32),
 
-    pub const identity: Mat32 = .{
+    pub const identity: Mat32 = .{ .data = .{
         .{ 1, 0, 0, 0 },
         .{ 0, 1, 0, 0 },
         .{ 0, 0, 1, 0 },
         .{ 0, 0, 0, 1 },
-    };
+    } };
 
     pub fn perspective(fovy: f32, aspect: f32, near: f32) Mat32 {
         const s = @sin(0.5 * fovy);
@@ -134,4 +134,9 @@ test "scratch" {
     std.debug.print("{}\n", .{@TypeOf(lengthSq3(a))});
     std.debug.print("{}\n", .{length3(a)});
     std.debug.print("{}\n", .{@TypeOf(length3(a))});
+}
+
+test "identities" {
+    const matrix: Mat32 = .identity;
+    _ = matrix;
 }
