@@ -61,9 +61,13 @@ pub const Mat32 = struct {
         };
     }
 
-    pub fn asArray(mat: Mat32) [16]f32 {
-        const ptr: *[16]f32 = @ptrCast(@alignCast(&mat.data[0]));
-        return ptr.*;
+    pub fn toArray(mat: Mat32) [16]f32 {
+        var result: [16]f32 = undefined;
+        result[0..4].* = mat.data[0];
+        result[4..8].* = mat.data[1];
+        result[8..12].* = mat.data[2];
+        result[12..16].* = mat.data[3];
+        return result;
     }
 };
 
