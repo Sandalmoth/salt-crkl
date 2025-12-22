@@ -155,6 +155,7 @@ pub fn cross(a: anytype, b: anytype) ReturnTypeVectorAB(@TypeOf(a), @TypeOf(b)) 
         a[1] * b[2] - a[2] * b[1],
         a[2] * b[0] - a[0] * b[2],
         a[0] * b[1] - a[1] * b[0],
+        0.0,
     };
 }
 
