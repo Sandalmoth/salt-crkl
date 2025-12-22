@@ -22,6 +22,13 @@ pub const Mat32 = struct {
         .{ 0, 0, 0, 1 },
     } };
 
+    pub const zero: Mat32 = .{ .data = .{
+        .{ 0, 0, 0, 0 },
+        .{ 0, 0, 0, 0 },
+        .{ 0, 0, 0, 0 },
+        .{ 0, 0, 0, 0 },
+    } };
+
     /// right handed, infinite far plane
     pub fn perspective(fovy: f32, aspect: f32, near: f32) Mat32 {
         const s = @sin(0.5 * fovy);
@@ -52,6 +59,11 @@ pub const Mat32 = struct {
             vec4f(d[0], d[1], d[2], 0.0),
             vec4f(0.0, 0.0, 0.0, 1.0),
         };
+    }
+
+    pub fn asArray(mat: Mat32) [16]f32 {
+        const ptr: *[16]f32 = @ptrCast(@alignCast(&mat.data[0]));
+        return ptr.*;
     }
 };
 
@@ -142,6 +154,27 @@ pub fn cross(a: anytype, b: anytype) ReturnTypeVectorAB(@TypeOf(a), @TypeOf(b)) 
     };
 }
 
+fn ReturnTypeMul(A: type, B: type) type {
+    if (A == Mat32 and B == Mat32) return Mat32;
+    @compileError("incompatible types for mul: " ++ @typeName(A) ++ " " ++ @typeName(B));
+}
+pub fn mul(a: anytype, b: anytype) ReturnTypeMul(@TypeOf(a), @TypeOf(b)) {
+    const A = @TypeOf(a);
+    const B = @TypeOf(b);
+    if (A == Mat32 and B == Mat32) {
+        var result: Mat32 = undefined;
+        for (0..4) |i| {
+            for (0..4) |j| {
+                result.data[i][j] = @reduce(
+                    .Add,
+                    a.data[i] * vec4f(b.data[0][j], b.data[1][j], b.data[2][j], b.data[3][j]),
+                );
+            }
+        }
+        return result;
+    } else @compileError("TODO");
+}
+
 test "scratch" {
     const a = vec3f(1, 2, 3);
     const b = vec3f(2, 3, 4);
@@ -162,4 +195,33 @@ test "scratch" {
 test "identities" {
     const matrix: Mat32 = .identity;
     _ = matrix;
+}
+
+test "mul" {
+    // a = np.array([[0, 1, 2, 3], [1, 2, 3, 4], [2, 3, 4, 5], [3, 4, 5, 6]])
+    // b = np.array([[6, 5, 4, 3], [4, 6, 3, 1], [7, 4, 3, 0], [6, 0, 2, 9]])
+    // a @ b
+    // array([[ 36,  14,  15,  28],
+    //        [ 59,  29,  27,  41],
+    //        [ 82,  44,  39,  54],
+    //        [105,  59,  51,  67]])
+
+    const a: Mat32 = .{ .data = .{
+        .{ 0, 1, 2, 3 },
+        .{ 1, 2, 3, 4 },
+        .{ 2, 3, 4, 5 },
+        .{ 3, 4, 5, 6 },
+    } };
+    const b: Mat32 = .{ .data = .{
+        .{ 6, 5, 4, 3 },
+        .{ 4, 6, 3, 1 },
+        .{ 7, 4, 3, 0 },
+        .{ 6, 0, 2, 9 },
+    } };
+    try std.testing.expectEqualDeep(Mat32{ .data = .{
+        .{ 36, 14, 15, 28 },
+        .{ 59, 29, 27, 41 },
+        .{ 82, 44, 39, 54 },
+        .{ 105, 59, 51, 67 },
+    } }, mul(a, b));
 }
