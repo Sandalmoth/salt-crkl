@@ -40,12 +40,12 @@ pub const Mat32 = struct {
 
         const h = c / s;
         const w = h / aspect;
-        return .{
-            vec4f(w, 0.0, 0.0, 0.0),
-            vec4f(0.0, h, 0.0, 0.0),
-            vec4f(0.0, 0.0, 0.0, -1.0),
-            vec4f(0.0, 0.0, near, 0.0),
-        };
+        return .{ .data = .{
+            .{ w, 0, 0, 0 },
+            .{ 0, h, 0, 0 },
+            .{ 0, 0, 0, -1 },
+            .{ 0, 0, near, 0 },
+        } };
     }
 
     /// right handed, camera at origin
@@ -53,12 +53,12 @@ pub const Mat32 = struct {
         const r: Vec32 = normalize3(cross(focus, world_up));
         const u: Vec32 = normalize3(cross(r, focus));
         const d = -normalize3(-focus);
-        return .{
-            vec4f(r[0], r[1], r[2], 0.0),
-            vec4f(u[0], u[1], u[2], 0.0),
-            vec4f(d[0], d[1], d[2], 0.0),
-            vec4f(0.0, 0.0, 0.0, 1.0),
-        };
+        return .{ .data = .{
+            .{ r[0], r[1], r[2], 0 },
+            .{ u[0], u[1], u[2], 0 },
+            .{ d[0], d[1], d[2], 0 },
+            .{ 0, 0, 0, 1 },
+        } };
     }
 
     pub fn toArray(mat: Mat32) [16]f32 {
