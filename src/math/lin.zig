@@ -52,7 +52,7 @@ pub const Mat32 = struct {
     pub fn lookAt(focus: Vec32, world_up: Vec32) Mat32 {
         const r: Vec32 = normalize3(cross(focus, world_up));
         const u: Vec32 = normalize3(cross(r, focus));
-        const d = -normalize3(-focus);
+        const d = normalize3(-focus);
         return .{ .data = .{
             .{ r[0], r[1], r[2], 0 },
             .{ u[0], u[1], u[2], 0 },

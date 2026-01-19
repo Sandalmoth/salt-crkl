@@ -4,6 +4,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const vulkan = b.dependency("vulkan_zig", .{
+        .registry = b.dependency("vulkan_headers", .{}).path("registry/vk.xml"),
+    }).module("vulkan-zig");
+
     const pl_mod = b.addModule("packer_loader", .{
         .root_source_file = b.path("src/packer-loader/root.zig"),
         .target = target,
@@ -38,4 +42,19 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
     _ = profiler;
+
+    const rhi = b.addModule("rhi", .{
+        .root_source_file = b.path("src/rhi/root.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "vulkan", .module = vulkan },
+        },
+    });
+
+    // tests
+    const rhi_tests = b.addTest(.{ .root_module = rhi });
+    rhi_tests.root_module.addImport("vulkan", vulkan);
+
+    const test_step = b.step("test", "Run tests");
+    test_step.dependOn(&b.addRunArtifact(rhi_tests).step);
 }
