@@ -4,10 +4,18 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // dependencies
     const vulkan = b.dependency("vulkan_zig", .{
         .registry = b.dependency("vulkan_headers", .{}).path("registry/vk.xml"),
     }).module("vulkan-zig");
 
+    const sdl_dep = b.dependency("sdl", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const sdl_lib = sdl_dep.artifact("SDL3");
+
+    // libraries
     const pl_mod = b.addModule("packer_loader", .{
         .root_source_file = b.path("src/packer-loader/root.zig"),
         .target = target,
@@ -23,7 +31,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{},
         }),
     });
-    _ = pl_exe;
+    b.installArtifact(pl_exe);
 
     const ecs = b.addModule("ecs", .{
         .root_source_file = b.path("src/ecs/root.zig"),
@@ -50,6 +58,21 @@ pub fn build(b: *std.Build) void {
             .{ .name = "vulkan", .module = vulkan },
         },
     });
+
+    // examples
+    const example_rhi_exe = b.addExecutable(.{
+        .name = "example_rhi",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/examples/rhi/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "rhi", .module = rhi },
+            },
+        }),
+    });
+    example_rhi_exe.root_module.linkLibrary(sdl_lib);
+    b.installArtifact(example_rhi_exe);
 
     // tests
     const rhi_tests = b.addTest(.{ .root_module = rhi });
