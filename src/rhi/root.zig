@@ -70,6 +70,15 @@ pub const Context = struct {
 
     surface: vk.SurfaceKHR,
 
+    graphics_queue: vk.QueueProxy,
+    graphics_queue_family: u32,
+    async_compute_queue: vk.QueueProxy,
+    async_compute_queue_family: u32,
+    transfer_queue: vk.QueueProxy,
+    transfer_queue_family: u32,
+    present_queue: vk.QueueProxy,
+    present_queue_family: u32,
+
     pub fn init(
         gpa: std.mem.Allocator,
         platform: Platform,
@@ -306,21 +315,26 @@ pub const Context = struct {
         vkd.* = .load(device_handle, ctx.instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
         ctx.device = .init(device_handle, vkd);
 
-        // const dev = try initializeCandidate(self.instance, candidate);
-        // const vkd = try allocator.create(DeviceWrapper);
-        // errdefer allocator.destroy(vkd);
-        // vkd.* = DeviceWrapper.load(dev, self.instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
-        // self.dev = Device.init(dev, vkd);
-        // errdefer self.dev.destroyDevice(null);
-
-        // physical_device = candidate.device;
-        // physical_device_properties = candidate.properties;
-        // physical_device_memory_properties = candidate.memory_properties;
-        // physical_device_features = candidate.features;
-        // graphics_queue = Queue.init(candidate.graphics_queue_family.?);
-        // async_compute_queue = Queue.init(candidate.async_compute_queue_family.?);
-        // transfer_queue = Queue.init(candidate.transfer_queue_family.?);
-        // present_queue = Queue.init(candidate.present_queue_family.?);
+        ctx.graphics_queue_family = candidate.graphics_queue_family.?;
+        ctx.graphics_queue = .init(
+            ctx.device.getDeviceQueue(ctx.graphics_queue_family, 0),
+            ctx.device.wrapper,
+        );
+        ctx.async_compute_queue_family = candidate.async_compute_queue_family.?;
+        ctx.async_compute_queue = .init(
+            ctx.device.getDeviceQueue(ctx.async_compute_queue_family, 0),
+            ctx.device.wrapper,
+        );
+        ctx.transfer_queue_family = candidate.transfer_queue_family.?;
+        ctx.transfer_queue = .init(
+            ctx.device.getDeviceQueue(ctx.transfer_queue_family, 0),
+            ctx.device.wrapper,
+        );
+        ctx.present_queue_family = candidate.present_queue_family.?;
+        ctx.present_queue = .init(
+            ctx.device.getDeviceQueue(ctx.present_queue_family, 0),
+            ctx.device.wrapper,
+        );
     }
 
     fn deinitDevice(ctx: *Context) void {
