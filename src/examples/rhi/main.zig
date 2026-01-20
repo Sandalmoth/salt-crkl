@@ -29,8 +29,9 @@ pub fn main() !void {
     var ctx: rhi.Context = try .init(gpa, .{
         .getInstanceProcAddress = &getInstanceProcAddress,
         .getRequiredInstanceExtensions = &getRequiredInstanceExtensions,
-        .createWindowSurface = undefined,
+        .createWindowSurface = &createWindowSurface,
         .getFramebufferSize = undefined,
+        .window = window,
     }, "example_rhi");
     defer ctx.deinit();
 
@@ -70,4 +71,14 @@ fn getRequiredInstanceExtensions() ![]const [*:0]const u8 {
     }
     if (n == 0) return &.{};
     return @ptrCast(exts[0..n]);
+}
+
+fn createWindowSurface(instance: rhi.vk.Instance, window: *anyopaque) !rhi.vk.SurfaceKHR {
+    const instance_ptr: ?*sdl.c.struct_VkInstance_T = @ptrFromInt(@intFromEnum(instance));
+    var surface_ptr: ?*sdl.c.struct_VkSurfaceKHR_T = null;
+    if (!sdl.c.SDL_Vulkan_CreateSurface(@ptrCast(window), instance_ptr, null, &surface_ptr)) {
+        std.log.err("SDL_Vulkan_CreateSurface: {s}", .{sdl.getError()});
+        return error.Sdl;
+    }
+    return @enumFromInt(@intFromPtr(surface_ptr));
 }

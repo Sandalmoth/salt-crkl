@@ -23,35 +23,42 @@ const device_extensions = [_][*:0]const u8{
 const debug_device_extensions = [_][*:0]const u8{};
 
 const device_features = vk.PhysicalDeviceFeatures{
-    .multi_draw_indirect = vk.TRUE,
-    .draw_indirect_first_instance = vk.TRUE,
+    .multi_draw_indirect = .true,
+    .draw_indirect_first_instance = .true,
+    .shader_int_64 = .true,
 };
 const device_features_1_1 = vk.PhysicalDeviceVulkan11Features{
     .p_next = @ptrCast(@constCast(&device_features_1_2)),
-    .shader_draw_parameters = vk.TRUE,
+    .shader_draw_parameters = .true,
 };
 const device_features_1_2 = vk.PhysicalDeviceVulkan12Features{
     .p_next = @ptrCast(@constCast(&device_features_1_3)),
-    .descriptor_indexing = vk.TRUE,
-    .buffer_device_address = vk.TRUE,
+    .buffer_device_address = .true,
+    .descriptor_binding_partially_bound = .true,
+    .descriptor_binding_sampled_image_update_after_bind = .true,
+    .descriptor_binding_storage_image_update_after_bind = .true,
+    .descriptor_indexing = .true,
+    .runtime_descriptor_array = .true,
 };
 const device_features_1_3 = vk.PhysicalDeviceVulkan13Features{
-    .dynamic_rendering = vk.TRUE,
-    .synchronization_2 = vk.TRUE,
+    .dynamic_rendering = .true,
+    .synchronization_2 = .true,
+    .maintenance_4 = .true,
 };
 
 const swapchain_surface_formats = [_]vk.SurfaceFormatKHR{
     // ranking of preferred formats for the swapchain surfaces
     // if none are present, the first format from getPhysicalDeviceSurfaceFormats is used
-    .{ .format = vk.Format.r8g8b8a8_srgb, .color_space = vk.ColorSpaceKHR.srgb_nonlinear_khr },
     .{ .format = vk.Format.b8g8r8a8_srgb, .color_space = vk.ColorSpaceKHR.srgb_nonlinear_khr },
+    .{ .format = vk.Format.r8g8b8a8_srgb, .color_space = vk.ColorSpaceKHR.srgb_nonlinear_khr },
 };
 
 const Platform = struct {
     getInstanceProcAddress: *const fn (vk.Instance, [*:0]const u8) vk.PfnVoidFunction,
     getRequiredInstanceExtensions: *const fn () anyerror![]const [*:0]const u8,
-    createWindowSurface: *const fn (vk.Instance) anyerror!vk.SurfaceKHR,
+    createWindowSurface: *const fn (vk.Instance, window: *anyopaque) anyerror!vk.SurfaceKHR,
     getFramebufferSize: *const fn () [2]u32,
+    window: *anyopaque,
 };
 
 pub const Context = struct {
@@ -78,6 +85,11 @@ pub const Context = struct {
 
         try ctx.initInstance(arena, platform, app_name);
         errdefer ctx.deinitInstance();
+        try ctx.createSurface(platform);
+        errdefer ctx.destroySurface();
+        const physical_device_candidate = try ctx.pickPhysicalDevice(arena);
+        try ctx.initDevice(arena, physical_device_candidate);
+        errdefer ctx.deinitDevice();
 
         return ctx;
     }
@@ -86,6 +98,8 @@ pub const Context = struct {
         ctx.device.deviceWaitIdle() catch |e| {
             log.warn("Failed deviceWaitIdle in vulkan_context deinit: {}", .{e});
         };
+        ctx.deinitDevice();
+        ctx.destroySurface();
         ctx.deinitInstance();
         ctx.* = undefined;
     }
@@ -178,12 +192,141 @@ pub const Context = struct {
     }
 
     fn createSurface(ctx: *Context, platform: Platform) !void {
-        ctx.surface = try platform.createWindowSurface(ctx.instance.handle);
+        ctx.surface = try platform.createWindowSurface(ctx.instance.handle, platform.window);
     }
 
     fn destroySurface(ctx: *Context) void {
         ctx.instance.destroySurfaceKHR(ctx.surface, null);
         ctx.surface = .null_handle;
+    }
+
+    fn pickPhysicalDevice(ctx: *Context, arena: std.mem.Allocator) !PhysicalDeviceCandidate {
+        const devices = try ctx.instance.enumeratePhysicalDevicesAlloc(arena);
+        var candidates: std.ArrayList(PhysicalDeviceCandidate) =
+            try .initCapacity(arena, devices.len);
+        for (devices) |dev| {
+            const candidate: PhysicalDeviceCandidate =
+                try .init(arena, ctx.instance, ctx.surface, dev);
+            const name = std.mem.sliceTo(&candidate.properties.device_name, 0);
+
+            if (!try candidate.checkExtensionSupport(arena, ctx.instance)) {
+                log.info("Did not pick {s}: Unsupported device extensions", .{name});
+                continue;
+            }
+
+            if (!try candidate.checkFeatureSupport()) {
+                log.info("Did not pick {s}: Unsupported device extensions", .{name});
+                continue;
+            }
+
+            if (candidate.graphics_queue_family == null) {
+                log.info("Did not pick {s}: No graphics queue", .{name});
+                continue;
+            }
+            if (candidate.present_queue_family == null) {
+                log.info("Did not pick {s}: No present queue", .{name});
+                continue;
+            }
+
+            std.debug.assert(candidate.async_compute_queue_family != null);
+            std.debug.assert(candidate.transfer_queue_family != null);
+
+            candidates.appendAssumeCapacity(candidate);
+        }
+
+        if (candidates.items.len == 0) {
+            log.err("No compatible physical device", .{});
+            return error.NoCompatiblePhysicalDevice;
+        }
+        std.sort.insertion(
+            PhysicalDeviceCandidate,
+            candidates.items,
+            {},
+            PhysicalDeviceCandidate.cmp,
+        );
+        log.info(
+            "Selected physical device: {s}",
+            .{std.mem.sliceTo(&candidates.items[0].properties.device_name, 0)},
+        );
+        log.debug(
+            "- Graphics queue family: {}",
+            .{candidates.items[0].graphics_queue_family.?},
+        );
+        log.debug(
+            "- Async compute queue family: {}",
+            .{candidates.items[0].async_compute_queue_family.?},
+        );
+        log.debug("- Transfer queue family: {}", .{candidates.items[0].transfer_queue_family.?});
+        log.debug("- Present queue family: {}", .{candidates.items[0].present_queue_family.?});
+        return candidates.items[0];
+    }
+
+    fn initDevice(
+        ctx: *Context,
+        arena: std.mem.Allocator,
+        candidate: PhysicalDeviceCandidate,
+    ) !void {
+        var queue_create_infos: std.AutoArrayHashMapUnmanaged(u32, vk.DeviceQueueCreateInfo) =
+            .empty;
+        try queue_create_infos.ensureTotalCapacity(arena, 4);
+        const priority: f32 = 1.0;
+        queue_create_infos.putAssumeCapacity(candidate.graphics_queue_family.?, .{
+            .queue_family_index = candidate.graphics_queue_family.?,
+            .queue_count = 1,
+            .p_queue_priorities = @ptrCast(&priority),
+        });
+        queue_create_infos.putAssumeCapacity(candidate.async_compute_queue_family.?, .{
+            .queue_family_index = candidate.async_compute_queue_family.?,
+            .queue_count = 1,
+            .p_queue_priorities = @ptrCast(&priority),
+        });
+        queue_create_infos.putAssumeCapacity(candidate.transfer_queue_family.?, .{
+            .queue_family_index = candidate.transfer_queue_family.?,
+            .queue_count = 1,
+            .p_queue_priorities = @ptrCast(&priority),
+        });
+        queue_create_infos.putAssumeCapacity(candidate.present_queue_family.?, .{
+            .queue_family_index = candidate.present_queue_family.?,
+            .queue_count = 1,
+            .p_queue_priorities = @ptrCast(&priority),
+        });
+
+        const create_info = vk.DeviceCreateInfo{
+            .queue_create_info_count = @intCast(queue_create_infos.count()),
+            .p_queue_create_infos = queue_create_infos.values().ptr,
+            .p_enabled_features = &device_features,
+            .enabled_extension_count = @intCast(device_extensions.len),
+            .pp_enabled_extension_names = @ptrCast(&device_extensions),
+            .p_next = &device_features_1_1,
+        };
+
+        const device_handle = try ctx.instance.createDevice(candidate.device, &create_info, null);
+        const vkd = try ctx.gpa.create(vk.DeviceWrapper);
+        errdefer ctx.gpa.destroy(vkd);
+        vkd.* = .load(device_handle, ctx.instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
+        ctx.device = .init(device_handle, vkd);
+
+        // const dev = try initializeCandidate(self.instance, candidate);
+        // const vkd = try allocator.create(DeviceWrapper);
+        // errdefer allocator.destroy(vkd);
+        // vkd.* = DeviceWrapper.load(dev, self.instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
+        // self.dev = Device.init(dev, vkd);
+        // errdefer self.dev.destroyDevice(null);
+
+        // physical_device = candidate.device;
+        // physical_device_properties = candidate.properties;
+        // physical_device_memory_properties = candidate.memory_properties;
+        // physical_device_features = candidate.features;
+        // graphics_queue = Queue.init(candidate.graphics_queue_family.?);
+        // async_compute_queue = Queue.init(candidate.async_compute_queue_family.?);
+        // transfer_queue = Queue.init(candidate.transfer_queue_family.?);
+        // present_queue = Queue.init(candidate.present_queue_family.?);
+    }
+
+    fn deinitDevice(ctx: *Context) void {
+        ctx.device.destroyDevice(null);
+        ctx.gpa.destroy(ctx.device.wrapper);
+        // physical_device = .null_handle;
     }
 };
 
@@ -203,7 +346,7 @@ const PhysicalDeviceCandidate = struct {
     present_queue_family: ?u32,
 
     fn init(
-        arena_alloc: std.mem.Allocator,
+        arena: std.mem.Allocator,
         instance: vk.InstanceProxy,
         surface: vk.SurfaceKHR,
         dev: vk.PhysicalDevice,
@@ -216,13 +359,13 @@ const PhysicalDeviceCandidate = struct {
             .features_1_1 = .{},
             .features_1_2 = .{},
             .features_1_3 = .{},
-            .graphics_compute_queue_family = null,
+            .graphics_queue_family = null,
             .async_compute_queue_family = null,
             .transfer_queue_family = null,
             .present_queue_family = null,
         };
 
-        var properties2: vk.PhysicalDeviceproperties2 = .{};
+        var properties2: vk.PhysicalDeviceProperties2 = .{ .properties = undefined };
         instance.getPhysicalDeviceProperties2(dev, &properties2);
         candidate.properties = properties2.properties;
 
@@ -230,6 +373,7 @@ const PhysicalDeviceCandidate = struct {
         candidate.features_1_1.p_next = &candidate.features_1_2;
         var features2: vk.PhysicalDeviceFeatures2 = .{
             .p_next = &candidate.features_1_1,
+            .features = undefined,
         };
         instance.getPhysicalDeviceFeatures2(candidate.device, &features2);
         candidate.features = features2.features;
@@ -237,13 +381,14 @@ const PhysicalDeviceCandidate = struct {
         candidate.features_1_2.p_next = null;
         candidate.features_1_3.p_next = null;
 
-        // graphics queue must support graphics and compute
-        // async compute should preferably be compute-only queue, otherwise same as graphics
+        // graphics queue must support graphics (and compute and transfer)
+        // async compute should preferably be compute-only queue (and transfer)
+        //   otherwise same as graphics
         // transfer should preferably be transfer-only queue,
-        //   otherwise same as async compute, otherwise same as graphics
+        //   otherwise same as graphics
         // present queue should preferably be same as graphics
         const queue_families =
-            try instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(dev, arena_alloc);
+            try instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(dev, arena);
         for (queue_families, 0..) |family, i| {
             if (family.queue_flags.graphics_bit) continue;
             if (family.queue_flags.compute_bit) continue;
@@ -259,20 +404,18 @@ const PhysicalDeviceCandidate = struct {
         }
         for (queue_families, 0..) |family, i| {
             if (!family.queue_flags.graphics_bit) continue;
-            if (!family.queue_flags.compute_bit) continue;
             if (try instance.getPhysicalDeviceSurfaceSupportKHR(
                 candidate.device,
                 @intCast(i),
                 surface,
-            ) != vk.TRUE) continue;
+            ) != .true) continue;
             candidate.graphics_queue_family = @intCast(i);
             candidate.present_queue_family = @intCast(i);
         }
         if (candidate.graphics_queue_family == null) {
             for (queue_families, 0..) |family, i| {
                 if (!family.queue_flags.graphics_bit) continue;
-                if (!family.queue_flags.compute_bit) continue;
-                candidate.graphics_compute_queue_family = @intCast(i);
+                candidate.graphics_queue_family = @intCast(i);
             }
         }
         if (candidate.present_queue_family == null) {
@@ -281,15 +424,15 @@ const PhysicalDeviceCandidate = struct {
                     candidate.device,
                     @intCast(i),
                     surface,
-                ) != vk.TRUE) continue;
+                ) != .true) continue;
                 candidate.present_queue_family = @intCast(i);
             }
         }
         if (candidate.async_compute_queue_family == null) {
-            candidate.async_compute_queue_family = candidate.graphics_compute_queue_family;
+            candidate.async_compute_queue_family = candidate.graphics_queue_family;
         }
         if (candidate.transfer_queue_family == null) {
-            candidate.transfer_queue_family = candidate.async_compute_queue_family;
+            candidate.transfer_queue_family = candidate.graphics_queue_family;
         }
 
         return candidate;
@@ -297,13 +440,13 @@ const PhysicalDeviceCandidate = struct {
 
     fn checkExtensionSupport(
         candidate: *const PhysicalDeviceCandidate,
-        arena_alloc: std.mem.Allocator,
+        arena: std.mem.Allocator,
         instance: vk.InstanceProxy,
     ) !bool {
         const available_exts = try instance.enumerateDeviceExtensionPropertiesAlloc(
             candidate.device,
             null,
-            arena_alloc,
+            arena,
         );
 
         for (if (enable_debug)
@@ -332,23 +475,23 @@ const PhysicalDeviceCandidate = struct {
     fn checkFeatureSupport(candidate: *const PhysicalDeviceCandidate) !bool {
         inline for (std.meta.fields(vk.PhysicalDeviceFeatures)) |field| {
             if (field.type != vk.Bool32) continue;
-            if (@field(device_features, field.name) == vk.FALSE) continue;
-            if (@field(candidate.features, field.name) == vk.FALSE) return false;
+            if (@field(device_features, field.name) == .false) continue;
+            if (@field(candidate.features, field.name) == .false) return false;
         }
         inline for (std.meta.fields(vk.PhysicalDeviceVulkan11Features)) |field| {
             if (field.type != vk.Bool32) continue;
-            if (@field(device_features_1_1, field.name) == vk.FALSE) continue;
-            if (@field(candidate.features_1_1, field.name) == vk.FALSE) return false;
+            if (@field(device_features_1_1, field.name) == .false) continue;
+            if (@field(candidate.features_1_1, field.name) == .false) return false;
         }
         inline for (std.meta.fields(vk.PhysicalDeviceVulkan12Features)) |field| {
             if (field.type != vk.Bool32) continue;
-            if (@field(device_features_1_2, field.name) == vk.FALSE) continue;
-            if (@field(candidate.features_1_2, field.name) == vk.FALSE) return false;
+            if (@field(device_features_1_2, field.name) == .false) continue;
+            if (@field(candidate.features_1_2, field.name) == .false) return false;
         }
         inline for (std.meta.fields(vk.PhysicalDeviceVulkan13Features)) |field| {
             if (field.type != vk.Bool32) continue;
-            if (@field(device_features_1_3, field.name) == vk.FALSE) continue;
-            if (@field(candidate.features_1_3, field.name) == vk.FALSE) return false;
+            if (@field(device_features_1_3, field.name) == .false) continue;
+            if (@field(candidate.features_1_3, field.name) == .false) return false;
         }
         return true;
     }
