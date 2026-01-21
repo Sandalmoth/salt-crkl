@@ -46,29 +46,40 @@ const device_features_1_3 = vk.PhysicalDeviceVulkan13Features{
     .maintenance_4 = .true,
 };
 
-const swapchain_surface_formats = [_]vk.SurfaceFormatKHR{
-    // ranking of preferred formats for the swapchain surfaces
-    // if none are present, the first format from getPhysicalDeviceSurfaceFormats is used
-    .{ .format = vk.Format.b8g8r8a8_srgb, .color_space = vk.ColorSpaceKHR.srgb_nonlinear_khr },
-    .{ .format = vk.Format.r8g8b8a8_srgb, .color_space = vk.ColorSpaceKHR.srgb_nonlinear_khr },
-};
-
 const Platform = struct {
     getInstanceProcAddress: *const fn (vk.Instance, [*:0]const u8) vk.PfnVoidFunction,
     getRequiredInstanceExtensions: *const fn () anyerror![]const [*:0]const u8,
     createWindowSurface: *const fn (vk.Instance, window: *anyopaque) anyerror!vk.SurfaceKHR,
-    getFramebufferSize: *const fn () [2]u32,
+    getFramebufferSize: *const fn (window: *anyopaque) anyerror!vk.Extent2D,
     window: *anyopaque,
+};
+
+/// settings may be updated dynamically and will be automatically applied
+const Settings = struct {
+    swapchain_surface_formats: []const vk.SurfaceFormatKHR = &.{
+        // ranking of preferred formats for the swapchain surfaces
+        // if none are present, the first format from getPhysicalDeviceSurfaceFormats is used
+        .{ .format = .b8g8r8a8_srgb, .color_space = .srgb_nonlinear_khr },
+        .{ .format = .r8g8b8a8_srgb, .color_space = .srgb_nonlinear_khr },
+        .{ .format = .a8b8g8r8_srgb_pack32, .color_space = .srgb_nonlinear_khr },
+    },
+    swapchain_present_modes: []const vk.PresentModeKHR = &.{
+        // ranking of preferred formats for the swapchain surfaces
+        // if none are present, .fifo_khr is used
+    },
 };
 
 pub const Context = struct {
     gpa: std.mem.Allocator,
+    platform: Platform,
+    settings: Settings,
 
     base: vk.BaseWrapper,
     instance: vk.InstanceProxy,
     device: vk.DeviceProxy,
 
     surface: vk.SurfaceKHR,
+    physical_device: vk.PhysicalDevice,
 
     graphics_queue: vk.QueueProxy,
     graphics_queue_family: u32,
@@ -79,9 +90,13 @@ pub const Context = struct {
     present_queue: vk.QueueProxy,
     present_queue_family: u32,
 
+    swapchain: Swapchain,
+    old_swapchains: std.ArrayList(Swapchain),
+
     pub fn init(
         gpa: std.mem.Allocator,
         platform: Platform,
+        settings: Settings,
         app_name: [:0]const u8,
     ) !Context {
         var arena_struct: std.heap.ArenaAllocator = .init(gpa);
@@ -90,6 +105,8 @@ pub const Context = struct {
 
         var ctx: Context = undefined;
         ctx.gpa = gpa;
+        ctx.platform = platform;
+        ctx.settings = settings;
         ctx.base = .load(platform.getInstanceProcAddress);
 
         try ctx.initInstance(arena, platform, app_name);
@@ -99,6 +116,9 @@ pub const Context = struct {
         const physical_device_candidate = try ctx.pickPhysicalDevice(arena);
         try ctx.initDevice(arena, physical_device_candidate);
         errdefer ctx.deinitDevice();
+        ctx.old_swapchains = .empty;
+        ctx.swapchain = try .init(&ctx, .null_handle);
+        errdefer ctx.swapchain.deinit(&ctx);
 
         return ctx;
     }
@@ -107,6 +127,9 @@ pub const Context = struct {
         ctx.device.deviceWaitIdle() catch |e| {
             log.warn("Failed deviceWaitIdle in vulkan_context deinit: {}", .{e});
         };
+        for (ctx.old_swapchains.items) |*swapchain| swapchain.deinit(ctx);
+        ctx.old_swapchains.deinit(ctx.gpa);
+        ctx.swapchain.deinit(ctx);
         ctx.deinitDevice();
         ctx.destroySurface();
         ctx.deinitInstance();
@@ -120,7 +143,6 @@ pub const Context = struct {
         app_name: [:0]const u8,
     ) !void {
         const all_layers = if (enable_debug) layers ++ debug_layers else layers;
-        std.debug.print("{}\n", .{ctx.base});
         const available_layers = try ctx.base.enumerateInstanceLayerPropertiesAlloc(arena);
         for (all_layers) |req| {
             const req_name = std.mem.sliceTo(req, 0);
@@ -335,6 +357,8 @@ pub const Context = struct {
             ctx.device.getDeviceQueue(ctx.present_queue_family, 0),
             ctx.device.wrapper,
         );
+
+        ctx.physical_device = candidate.device;
     }
 
     fn deinitDevice(ctx: *Context) void {
@@ -547,6 +571,168 @@ const PhysicalDeviceCandidate = struct {
         }
         if (ha == hb) return null;
         return hb > ha;
+    }
+};
+
+const Swapchain = struct {
+    swapchain: vk.SwapchainKHR,
+    format: vk.SurfaceFormatKHR,
+    extent: vk.Extent2D,
+    images: []vk.Image,
+    views: []vk.ImageView,
+
+    fn init(ctx: *const Context, old_swapchain: vk.SwapchainKHR) !Swapchain {
+        var arena_struct = std.heap.ArenaAllocator.init(ctx.gpa);
+        defer _ = arena_struct.deinit();
+        const arena = arena_struct.allocator();
+
+        const capabilities = try ctx.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(
+            ctx.physical_device,
+            ctx.surface,
+        );
+        const formats = try ctx.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(
+            ctx.physical_device,
+            ctx.surface,
+            arena,
+        );
+        const present_modes = try ctx.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(
+            ctx.physical_device,
+            ctx.surface,
+            arena,
+        );
+
+        log.debug("Creating swapchain", .{});
+        const format = pickSwapchainFormat(ctx.settings, formats);
+        log.debug("  swapchain format:       {} {}", .{ format.format, format.color_space });
+        const present_mode = pickSwapchainPresentMode(ctx.settings, present_modes);
+        log.debug("  swapchain present_mode: {}", .{present_mode});
+        const extent = try getSwapchainExtent(ctx.platform, capabilities);
+        log.debug("  swapchain extent:       {}", .{extent});
+        const count = getSwapchainImageCount(capabilities);
+        log.debug("  swapchain image count:  {}", .{count});
+
+        var create_info = vk.SwapchainCreateInfoKHR{
+            .surface = ctx.surface,
+            .min_image_count = count,
+            .image_format = format.format,
+            .image_color_space = format.color_space,
+            .image_extent = extent,
+            .image_array_layers = 1,
+            .image_usage = .{
+                .color_attachment_bit = true,
+                .transfer_dst_bit = capabilities.supported_usage_flags.transfer_dst_bit,
+            },
+            .image_sharing_mode = .exclusive, // see below, might get set to concurrent
+            .pre_transform = capabilities.current_transform,
+            .composite_alpha = .{ .opaque_bit_khr = true },
+            .present_mode = present_mode,
+            .clipped = .true,
+            .old_swapchain = old_swapchain,
+        };
+        var queue_families: std.AutoArrayHashMapUnmanaged(u32, void) = .empty;
+        try queue_families.ensureTotalCapacity(arena, 2);
+        queue_families.putAssumeCapacity(ctx.graphics_queue_family, {});
+        queue_families.putAssumeCapacity(ctx.present_queue_family, {});
+        if (queue_families.count() > 1) {
+            create_info.image_sharing_mode = .concurrent;
+            create_info.queue_family_index_count = @intCast(queue_families.count());
+            create_info.p_queue_family_indices = queue_families.keys().ptr;
+        }
+        const swapchain = try ctx.device.createSwapchainKHR(&create_info, null);
+        errdefer ctx.device.destroySwapchainKHR(swapchain, null);
+        const swapchain_format = format;
+        const swapchain_extent = extent;
+        const swapchain_images = try ctx.device.getSwapchainImagesAllocKHR(swapchain, ctx.gpa);
+        errdefer ctx.gpa.free(swapchain_images);
+
+        const swapchain_views = try ctx.gpa.alloc(vk.ImageView, swapchain_images.len);
+        errdefer ctx.gpa.free(swapchain_views);
+        for (swapchain_images, 0..) |image, i| {
+            const view_create_info = vk.ImageViewCreateInfo{
+                .image = image,
+                .view_type = .@"2d",
+                .format = swapchain_format.format,
+                .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
+                .subresource_range = .{
+                    .aspect_mask = .{ .color_bit = true },
+                    .base_mip_level = 0,
+                    .level_count = 1,
+                    .base_array_layer = 0,
+                    .layer_count = 1,
+                },
+            };
+            swapchain_views[i] = ctx.device.createImageView(&view_create_info, null) catch |e| {
+                // if we fail, cleanup the views we have created so far
+                var j = i;
+                while (j > 0) : (j -= 1) ctx.device.destroyImageView(swapchain_views[j - 1], null);
+                return e;
+            };
+        }
+
+        return .{
+            .swapchain = swapchain,
+            .format = swapchain_format,
+            .extent = swapchain_extent,
+            .images = swapchain_images,
+            .views = swapchain_views,
+        };
+    }
+
+    fn deinit(swapchain: *Swapchain, ctx: *const Context) void {
+        for (swapchain.views) |view| ctx.device.destroyImageView(view, null);
+        ctx.gpa.free(swapchain.views);
+        ctx.gpa.free(swapchain.images);
+        ctx.device.destroySwapchainKHR(swapchain.swapchain, null);
+        swapchain.* = undefined;
+    }
+
+    fn pickSwapchainFormat(
+        settings: Settings,
+        formats: []vk.SurfaceFormatKHR,
+    ) vk.SurfaceFormatKHR {
+        std.debug.assert(formats.len > 0);
+
+        for (settings.swapchain_surface_formats) |req| {
+            for (formats) |ava| {
+                if (std.meta.eql(req, ava)) return req;
+            }
+        }
+
+        log.warn("None of the requested swapchain surface formats were found", .{});
+        return formats[0];
+    }
+
+    fn pickSwapchainPresentMode(
+        settings: Settings,
+        modes: []vk.PresentModeKHR,
+    ) vk.PresentModeKHR {
+        for (settings.swapchain_present_modes) |req| {
+            for (modes) |ava| {
+                if (req == ava) return req;
+            }
+        }
+        return vk.PresentModeKHR.fifo_khr; // guaranteed support, should be fine not to check
+    }
+
+    fn getSwapchainExtent(platform: Platform, capabilities: vk.SurfaceCapabilitiesKHR) !vk.Extent2D {
+        var extent = try platform.getFramebufferSize(platform.window);
+        extent.width = std.math.clamp(
+            extent.width,
+            capabilities.min_image_extent.width,
+            capabilities.max_image_extent.width,
+        );
+        extent.height = std.math.clamp(
+            extent.height,
+            capabilities.min_image_extent.height,
+            capabilities.max_image_extent.height,
+        );
+        return extent;
+    }
+
+    fn getSwapchainImageCount(capabilities: vk.SurfaceCapabilitiesKHR) u32 {
+        var count = capabilities.min_image_count + 1;
+        if (capabilities.max_image_count > 0) count = @min(count, capabilities.max_image_count);
+        return count;
     }
 };
 

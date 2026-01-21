@@ -21,18 +21,13 @@ pub fn main() !void {
     );
     defer sdl.destroyWindow(window);
 
-    std.debug.print("{*}\n", .{sdl.c.SDL_Vulkan_GetVkGetInstanceProcAddr()});
-    for (try getRequiredInstanceExtensions()) |ext| {
-        std.debug.print("{s}\n", .{std.mem.span(ext)});
-    }
-
     var ctx: rhi.Context = try .init(gpa, .{
         .getInstanceProcAddress = &getInstanceProcAddress,
         .getRequiredInstanceExtensions = &getRequiredInstanceExtensions,
         .createWindowSurface = &createWindowSurface,
-        .getFramebufferSize = undefined,
+        .getFramebufferSize = &getFramebufferSize,
         .window = window,
-    }, "example_rhi");
+    }, .{}, "example_rhi");
     defer ctx.deinit();
 
     main_loop: while (true) {
@@ -81,4 +76,20 @@ fn createWindowSurface(instance: rhi.vk.Instance, window: *anyopaque) !rhi.vk.Su
         return error.Sdl;
     }
     return @enumFromInt(@intFromPtr(surface_ptr));
+}
+
+fn getFramebufferSize(window: *anyopaque) !rhi.vk.Extent2D {
+    // NOTE this is called when (re)creating the swapchain
+    // and SDL_GetWindowSizeInPixels needs to be on main thread in some cases
+    // so, for the platform interface we might need to put some threading restrictions?
+    var width: c_int = undefined;
+    var height: c_int = undefined;
+    if (!sdl.c.SDL_GetWindowSizeInPixels(@ptrCast(window), &width, &height)) {
+        std.log.err("SDL_GetWindowSizeInPixels: {s}", .{sdl.getError()});
+        return error.Sdl;
+    }
+    return .{
+        .width = @intCast(width),
+        .height = @intCast(height),
+    };
 }
