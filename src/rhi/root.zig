@@ -39,12 +39,15 @@ const device_features_1_2 = vk.PhysicalDeviceVulkan12Features{
     .descriptor_binding_storage_image_update_after_bind = .true,
     .descriptor_indexing = .true,
     .runtime_descriptor_array = .true,
+    .timeline_semaphore = .true,
 };
 const device_features_1_3 = vk.PhysicalDeviceVulkan13Features{
     .dynamic_rendering = .true,
     .synchronization_2 = .true,
     .maintenance_4 = .true,
 };
+
+const frames_in_flight = 2;
 
 const Platform = struct {
     getInstanceProcAddress: *const fn (vk.Instance, [*:0]const u8) vk.PfnVoidFunction,
@@ -95,6 +98,8 @@ pub const Context = struct {
     swapchain: Swapchain,
     old_swapchains: std.ArrayList(Swapchain),
 
+    command_pools: [frames_in_flight]vk.CommandPool,
+
     pub fn init(
         gpa: std.mem.Allocator,
         platform: Platform,
@@ -123,6 +128,8 @@ pub const Context = struct {
         // currently that means context creation fails
         ctx.swapchain = try .init(&ctx, .null_handle);
         errdefer ctx.swapchain.deinit(&ctx);
+        try ctx.initFrame();
+        errdefer ctx.deinitFrame();
 
         return ctx;
     }
@@ -131,6 +138,7 @@ pub const Context = struct {
         ctx.device.deviceWaitIdle() catch |e| {
             log.warn("Failed deviceWaitIdle in vulkan_context deinit: {}", .{e});
         };
+        ctx.deinitFrame();
         for (ctx.old_swapchains.items) |*swapchain| swapchain.deinit(ctx);
         ctx.old_swapchains.deinit(ctx.gpa);
         ctx.swapchain.deinit(ctx);
@@ -395,6 +403,31 @@ pub const Context = struct {
         ctx.device.destroyDevice(null);
         ctx.gpa.destroy(ctx.device.wrapper);
         ctx.physical_device = .null_handle;
+    }
+
+    fn initFrame(ctx: *Context) !void {
+        for (0..frames_in_flight) |i| {
+            // NOTE FIXME what if a user is doing off-screen rendering and never presenting
+            // then, there is no natural frame-in-flight transition
+            // so then, when would we clear the command pools?
+            // seems like we'd have to manage individual bufferst instead of doing pool clears?
+            ctx.command_pools[i] = ctx.device.createCommandPool(&.{
+                .flags = .{},
+                .queue_family_index = ctx.queue_families.get(.graphics),
+            }, null) catch |e| {
+                var j = i;
+                while (j > 0) : (j -= 1) {
+                    ctx.device.destroyCommandPool(ctx.command_pools[j - 1], null);
+                }
+                return e;
+            };
+        }
+    }
+
+    fn deinitFrame(ctx: *Context) void {
+        for (0..frames_in_flight) |i| {
+            ctx.device.destroyCommandPool(ctx.command_pools[i], null);
+        }
     }
 };
 

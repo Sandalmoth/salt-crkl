@@ -44,6 +44,10 @@ pub fn main() !void {
 
         std.Thread.sleep(100_000_000);
 
+        // i guess we should make creating image arrays easy
+        // since we cant do the cycle abstraction or it would break the bindless handles i think
+        // const backbuffer = ctx.createTexture(size, format, );
+
         // const command_buffer = ctx.acquireCommandBuffer(.graphics);
         // const pass = command_buffer.beginRenderPass(.{
         //     .color_target = backbuffer[frame_index],
@@ -52,6 +56,10 @@ pub fn main() !void {
         // pass.bindIndexBuffer(index_buffer_handle);
         // pass.drawIndexed(index_count);
         // pass.endAndPresent(backbuffer);
+
+        // lets just write out the code to do an empty present
+        // just to see what needs to be abstracted
+
     }
 }
 
