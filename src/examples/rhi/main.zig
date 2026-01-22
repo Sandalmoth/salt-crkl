@@ -43,6 +43,15 @@ pub fn main() !void {
         std.debug.print("yo\n", .{});
 
         std.Thread.sleep(100_000_000);
+
+        // const command_buffer = ctx.acquireCommandBuffer(.graphics);
+        // const pass = command_buffer.beginRenderPass(.{
+        //     .color_target = backbuffer[frame_index],
+        // });
+        // pass.bindPipeline(pipeline_handle);
+        // pass.bindIndexBuffer(index_buffer_handle);
+        // pass.drawIndexed(index_count);
+        // pass.endAndPresent(backbuffer);
     }
 }
 

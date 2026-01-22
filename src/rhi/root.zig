@@ -69,6 +69,13 @@ const Settings = struct {
     },
 };
 
+pub const QueueType = enum {
+    graphics,
+    async_compute,
+    transfer,
+    present,
+};
+
 pub const Context = struct {
     gpa: std.mem.Allocator,
     platform: Platform,
@@ -81,14 +88,9 @@ pub const Context = struct {
     surface: vk.SurfaceKHR,
     physical_device: vk.PhysicalDevice,
 
-    graphics_queue: vk.QueueProxy,
-    graphics_queue_family: u32,
-    async_compute_queue: vk.QueueProxy,
-    async_compute_queue_family: u32,
-    transfer_queue: vk.QueueProxy,
-    transfer_queue_family: u32,
-    present_queue: vk.QueueProxy,
-    present_queue_family: u32,
+    queues: std.EnumArray(QueueType, vk.QueueProxy),
+    queue_families: std.EnumArray(QueueType, u32),
+    queue_semaphores: std.EnumArray(QueueType, vk.Semaphore),
 
     swapchain: Swapchain,
     old_swapchains: std.ArrayList(Swapchain),
@@ -117,6 +119,8 @@ pub const Context = struct {
         try ctx.initDevice(arena, physical_device_candidate);
         errdefer ctx.deinitDevice();
         ctx.old_swapchains = .empty;
+        // QUESTION what if the window starts out minimized?
+        // currently that means context creation fails
         ctx.swapchain = try .init(&ctx, .null_handle);
         errdefer ctx.swapchain.deinit(&ctx);
 
@@ -337,34 +341,60 @@ pub const Context = struct {
         vkd.* = .load(device_handle, ctx.instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
         ctx.device = .init(device_handle, vkd);
 
-        ctx.graphics_queue_family = candidate.graphics_queue_family.?;
-        ctx.graphics_queue = .init(
-            ctx.device.getDeviceQueue(ctx.graphics_queue_family, 0),
+        ctx.queue_families.set(.graphics, candidate.graphics_queue_family.?);
+        ctx.queues.set(.graphics, .init(
+            ctx.device.getDeviceQueue(candidate.graphics_queue_family.?, 0),
             ctx.device.wrapper,
-        );
-        ctx.async_compute_queue_family = candidate.async_compute_queue_family.?;
-        ctx.async_compute_queue = .init(
-            ctx.device.getDeviceQueue(ctx.async_compute_queue_family, 0),
+        ));
+        ctx.queue_families.set(.async_compute, candidate.async_compute_queue_family.?);
+        ctx.queues.set(.async_compute, .init(
+            ctx.device.getDeviceQueue(candidate.async_compute_queue_family.?, 0),
             ctx.device.wrapper,
-        );
-        ctx.transfer_queue_family = candidate.transfer_queue_family.?;
-        ctx.transfer_queue = .init(
-            ctx.device.getDeviceQueue(ctx.transfer_queue_family, 0),
+        ));
+        ctx.queue_families.set(.transfer, candidate.transfer_queue_family.?);
+        ctx.queues.set(.transfer, .init(
+            ctx.device.getDeviceQueue(candidate.transfer_queue_family.?, 0),
             ctx.device.wrapper,
-        );
-        ctx.present_queue_family = candidate.present_queue_family.?;
-        ctx.present_queue = .init(
-            ctx.device.getDeviceQueue(ctx.present_queue_family, 0),
+        ));
+        ctx.queue_families.set(.present, candidate.present_queue_family.?);
+        ctx.queues.set(.present, .init(
+            ctx.device.getDeviceQueue(candidate.graphics_queue_family.?, 0),
             ctx.device.wrapper,
-        );
+        ));
+
+        ctx.queue_semaphores.set(.graphics, try ctx.device.createSemaphore(&.{
+            .p_next = &vk.SemaphoreTypeCreateInfo{
+                .semaphore_type = .timeline,
+                .initial_value = 0,
+            },
+        }, null));
+        errdefer ctx.device.destroySemaphore(ctx.queue_semaphores.get(.graphics), null);
+        ctx.queue_semaphores.set(.async_compute, try ctx.device.createSemaphore(&.{
+            .p_next = &vk.SemaphoreTypeCreateInfo{
+                .semaphore_type = .timeline,
+                .initial_value = 0,
+            },
+        }, null));
+        errdefer ctx.device.destroySemaphore(ctx.queue_semaphores.get(.async_compute), null);
+        ctx.queue_semaphores.set(.transfer, try ctx.device.createSemaphore(&.{
+            .p_next = &vk.SemaphoreTypeCreateInfo{
+                .semaphore_type = .timeline,
+                .initial_value = 0,
+            },
+        }, null));
+        errdefer ctx.device.destroySemaphore(ctx.queue_semaphores.get(.transfer), null);
+        ctx.queue_semaphores.set(.present, .null_handle);
 
         ctx.physical_device = candidate.device;
     }
 
     fn deinitDevice(ctx: *Context) void {
+        ctx.device.destroySemaphore(ctx.queue_semaphores.get(.graphics), null);
+        ctx.device.destroySemaphore(ctx.queue_semaphores.get(.async_compute), null);
+        ctx.device.destroySemaphore(ctx.queue_semaphores.get(.transfer), null);
         ctx.device.destroyDevice(null);
         ctx.gpa.destroy(ctx.device.wrapper);
-        // physical_device = .null_handle;
+        ctx.physical_device = .null_handle;
     }
 };
 
@@ -580,6 +610,9 @@ const Swapchain = struct {
     extent: vk.Extent2D,
     images: []vk.Image,
     views: []vk.ImageView,
+    acquire_semaphores: []vk.Semaphore,
+    release_semaphores: []vk.Semaphore,
+    fences: []vk.Fence,
 
     fn init(ctx: *const Context, old_swapchain: vk.SwapchainKHR) !Swapchain {
         var arena_struct = std.heap.ArenaAllocator.init(ctx.gpa);
@@ -603,13 +636,15 @@ const Swapchain = struct {
 
         log.debug("Creating swapchain", .{});
         const format = pickSwapchainFormat(ctx.settings, formats);
-        log.debug("  swapchain format:       {} {}", .{ format.format, format.color_space });
+        log.debug("- format:       {} {}", .{ format.format, format.color_space });
         const present_mode = pickSwapchainPresentMode(ctx.settings, present_modes);
-        log.debug("  swapchain present_mode: {}", .{present_mode});
+        log.debug("- present_mode: {}", .{present_mode});
         const extent = try getSwapchainExtent(ctx.platform, capabilities);
-        log.debug("  swapchain extent:       {}", .{extent});
+        log.debug("- extent:       {}", .{extent});
         const count = getSwapchainImageCount(capabilities);
-        log.debug("  swapchain image count:  {}", .{count});
+        log.debug("- image count:  {}", .{count});
+
+        if (extent.width == 0 and extent.height == 0) return error.minimized;
 
         var create_info = vk.SwapchainCreateInfoKHR{
             .surface = ctx.surface,
@@ -631,8 +666,8 @@ const Swapchain = struct {
         };
         var queue_families: std.AutoArrayHashMapUnmanaged(u32, void) = .empty;
         try queue_families.ensureTotalCapacity(arena, 2);
-        queue_families.putAssumeCapacity(ctx.graphics_queue_family, {});
-        queue_families.putAssumeCapacity(ctx.present_queue_family, {});
+        queue_families.putAssumeCapacity(ctx.queue_families.get(.graphics), {});
+        queue_families.putAssumeCapacity(ctx.queue_families.get(.present), {});
         if (queue_families.count() > 1) {
             create_info.image_sharing_mode = .concurrent;
             create_info.queue_family_index_count = @intCast(queue_families.count());
@@ -662,9 +697,42 @@ const Swapchain = struct {
                 },
             };
             swapchain_views[i] = ctx.device.createImageView(&view_create_info, null) catch |e| {
-                // if we fail, cleanup the views we have created so far
+                // cleanup pattern
                 var j = i;
                 while (j > 0) : (j -= 1) ctx.device.destroyImageView(swapchain_views[j - 1], null);
+                return e;
+            };
+        }
+
+        const acquire_semaphores = try ctx.gpa.alloc(vk.Semaphore, swapchain_images.len);
+        errdefer ctx.gpa.free(acquire_semaphores);
+        for (0..swapchain_images.len) |i| {
+            acquire_semaphores[i] = ctx.device.createSemaphore(&.{}, null) catch |e| {
+                var j = i;
+                while (j > 0) : (j -= 1) ctx.device.destroySemaphore(acquire_semaphores[j - 1], null);
+                return e;
+            };
+        }
+
+        const release_semaphores = try ctx.gpa.alloc(vk.Semaphore, swapchain_images.len);
+        errdefer ctx.gpa.free(release_semaphores);
+        for (0..swapchain_images.len) |i| {
+            release_semaphores[i] = ctx.device.createSemaphore(&.{}, null) catch |e| {
+                var j = i;
+                while (j > 0) : (j -= 1) ctx.device.destroySemaphore(release_semaphores[j - 1], null);
+                return e;
+            };
+        }
+
+        const fences = try ctx.gpa.alloc(vk.Fence, swapchain_images.len);
+        errdefer ctx.gpa.free(fences);
+        for (0..swapchain_images.len) |i| {
+            // NOTE do we want to create it signalled ?
+            fences[i] = ctx.device.createFence(&.{
+                .flags = .{ .signaled_bit = true },
+            }, null) catch |e| {
+                var j = i;
+                while (j > 0) : (j -= 1) ctx.device.destroyFence(fences[j - 1], null);
                 return e;
             };
         }
@@ -675,11 +743,21 @@ const Swapchain = struct {
             .extent = swapchain_extent,
             .images = swapchain_images,
             .views = swapchain_views,
+            .acquire_semaphores = acquire_semaphores,
+            .release_semaphores = release_semaphores,
+            .fences = fences,
         };
     }
 
     fn deinit(swapchain: *Swapchain, ctx: *const Context) void {
+        // NOTE think about if we need to wait for all fences and semaphores
+        for (swapchain.fences) |fence| ctx.device.destroyFence(fence, null);
+        for (swapchain.acquire_semaphores) |semaphore| ctx.device.destroySemaphore(semaphore, null);
+        for (swapchain.release_semaphores) |semaphore| ctx.device.destroySemaphore(semaphore, null);
         for (swapchain.views) |view| ctx.device.destroyImageView(view, null);
+        ctx.gpa.free(swapchain.fences);
+        ctx.gpa.free(swapchain.acquire_semaphores);
+        ctx.gpa.free(swapchain.release_semaphores);
         ctx.gpa.free(swapchain.views);
         ctx.gpa.free(swapchain.images);
         ctx.device.destroySwapchainKHR(swapchain.swapchain, null);
