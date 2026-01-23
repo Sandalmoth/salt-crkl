@@ -79,6 +79,63 @@ pub const QueueType = enum {
     present,
 };
 
+pub const CommandPool = struct {
+    ctx: *const Context,
+    pool: vk.CommandPool,
+
+    buffers: std.ArrayList(vk.CommandBuffer),
+    n_used: u32,
+
+    pub fn init(ctx: *const Context, queue: QueueType) !CommandPool {
+        return .{
+            .ctx = ctx,
+            .pool = try ctx.device.createCommandPool(&.{
+                .flags = .{},
+                .queue_family_index = ctx.queue_families.get(queue),
+            }, null),
+            .buffers = .empty,
+            .n_used = 0,
+        };
+    }
+
+    pub fn deinit(pool: *CommandPool) void {
+        pool.ctx.device.destroyCommandPool(pool.pool, null);
+        pool.buffers.deinit(pool.ctx.gpa);
+        pool.* = undefined;
+    }
+
+    pub fn getTransientCommandBuffer(pool: *CommandPool) !vk.CommandBuffer {
+        var command_buffer: vk.CommandBuffer = .null_handle;
+
+        if (pool.n_used == pool.buffers.items.len) {
+            try pool.buffers.ensureUnusedCapacity(pool.ctx.gpa, 1);
+            try pool.ctx.device.allocateCommandBuffers(&.{
+                .command_pool = pool.pool,
+                .level = .primary,
+                .command_buffer_count = 1,
+            }, @ptrCast(&command_buffer));
+            pool.buffers.appendAssumeCapacity(command_buffer);
+            pool.n_used += 1;
+        } else {
+            command_buffer = pool.buffers.items[pool.n_used];
+            pool.n_used += 1;
+        }
+
+        try pool.ctx.device.beginCommandBuffer(command_buffer, &.{
+            .flags = .{ .one_time_submit_bit = true },
+        });
+
+        return command_buffer;
+    }
+
+    /// reset the command pool
+    /// invalidates all allocated transient command buffers handles
+    pub fn reset(pool: *CommandPool) void {
+        pool.ctx.device.resetCommandPool(pool.pool, .{});
+        pool.n_used = 0;
+    }
+};
+
 pub const Context = struct {
     gpa: std.mem.Allocator,
     platform: Platform,
@@ -97,8 +154,6 @@ pub const Context = struct {
 
     swapchain: Swapchain,
     old_swapchains: std.ArrayList(Swapchain),
-
-    command_pools: [frames_in_flight]vk.CommandPool,
 
     pub fn init(
         gpa: std.mem.Allocator,
@@ -128,8 +183,6 @@ pub const Context = struct {
         // currently that means context creation fails
         ctx.swapchain = try .init(&ctx, .null_handle);
         errdefer ctx.swapchain.deinit(&ctx);
-        try ctx.initFrame();
-        errdefer ctx.deinitFrame();
 
         return ctx;
     }
@@ -138,7 +191,6 @@ pub const Context = struct {
         ctx.device.deviceWaitIdle() catch |e| {
             log.warn("Failed deviceWaitIdle in vulkan_context deinit: {}", .{e});
         };
-        ctx.deinitFrame();
         for (ctx.old_swapchains.items) |*swapchain| swapchain.deinit(ctx);
         ctx.old_swapchains.deinit(ctx.gpa);
         ctx.swapchain.deinit(ctx);
@@ -403,31 +455,6 @@ pub const Context = struct {
         ctx.device.destroyDevice(null);
         ctx.gpa.destroy(ctx.device.wrapper);
         ctx.physical_device = .null_handle;
-    }
-
-    fn initFrame(ctx: *Context) !void {
-        for (0..frames_in_flight) |i| {
-            // NOTE FIXME what if a user is doing off-screen rendering and never presenting
-            // then, there is no natural frame-in-flight transition
-            // so then, when would we clear the command pools?
-            // seems like we'd have to manage individual bufferst instead of doing pool clears?
-            ctx.command_pools[i] = ctx.device.createCommandPool(&.{
-                .flags = .{},
-                .queue_family_index = ctx.queue_families.get(.graphics),
-            }, null) catch |e| {
-                var j = i;
-                while (j > 0) : (j -= 1) {
-                    ctx.device.destroyCommandPool(ctx.command_pools[j - 1], null);
-                }
-                return e;
-            };
-        }
-    }
-
-    fn deinitFrame(ctx: *Context) void {
-        for (0..frames_in_flight) |i| {
-            ctx.device.destroyCommandPool(ctx.command_pools[i], null);
-        }
     }
 };
 
