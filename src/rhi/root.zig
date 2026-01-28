@@ -874,7 +874,69 @@ const Swapchain = struct {
     }
 };
 
-test "scratch" {
-    _ = vk;
-    _ = Context;
-}
+const CommandNode = struct {
+    tag: Command = .nil, // type of next element
+    ptr: ?*CommandNode = null, // ptr to next element
+};
+
+pub const CommandBufferPool = struct {
+    // TODO make a nicer data structure, though this is probably ok-ish
+    gpa: std.mem.Allocator,
+    pool: std.heap.MemoryPool(std.heap.ArenaAllocator),
+
+    head: CommandNode,
+
+    fn init(gpa: std.mem.Allocator) CommandBufferPool {
+        return .{ .gpa = gpa, .pool = .init(gpa) };
+    }
+
+    fn acquireBuffer(pool: *CommandBufferPool) CommandBuffer {}
+};
+
+pub const CommandBuffer = struct {
+    pool: *CommandBufferPool,
+    arena: std.heap.ArenaAllocator,
+    queue: QueueType,
+
+    head: CommandNode,
+    tail: CommandNode,
+
+    pub fn beginRenderPass(buffer: *CommandBuffer) !void {
+        const command = try buffer.arena.create(CmdBeginRenderPass);
+        command.* = .{};
+        buffer.append(command.node, .begin_render_pass);
+    }
+
+    pub fn endRenderPass(buffer: *CommandBuffer) !void {
+        const command = try buffer.arena.create(CmdEndRenderPass);
+        command.* = .{};
+        buffer.append(command.node, .end_render_pass);
+    }
+
+    fn append(buffer: *CommandBuffer, node: *CommandNode, tag: Command) !void {
+        if (buffer.head.ptr == null) {
+            buffer.head = .{ .tag = tag, .ptr = node };
+            buffer.tail = .{ .tag = .nil, .ptr = node };
+            return;
+        }
+
+        const tail = buffer.tail.ptr.?;
+        tail.tag = tag;
+        tail.ptr = node;
+        buffer.tail.ptr = node;
+    }
+};
+
+const Command = enum {
+    nil,
+    begin_render_pass,
+    end_render_pass,
+};
+
+const CmdBeginRenderPass = struct {
+    node: CommandNode = .{},
+};
+
+const CmdEndRenderPass = struct {
+    node: CommandNode = .{},
+};
