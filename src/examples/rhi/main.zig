@@ -21,23 +21,16 @@ pub fn main() !void {
     );
     defer sdl.destroyWindow(window);
 
-    const ctx = try gpa.create(rhi.Context);
-    defer gpa.destroy(ctx);
-    ctx.* = try .init(gpa, .{
+    const ctx: *rhi.Context = try .create(gpa, .{
         .getInstanceProcAddress = &getInstanceProcAddress,
         .getRequiredInstanceExtensions = &getRequiredInstanceExtensions,
         .createWindowSurface = &createWindowSurface,
         .getFramebufferSize = &getFramebufferSize,
         .window = window,
     }, .{}, "example_rhi");
-    defer ctx.deinit();
+    defer ctx.destroy();
 
     var frame_in_flight: u32 = 0;
-    var command_pools: [2]rhi.CommandPool = undefined;
-    command_pools[0] = try .init(ctx, .graphics);
-    defer command_pools[0].deinit();
-    command_pools[1] = try .init(ctx, .graphics);
-    defer command_pools[1].deinit();
 
     main_loop: while (true) {
         var event: sdl.Event = undefined;
@@ -69,8 +62,8 @@ pub fn main() !void {
         // lets just write out the code to do an empty present
         // just to see what needs to be abstracted
         frame_in_flight = (frame_in_flight + 1) % 2;
-        const command_buffer = try command_pools[frame_in_flight].getTransientCommandBuffer();
-        _ = command_buffer;
+        const command_buffer = ctx.acquireCommandBuffer(.graphics);
+        try ctx.submitCommandBuffer(command_buffer);
     }
 }
 

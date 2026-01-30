@@ -37,6 +37,7 @@ const device_features_1_2 = vk.PhysicalDeviceVulkan12Features{
     .descriptor_binding_partially_bound = .true,
     .descriptor_binding_sampled_image_update_after_bind = .true,
     .descriptor_binding_storage_image_update_after_bind = .true,
+    .descriptor_binding_update_unused_while_pending = .true,
     .descriptor_indexing = .true,
     .runtime_descriptor_array = .true,
     .timeline_semaphore = .true,
@@ -152,20 +153,28 @@ pub const Context = struct {
     queue_families: std.EnumArray(QueueType, u32),
     queue_semaphores: std.EnumArray(QueueType, vk.Semaphore),
 
+    command_buffers: std.EnumArray(QueueType, CommandBuffer),
+    active_command_buffer: ?QueueType,
+
     swapchain: Swapchain,
     old_swapchains: std.ArrayList(Swapchain),
 
-    pub fn init(
+    samplers: [1]vk.Sampler,
+    descriptor_set_layout: vk.DescriptorSetLayout,
+    pipeline_layout: vk.PipelineLayout,
+
+    pub fn create(
         gpa: std.mem.Allocator,
         platform: Platform,
         settings: Settings,
         app_name: [:0]const u8,
-    ) !Context {
+    ) !*Context {
+        const ctx = try gpa.create(Context);
+
         var arena_struct: std.heap.ArenaAllocator = .init(gpa);
         defer arena_struct.deinit();
         const arena = arena_struct.allocator();
 
-        var ctx: Context = undefined;
         ctx.gpa = gpa;
         ctx.platform = platform;
         ctx.settings = settings;
@@ -181,23 +190,54 @@ pub const Context = struct {
         ctx.old_swapchains = .empty;
         // QUESTION what if the window starts out minimized?
         // currently that means context creation fails
-        ctx.swapchain = try .init(&ctx, .null_handle);
-        errdefer ctx.swapchain.deinit(&ctx);
+        ctx.swapchain = try .init(ctx, .null_handle);
+        errdefer ctx.swapchain.deinit(ctx);
+
+        try ctx.initPipelineLayout();
+        errdefer ctx.deinitPipelineLayout();
+
+        ctx.command_buffers.set(.graphics, .init(ctx, .graphics));
+        ctx.command_buffers.set(.async_compute, .init(ctx, .async_compute));
+        ctx.command_buffers.set(.transfer, .init(ctx, .transfer));
+        ctx.command_buffers.set(.present, .init(ctx, .present));
+        ctx.active_command_buffer = null;
 
         return ctx;
     }
 
-    pub fn deinit(ctx: *Context) void {
+    pub fn destroy(ctx: *Context) void {
         ctx.device.deviceWaitIdle() catch |e| {
             log.warn("Failed deviceWaitIdle in vulkan_context deinit: {}", .{e});
         };
+
+        ctx.deinitPipelineLayout();
+
         for (ctx.old_swapchains.items) |*swapchain| swapchain.deinit(ctx);
         ctx.old_swapchains.deinit(ctx.gpa);
         ctx.swapchain.deinit(ctx);
         ctx.deinitDevice();
         ctx.destroySurface();
         ctx.deinitInstance();
-        ctx.* = undefined;
+
+        ctx.gpa.destroy(ctx);
+    }
+
+    pub fn acquireCommandBuffer(ctx: *Context, queue_type: QueueType) *CommandBuffer {
+        std.debug.assert(ctx.active_command_buffer == null);
+        ctx.active_command_buffer = queue_type;
+        return ctx.command_buffers.getPtr(queue_type);
+    }
+
+    pub fn submitCommandBuffer(ctx: *Context, command_buffer: *CommandBuffer) !void {
+        std.debug.assert(ctx.active_command_buffer == command_buffer.queue_type);
+        ctx.active_command_buffer = null;
+        for (command_buffer.buffer.items) |command| {
+            switch (command) {
+                .begin_render_pass => {},
+                .end_render_pass => {},
+            }
+        }
+        command_buffer.buffer.clearRetainingCapacity();
     }
 
     fn initInstance(
@@ -455,6 +495,82 @@ pub const Context = struct {
         ctx.device.destroyDevice(null);
         ctx.gpa.destroy(ctx.device.wrapper);
         ctx.physical_device = .null_handle;
+    }
+
+    fn initPipelineLayout(ctx: *Context) !void {
+        ctx.samplers[0] = try ctx.device.createSampler(&.{
+            .mag_filter = .nearest,
+            .min_filter = .nearest,
+            .mipmap_mode = .nearest,
+            .address_mode_u = .repeat,
+            .address_mode_v = .repeat,
+            .address_mode_w = .repeat,
+            .mip_lod_bias = 0.0,
+            .anisotropy_enable = .false,
+            .max_anisotropy = 0.0,
+            .compare_enable = .false,
+            .compare_op = .never,
+            .min_lod = 0.0,
+            .max_lod = vk.LOD_CLAMP_NONE,
+            .border_color = .float_transparent_black,
+            .unnormalized_coordinates = .false,
+        }, null);
+        errdefer ctx.device.destroySampler(ctx.samplers[0], null);
+
+        const bindings: [3]vk.DescriptorSetLayoutBinding = .{ .{
+            .binding = 0,
+            .descriptor_type = .sampled_image,
+            .descriptor_count = 65536,
+            .stage_flags = .{ .vertex_bit = true, .fragment_bit = true, .compute_bit = true },
+        }, .{
+            .binding = 1,
+            .descriptor_type = .storage_image,
+            .descriptor_count = 65536,
+            .stage_flags = .{ .vertex_bit = true, .fragment_bit = true, .compute_bit = true },
+        }, .{
+            .binding = 2,
+            .descriptor_type = .sampler,
+            .descriptor_count = ctx.samplers.len,
+            .stage_flags = .{ .vertex_bit = true, .fragment_bit = true, .compute_bit = true },
+            .p_immutable_samplers = @ptrCast(&ctx.samplers[0]),
+        } };
+        const binding_flags: [3]vk.DescriptorBindingFlags = .{ .{
+            .update_after_bind_bit = true,
+            .update_unused_while_pending_bit = true,
+            .partially_bound_bit = true,
+        }, .{
+            .update_after_bind_bit = true,
+            .update_unused_while_pending_bit = true,
+            .partially_bound_bit = true,
+        }, .{} };
+
+        ctx.descriptor_set_layout = try ctx.device.createDescriptorSetLayout(&.{
+            .binding_count = 3,
+            .flags = .{ .update_after_bind_pool_bit = true },
+            .p_bindings = @ptrCast(&bindings[0]),
+            .p_next = &vk.DescriptorSetLayoutBindingFlagsCreateInfo{
+                .binding_count = 3,
+                .p_binding_flags = @ptrCast(&binding_flags[0]),
+            },
+        }, null);
+        errdefer ctx.device.destroyDescriptorSetLayout(ctx.descriptor_set_layout, null);
+        ctx.pipeline_layout = try ctx.device.createPipelineLayout(&.{
+            .set_layout_count = 1,
+            .p_set_layouts = @ptrCast(&ctx.descriptor_set_layout),
+            .push_constant_range_count = 1,
+            .p_push_constant_ranges = @ptrCast(&vk.PushConstantRange{
+                .stage_flags = .{ .vertex_bit = true, .fragment_bit = true, .compute_bit = true },
+                .offset = 0,
+                .size = 128,
+            }),
+        }, null);
+        errdefer ctx.device.destroyPipelineLayout(ctx.pipeline_layout, null);
+    }
+
+    fn deinitPipelineLayout(ctx: *Context) void {
+        ctx.device.destroyPipelineLayout(ctx.pipeline_layout, null);
+        ctx.device.destroyDescriptorSetLayout(ctx.descriptor_set_layout, null);
+        for (ctx.samplers) |sampler| ctx.device.destroySampler(sampler, null);
     }
 };
 
@@ -874,69 +990,44 @@ const Swapchain = struct {
     }
 };
 
-const CommandNode = struct {
-    tag: Command = .nil, // type of next element
-    ptr: ?*CommandNode = null, // ptr to next element
+const Command = union(enum) {
+    begin_render_pass: struct {},
+    end_render_pass: struct {},
 };
 
-pub const CommandBufferPool = struct {
-    // TODO make a nicer data structure, though this is probably ok-ish
-    gpa: std.mem.Allocator,
-    pool: std.heap.MemoryPool(std.heap.ArenaAllocator),
-
-    head: CommandNode,
-
-    fn init(gpa: std.mem.Allocator) CommandBufferPool {
-        return .{ .gpa = gpa, .pool = .init(gpa) };
-    }
-
-    fn acquireBuffer(pool: *CommandBufferPool) CommandBuffer {}
-};
+// TODO
+// a nicer structure would be where you acquire a pool
+// then you can fetch buffers from that which can be used on separate threads
+// then you submit the buffers to the pool
+// and then you submit the pool for execution
+// the data should be packed instead of stored as an array of unions
 
 pub const CommandBuffer = struct {
-    pool: *CommandBufferPool,
-    arena: std.heap.ArenaAllocator,
-    queue: QueueType,
+    ctx: *Context,
+    queue_type: QueueType,
+    buffer: std.ArrayList(Command),
 
-    head: CommandNode,
-    tail: CommandNode,
+    fn init(ctx: *Context, queue_type: QueueType) CommandBuffer {
+        return .{ .ctx = ctx, .queue_type = queue_type, .buffer = .empty };
+    }
 
     pub fn beginRenderPass(buffer: *CommandBuffer) !void {
-        const command = try buffer.arena.create(CmdBeginRenderPass);
-        command.* = .{};
-        buffer.append(command.node, .begin_render_pass);
+        try buffer.buffer.append(buffer.ctx.gpa, .{
+            .begin_render_pass = .{},
+        });
     }
 
     pub fn endRenderPass(buffer: *CommandBuffer) !void {
-        const command = try buffer.arena.create(CmdEndRenderPass);
-        command.* = .{};
-        buffer.append(command.node, .end_render_pass);
-    }
-
-    fn append(buffer: *CommandBuffer, node: *CommandNode, tag: Command) !void {
-        if (buffer.head.ptr == null) {
-            buffer.head = .{ .tag = tag, .ptr = node };
-            buffer.tail = .{ .tag = .nil, .ptr = node };
-            return;
-        }
-
-        const tail = buffer.tail.ptr.?;
-        tail.tag = tag;
-        tail.ptr = node;
-        buffer.tail.ptr = node;
+        try buffer.buffer.append(buffer.ctx.gpa, .{
+            .end_render_pass = .{},
+        });
     }
 };
 
-const Command = enum {
-    nil,
-    begin_render_pass,
-    end_render_pass,
-};
+const GraphicsPipeline = struct {};
 
-const CmdBeginRenderPass = struct {
-    node: CommandNode = .{},
-};
+const ComputePipeline = struct {};
 
-const CmdEndRenderPass = struct {
-    node: CommandNode = .{},
-};
+const Buffer = struct {};
+
+const Texture = struct {};
