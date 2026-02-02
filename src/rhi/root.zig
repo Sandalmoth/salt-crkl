@@ -163,6 +163,8 @@ pub const Context = struct {
     descriptor_set_layout: vk.DescriptorSetLayout,
     pipeline_layout: vk.PipelineLayout,
 
+    allocator: Allocator,
+
     pub fn create(
         gpa: std.mem.Allocator,
         platform: Platform,
@@ -195,6 +197,7 @@ pub const Context = struct {
 
         try ctx.initPipelineLayout();
         errdefer ctx.deinitPipelineLayout();
+        ctx.allocator = try .init(ctx, physical_device_candidate.memory_properties);
 
         ctx.command_buffers.set(.graphics, .init(ctx, .graphics));
         ctx.command_buffers.set(.async_compute, .init(ctx, .async_compute));
@@ -989,6 +992,116 @@ const Swapchain = struct {
         return count;
     }
 };
+
+const Allocator = struct {
+    physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
+
+    fn init(
+        ctx: *Context,
+        physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
+    ) !Allocator {
+        // NOTE just some scrap code to see what allocations look like
+        const testimg_extent = vk.Extent3D{ .width = 128, .height = 128, .depth = 1 };
+        const testimg_image_create_info = vk.ImageCreateInfo{
+            .image_type = .@"2d",
+            // .format = .r8_unorm,
+            .format = .bc1_rgba_srgb_block,
+            .extent = testimg_extent,
+            .usage = .{
+                .transfer_dst_bit = true,
+                .sampled_bit = true,
+            },
+            .mip_levels = 1,
+            .array_layers = 1,
+            .samples = .{ .@"1_bit" = true },
+            .tiling = .optimal,
+            .sharing_mode = .exclusive,
+            .queue_family_index_count = 1,
+            .p_queue_family_indices = @ptrCast(&ctx.queue_families.get(.graphics)),
+            .initial_layout = .undefined,
+        };
+        const testimg = try ctx.device.createImage(&testimg_image_create_info, null);
+        defer ctx.device.destroyImage(testimg, null);
+        const testimg_memreq = ctx.device.getImageMemoryRequirements(testimg);
+        const testimg_alloc_info = vk.MemoryAllocateInfo{
+            .allocation_size = testimg_memreq.size,
+            .memory_type_index = try findMemoryType(
+                testimg_memreq.memory_type_bits,
+                .{ .device_local_bit = true },
+                physical_device_memory_properties,
+            ),
+        };
+        std.debug.print("{}\n", .{testimg_memreq});
+        std.debug.print("{}\n", .{testimg_alloc_info});
+        const testimg_memory = try ctx.device.allocateMemory(&testimg_alloc_info, null);
+        defer ctx.device.freeMemory(testimg_memory, null);
+
+        return undefined;
+    }
+
+    fn findMemoryType(
+        memory_type_bits: u32,
+        property_flags: vk.MemoryPropertyFlags,
+        physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
+    ) !u32 {
+        for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
+            .memory_type_count], 0..) |memory_type, i|
+        {
+            // i don't really get this first check?
+            // the index of the memory type holds some special meaning?
+            // or is the memory type bits from the test memory requirements correlated to the device
+            // such that it basically already knows what memory types it would work with?
+            if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
+            if (property_flags.toInt() & memory_type.property_flags.toInt() !=
+                property_flags.toInt()) continue;
+            std.debug.print("{}\n", .{memory_type});
+            return @intCast(i);
+        }
+        return error.MemoryTypeNotFound;
+    }
+};
+
+const DynamicSubAllocator = struct {
+    const granularity = 4 * 1024;
+    const nil = std.math.maxInt(u32);
+
+    const Meta = struct {
+        seed: u32,
+        size: u32,
+        left: u32,
+        right: u32,
+    };
+
+    slab_capacity: u64,
+    slab_alignment: u64,
+    metadata: []Meta,
+    bins: [36]u32,
+
+    fn init(gpa: std.mem.Allocator, capacity: u64, alignment: u64) !DynamicSubAllocator {
+        std.debug.assert(capacity % granularity == 0);
+        std.debug.assert(capacity <= granularity * std.math.maxInt(u32));
+        var alloc: DynamicSubAllocator = .{
+            .slab_capacity = capacity,
+            .slab_alignment = alignment,
+            .metadata = try gpa.alloc(Meta, capacity / granularity),
+            .bins = .{nil} ** 36,
+        };
+        alloc.metadata[0] = .{
+            .size = capacity / granularity,
+            .next = 0,
+            .prev = 0,
+        };
+        alloc.bins[binIndex(capacity)] = 0;
+        return alloc;
+    }
+
+    fn binIndex(size: u64) u32 {
+        const log2: u32 = @intCast(std.math.log2_int(u64, size));
+        return if (log2 < 12) 0 else log2 - 12;
+    }
+};
+
+const ArenaSubAllocator = struct {};
 
 const Command = union(enum) {
     begin_render_pass: struct {},
