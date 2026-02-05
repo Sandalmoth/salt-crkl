@@ -1,6 +1,8 @@
 const std = @import("std");
 pub const vk = @import("vulkan");
 
+const OffsetAllocator = @import("OffsetAllocator.zig").Allocator;
+
 const log = std.log.scoped(.rhi);
 
 const enable_debug = @import("builtin").mode == .Debug;
@@ -148,6 +150,7 @@ pub const Context = struct {
 
     surface: vk.SurfaceKHR,
     physical_device: vk.PhysicalDevice,
+    physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
 
     queues: std.EnumArray(QueueType, vk.QueueProxy),
     queue_families: std.EnumArray(QueueType, u32),
@@ -994,49 +997,100 @@ const Swapchain = struct {
 };
 
 const Allocator = struct {
-    physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
+    const Slab = struct {
+        memory_type_index_mask: u32,
+        slab: MemorySlab,
+    };
 
-    fn init(
-        ctx: *Context,
-        physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
-    ) !Allocator {
-        // NOTE just some scrap code to see what allocations look like
-        const testimg_extent = vk.Extent3D{ .width = 128, .height = 128, .depth = 1 };
-        const testimg_image_create_info = vk.ImageCreateInfo{
-            .image_type = .@"2d",
-            // .format = .r8_unorm,
-            .format = .bc1_rgba_srgb_block,
-            .extent = testimg_extent,
-            .usage = .{
-                .transfer_dst_bit = true,
-                .sampled_bit = true,
-            },
-            .mip_levels = 1,
-            .array_layers = 1,
-            .samples = .{ .@"1_bit" = true },
-            .tiling = .optimal,
-            .sharing_mode = .exclusive,
-            .queue_family_index_count = 1,
-            .p_queue_family_indices = @ptrCast(&ctx.queue_families.get(.graphics)),
-            .initial_layout = .undefined,
-        };
-        const testimg = try ctx.device.createImage(&testimg_image_create_info, null);
-        defer ctx.device.destroyImage(testimg, null);
-        const testimg_memreq = ctx.device.getImageMemoryRequirements(testimg);
-        const testimg_alloc_info = vk.MemoryAllocateInfo{
-            .allocation_size = testimg_memreq.size,
-            .memory_type_index = try findMemoryType(
-                testimg_memreq.memory_type_bits,
-                .{ .device_local_bit = true },
-                physical_device_memory_properties,
-            ),
-        };
-        std.debug.print("{}\n", .{testimg_memreq});
-        std.debug.print("{}\n", .{testimg_alloc_info});
-        const testimg_memory = try ctx.device.allocateMemory(&testimg_alloc_info, null);
-        defer ctx.device.freeMemory(testimg_memory, null);
+    ctx: *Context,
+    buffer_slabs: std.MultiArrayList(Slab),
+    image_slabs: std.MultiArrayList(Slab),
+
+    fn init(ctx: *Context) !Allocator {
+        // // NOTE just some scrap code to see what allocations look like
+        // const testimg_extent = vk.Extent3D{ .width = 128, .height = 128, .depth = 1 };
+        // const testimg_image_create_info = vk.ImageCreateInfo{
+        //     .image_type = .@"2d",
+        //     // .format = .r8_unorm,
+        //     .format = .bc1_rgba_srgb_block,
+        //     .extent = testimg_extent,
+        //     .usage = .{
+        //         .transfer_dst_bit = true,
+        //         .sampled_bit = true,
+        //     },
+        //     .mip_levels = 1,
+        //     .array_layers = 1,
+        //     .samples = .{ .@"1_bit" = true },
+        //     .tiling = .optimal,
+        //     .sharing_mode = .exclusive,
+        //     .queue_family_index_count = 1,
+        //     .p_queue_family_indices = @ptrCast(&ctx.queue_families.get(.graphics)),
+        //     .initial_layout = .undefined,
+        // };
+        // const testimg = try ctx.device.createImage(&testimg_image_create_info, null);
+        // defer ctx.device.destroyImage(testimg, null);
+        // const testimg_memreq = ctx.device.getImageMemoryRequirements(testimg);
+        // const testimg_alloc_info = vk.MemoryAllocateInfo{
+        //     .allocation_size = testimg_memreq.size,
+        //     .memory_type_index = try findMemoryType(
+        //         testimg_memreq.memory_type_bits,
+        //         .{ .device_local_bit = true },
+        //         physical_device_memory_properties,
+        //     ),
+        // };
+        // const testimg_memory = try ctx.device.allocateMemory(&testimg_alloc_info, null);
+        // defer ctx.device.freeMemory(testimg_memory, null);
+        // try ctx.device.bindImageMemory(testimg, testimg_memory, 0);
+        // std.debug.print("{}\n", .{testimg_memreq});
+        // std.debug.print("{}\n", .{testimg_alloc_info});
+        // std.debug.print("{}\n", .{testimg_memory});
+
+        _ = ctx;
 
         return undefined;
+    }
+};
+
+pub const AllocationPool = struct {};
+
+const MemorySlab = struct {
+    const MemoryRequirement = struct {
+        size: usize,
+        memory_type_bits: u32,
+    };
+
+    ctx: *Context,
+    memory: vk.DeviceMemory,
+    memory_type_index: u32,
+    allocator: OffsetAllocator,
+
+    fn init(ctx: *Context, req: MemoryRequirement) !MemorySlab {
+        const memory_type_index = try findMemoryType(
+            req.memory_type_bits,
+            .{ .device_local_bit = true },
+            ctx.physical_device_memory_properties,
+        );
+        const alloc_info = vk.MemoryAllocateInfo{
+            .allocation_size = req.size,
+            .memory_type_index = memory_type_index,
+        };
+        const memory = try ctx.device.allocateMemory(&alloc_info, null);
+        errdefer ctx.device.freeMemory(memory, null);
+
+        const allocator: OffsetAllocator = try .init(ctx.gpa, req.size, req.size / 4096);
+        errdefer allocator.deinit(ctx.gpa);
+
+        return .{
+            .ctx = ctx,
+            .memory = memory,
+            .memory_type_index = memory_type_index,
+            .allocator = allocator,
+        };
+    }
+
+    fn deinit(slab: *MemorySlab) void {
+        errdefer slab.ctx.device.freeMemory(slab.memory, null);
+        errdefer slab.allocator.deinit(slab.ctx.gpa);
     }
 
     fn findMemoryType(
@@ -1060,48 +1114,6 @@ const Allocator = struct {
         return error.MemoryTypeNotFound;
     }
 };
-
-const DynamicSubAllocator = struct {
-    const granularity = 4 * 1024;
-    const nil = std.math.maxInt(u32);
-
-    const Meta = struct {
-        seed: u32,
-        size: u32,
-        left: u32,
-        right: u32,
-    };
-
-    slab_capacity: u64,
-    slab_alignment: u64,
-    metadata: []Meta,
-    bins: [36]u32,
-
-    fn init(gpa: std.mem.Allocator, capacity: u64, alignment: u64) !DynamicSubAllocator {
-        std.debug.assert(capacity % granularity == 0);
-        std.debug.assert(capacity <= granularity * std.math.maxInt(u32));
-        var alloc: DynamicSubAllocator = .{
-            .slab_capacity = capacity,
-            .slab_alignment = alignment,
-            .metadata = try gpa.alloc(Meta, capacity / granularity),
-            .bins = .{nil} ** 36,
-        };
-        alloc.metadata[0] = .{
-            .size = capacity / granularity,
-            .next = 0,
-            .prev = 0,
-        };
-        alloc.bins[binIndex(capacity)] = 0;
-        return alloc;
-    }
-
-    fn binIndex(size: u64) u32 {
-        const log2: u32 = @intCast(std.math.log2_int(u64, size));
-        return if (log2 < 12) 0 else log2 - 12;
-    }
-};
-
-const ArenaSubAllocator = struct {};
 
 const Command = union(enum) {
     begin_render_pass: struct {},

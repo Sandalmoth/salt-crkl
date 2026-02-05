@@ -71,7 +71,6 @@ pub const Allocator = struct {
     }
 
     pub fn allocate(alloc: *Allocator, size: u32) !Allocation {
-        std.debug.assert(size > 0);
         if (alloc.free_offset == 0) return error.MaxAllocs;
 
         const min_bin_index: u32 = SmallFloat.uintToFloatRoundUp(size).bits;
