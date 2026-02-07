@@ -2,6 +2,7 @@ const std = @import("std");
 pub const vk = @import("vulkan");
 
 const OffsetAllocator = @import("OffsetAllocator.zig").Allocator;
+const Allocation = @import("OffsetAllocator.zig").Allocation;
 
 const log = std.log.scoped(.rhi);
 
@@ -997,57 +998,49 @@ const Swapchain = struct {
 };
 
 const Allocator = struct {
-    const Slab = struct {
-        memory_type_index_mask: u32,
-        slab: MemorySlab,
-    };
-
     ctx: *Context,
-    buffer_slabs: std.MultiArrayList(Slab),
-    image_slabs: std.MultiArrayList(Slab),
+    buffer_slabs: std.ArrayList(MemorySlab),
+    image_slabs: std.MultiArrayList(struct { mask: u32, slab: MemorySlab }),
+
+    buffer_memory_type_bits: u32,
 
     fn init(ctx: *Context) !Allocator {
-        // // NOTE just some scrap code to see what allocations look like
-        // const testimg_extent = vk.Extent3D{ .width = 128, .height = 128, .depth = 1 };
-        // const testimg_image_create_info = vk.ImageCreateInfo{
-        //     .image_type = .@"2d",
-        //     // .format = .r8_unorm,
-        //     .format = .bc1_rgba_srgb_block,
-        //     .extent = testimg_extent,
-        //     .usage = .{
-        //         .transfer_dst_bit = true,
-        //         .sampled_bit = true,
-        //     },
-        //     .mip_levels = 1,
-        //     .array_layers = 1,
-        //     .samples = .{ .@"1_bit" = true },
-        //     .tiling = .optimal,
-        //     .sharing_mode = .exclusive,
-        //     .queue_family_index_count = 1,
-        //     .p_queue_family_indices = @ptrCast(&ctx.queue_families.get(.graphics)),
-        //     .initial_layout = .undefined,
-        // };
-        // const testimg = try ctx.device.createImage(&testimg_image_create_info, null);
-        // defer ctx.device.destroyImage(testimg, null);
-        // const testimg_memreq = ctx.device.getImageMemoryRequirements(testimg);
-        // const testimg_alloc_info = vk.MemoryAllocateInfo{
-        //     .allocation_size = testimg_memreq.size,
-        //     .memory_type_index = try findMemoryType(
-        //         testimg_memreq.memory_type_bits,
-        //         .{ .device_local_bit = true },
-        //         physical_device_memory_properties,
-        //     ),
-        // };
-        // const testimg_memory = try ctx.device.allocateMemory(&testimg_alloc_info, null);
-        // defer ctx.device.freeMemory(testimg_memory, null);
-        // try ctx.device.bindImageMemory(testimg, testimg_memory, 0);
-        // std.debug.print("{}\n", .{testimg_memreq});
-        // std.debug.print("{}\n", .{testimg_alloc_info});
-        // std.debug.print("{}\n", .{testimg_memory});
+        const buffer_info = vk.BufferCreateInfo{
+            .size = 64,
+            .usage = .{
+                .transfer_src_bit = true,
+                .transfer_dst_bit = true,
+                .storage_buffer_bit = true,
+                .index_buffer_bit = true,
+                .indirect_buffer_bit = true,
+                .shader_device_address_bit = true,
+            },
+            .sharing_mode = .exclusive,
+        };
+        const buffer = try ctx.device.createBuffer(&buffer_info, null);
+        defer ctx.device.destroyBuffer(buffer, null);
 
-        _ = ctx;
+        return .{
+            .ctx = ctx,
+            .buffer_slabs = .empty,
+            .image_slabs = .{},
+            .buffer_memory_type_bits = ctx.device.getBufferMemoryRequirements(buffer)
+                .memory_type_bits,
+        };
+    }
 
-        return undefined;
+    fn createBuffer(alloc: *Allocator, size: u32, alignment: u32) Buffer {
+        // we only have one kind of buffer, so this is very straightforward
+        var allocation: Allocation = undefined;
+        var allocation_slab: *MemorySlab = undefined;
+        for (&alloc.buffer_slabs.items) |*slab| {
+            allocation = slab.alloc(size + alignment - 1) catch continue;
+            allocation_slab = slab;
+            break;
+        } else {
+            // no slab with enough space, make a new one
+            // const buffer
+        }
     }
 };
 
@@ -1062,12 +1055,13 @@ const MemorySlab = struct {
     ctx: *Context,
     memory: vk.DeviceMemory,
     memory_type_index: u32,
+    needs_staging: bool,
+    needs_flush: bool,
     allocator: OffsetAllocator,
 
     fn init(ctx: *Context, req: MemoryRequirement) !MemorySlab {
-        const memory_type_index = try findMemoryType(
+        const memory_type_index = findMemoryType(
             req.memory_type_bits,
-            .{ .device_local_bit = true },
             ctx.physical_device_memory_properties,
         );
         const alloc_info = vk.MemoryAllocateInfo{
@@ -1080,10 +1074,20 @@ const MemorySlab = struct {
         const allocator: OffsetAllocator = try .init(ctx.gpa, req.size, req.size / 4096);
         errdefer allocator.deinit(ctx.gpa);
 
+        const property_flags = ctx.physical_device_memory_properties
+            .memory_types[memory_type_index].property_flags;
+
+        if (property_flags.host_visible_bit) {
+            // UMA system, map it so we can transfer directly
+            ctx.device.mapMemory(memory, 0, req.size, .{});
+        }
+
         return .{
             .ctx = ctx,
             .memory = memory,
             .memory_type_index = memory_type_index,
+            .needs_staging = !property_flags.host_visible,
+            .needs_flush = !property_flags.host_coherent,
             .allocator = allocator,
         };
     }
@@ -1093,25 +1097,41 @@ const MemorySlab = struct {
         errdefer slab.allocator.deinit(slab.ctx.gpa);
     }
 
+    fn alloc(slab: *MemorySlab, size: u32) !Allocation {
+        return slab.allocator.allocate(size);
+    }
+
     fn findMemoryType(
         memory_type_bits: u32,
-        property_flags: vk.MemoryPropertyFlags,
         physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
-    ) !u32 {
+    ) u32 {
+        // first try to pick device local only memory
         for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
             .memory_type_count], 0..) |memory_type, i|
         {
-            // i don't really get this first check?
-            // the index of the memory type holds some special meaning?
-            // or is the memory type bits from the test memory requirements correlated to the device
-            // such that it basically already knows what memory types it would work with?
             if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
-            if (property_flags.toInt() & memory_type.property_flags.toInt() !=
-                property_flags.toInt()) continue;
-            std.debug.print("{}\n", .{memory_type});
+            if (!memory_type.property_flags.device_local_bit) continue;
+            if (memory_type.property_flags.host_visible) continue;
             return @intCast(i);
         }
-        return error.MemoryTypeNotFound;
+        // if not possible, pick also host visible
+        for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
+            .memory_type_count], 0..) |memory_type, i|
+        {
+            if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
+            if (!memory_type.property_flags.device_local_bit) continue;
+            if (!memory_type.property_flags.host_visible) continue;
+            return @intCast(i);
+        }
+        // otherwise, just pick whatever is possible
+        for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
+            .memory_type_count], 0..) |memory_type, i|
+        {
+            if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
+            log.warn("Ideal memory type not found, picking {}", .{memory_type});
+            return @intCast(i);
+        }
+        unreachable;
     }
 };
 
