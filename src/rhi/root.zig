@@ -151,6 +151,7 @@ pub const Context = struct {
 
     surface: vk.SurfaceKHR,
     physical_device: vk.PhysicalDevice,
+    physical_device_properties: vk.PhysicalDeviceProperties,
     physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
 
     queues: std.EnumArray(QueueType, vk.QueueProxy),
@@ -168,6 +169,7 @@ pub const Context = struct {
     pipeline_layout: vk.PipelineLayout,
 
     allocator: Allocator,
+    upload_slab: UploadSlab,
 
     pub fn create(
         gpa: std.mem.Allocator,
@@ -202,6 +204,7 @@ pub const Context = struct {
         try ctx.initPipelineLayout();
         errdefer ctx.deinitPipelineLayout();
         ctx.allocator = try .init(ctx);
+        ctx.upload_slab = try .init(ctx);
 
         ctx.command_buffers.set(.graphics, .init(ctx, .graphics));
         ctx.command_buffers.set(.async_compute, .init(ctx, .async_compute));
@@ -217,6 +220,7 @@ pub const Context = struct {
             log.warn("Failed deviceWaitIdle in vulkan_context deinit: {}", .{e});
         };
 
+        ctx.upload_slab.deinit();
         ctx.allocator.deinit();
 
         ctx.deinitPipelineLayout();
@@ -499,6 +503,7 @@ pub const Context = struct {
         ctx.queue_semaphores.set(.present, .null_handle);
 
         ctx.physical_device = candidate.device;
+        ctx.physical_device_properties = candidate.properties;
         ctx.physical_device_memory_properties = candidate.memory_properties;
     }
 
@@ -1044,12 +1049,16 @@ const BufferSlab = struct {
     buffer_device_address: u64,
     buffer_ptr: ?*anyopaque,
     memory: vk.DeviceMemory,
-    memory_type_index: u32,
-    needs_staging: bool,
-    needs_flush: bool,
+    host_visible: bool,
+    host_coherent: bool,
     allocator: OffsetAllocator, // allocator for 256 byte blocks
 
     fn init(ctx: *Context) !BufferSlab {
+        const queue_family_indices: FixedSet(3, u32) = .init(&.{
+            ctx.queue_families.get(.graphics),
+            ctx.queue_families.get(.async_compute),
+            ctx.queue_families.get(.transfer),
+        });
         const buffer_info = vk.BufferCreateInfo{
             .size = slab_size,
             .usage = .{
@@ -1060,7 +1069,9 @@ const BufferSlab = struct {
                 .indirect_buffer_bit = true,
                 .shader_device_address_bit = true,
             },
-            .sharing_mode = .exclusive,
+            .sharing_mode = .concurrent,
+            .p_queue_family_indices = @ptrCast(queue_family_indices.items().ptr),
+            .queue_family_index_count = @intCast(queue_family_indices.items().len),
         };
         const buffer = try ctx.device.createBuffer(&buffer_info, null);
         errdefer ctx.device.destroyBuffer(buffer, null);
@@ -1105,9 +1116,8 @@ const BufferSlab = struct {
             .buffer_device_address = buffer_device_address,
             .buffer_ptr = buffer_ptr,
             .memory = memory,
-            .memory_type_index = memory_type_index,
-            .needs_staging = !property_flags.host_visible_bit,
-            .needs_flush = !property_flags.host_coherent_bit,
+            .host_visible = !property_flags.host_visible_bit,
+            .host_coherent = !property_flags.host_coherent_bit,
             .allocator = allocator,
         };
     }
@@ -1157,12 +1167,84 @@ const BufferSlab = struct {
             if (!memory_type.property_flags.host_visible_bit) continue;
             return @intCast(i);
         }
-        // otherwise, just pick whatever is possible
+        // vulkan spec
+        // There must be at least one memory type with the
+        // VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT bit set in its propertyFlags
+        // hence the above tests should always find a suitable memory type
+        unreachable;
+    }
+};
+
+const UploadSlab = struct {
+    const slab_size = 256 * 1024 * 1024;
+
+    ctx: *Context,
+    buffer: vk.Buffer,
+    buffer_ptr: ?*anyopaque,
+    memory: vk.DeviceMemory,
+
+    fn init(ctx: *Context) !UploadSlab {
+        const queue_family_indices: FixedSet(3, u32) = .init(&.{
+            ctx.queue_families.get(.graphics),
+            ctx.queue_families.get(.async_compute),
+            ctx.queue_families.get(.transfer),
+        });
+        const buffer_info = vk.BufferCreateInfo{
+            .size = slab_size,
+            .usage = .{
+                .transfer_src_bit = true,
+            },
+            .sharing_mode = .concurrent,
+            .p_queue_family_indices = @ptrCast(queue_family_indices.items().ptr),
+            .queue_family_index_count = @intCast(queue_family_indices.items().len),
+        };
+        const buffer = try ctx.device.createBuffer(&buffer_info, null);
+        errdefer ctx.device.destroyBuffer(buffer, null);
+        const buffer_memreq = ctx.device.getBufferMemoryRequirements(buffer);
+
+        const memory_type_index = findMemoryType(
+            buffer_memreq.memory_type_bits,
+            ctx.physical_device_memory_properties,
+        );
+        const alloc_info = vk.MemoryAllocateInfo{
+            .allocation_size = buffer_memreq.size,
+            .memory_type_index = memory_type_index,
+        };
+        const memory = try ctx.device.allocateMemory(&alloc_info, null);
+        errdefer ctx.device.freeMemory(memory, null);
+
+        try ctx.device.bindBufferMemory(buffer, memory, 0);
+
+        const buffer_ptr = try ctx.device.mapMemory(memory, 0, slab_size, .{});
+
+        return .{
+            .ctx = ctx,
+            .buffer = buffer,
+            .buffer_ptr = buffer_ptr,
+            .memory = memory,
+        };
+    }
+
+    fn deinit(slab: *UploadSlab) void {
+        slab.ctx.device.destroyBuffer(slab.buffer, null);
+        slab.ctx.device.freeMemory(slab.memory, null);
+    }
+
+    fn findMemoryType(
+        memory_type_bits: u32,
+        physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
+    ) u32 {
+        // vulkan spec
+        // There must be at least one memory type with both the
+        // VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT and VK_MEMORY_PROPERTY_HOST_COHERENT_BIT bits
+        // set in its propertyFlags
+        // so this should always work
         for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
             .memory_type_count], 0..) |memory_type, i|
         {
             if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
-            log.warn("Ideal memory type not found, picking {}", .{memory_type});
+            if (!memory_type.property_flags.host_visible_bit) continue;
+            if (!memory_type.property_flags.host_coherent_bit) continue;
             return @intCast(i);
         }
         unreachable;
@@ -1178,8 +1260,8 @@ const BufferSlab = struct {
 //     ctx: *Context,
 //     memory: vk.DeviceMemory,
 //     memory_type_index: u32,
-//     needs_staging: bool,
-//     needs_flush: bool,
+//     host_visible: bool,
+//     host_coherent: bool,
 //     allocator: OffsetAllocator,
 
 //     fn init(ctx: *Context, req: MemoryRequirement) !MemorySlab {
@@ -1209,8 +1291,8 @@ const BufferSlab = struct {
 //             .ctx = ctx,
 //             .memory = memory,
 //             .memory_type_index = memory_type_index,
-//             .needs_staging = !property_flags.host_visible,
-//             .needs_flush = !property_flags.host_coherent,
+//             .host_visible = !property_flags.host_visible,
+//             .host_coherent = !property_flags.host_coherent,
 //             .allocator = allocator,
 //         };
 //     }
@@ -1304,3 +1386,27 @@ const Buffer = struct {
 };
 
 const Texture = struct {};
+
+fn FixedSet(comptime capacity: comptime_int, comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        count: usize,
+        data: [capacity]T,
+
+        fn init(_items: []const T) Self {
+            std.debug.assert(_items.len <= capacity);
+            var result: Self = .{ .count = 0, .data = undefined };
+            outer: for (_items) |new| {
+                for (result.data[0..result.count]) |old| if (new == old) continue :outer;
+                result.data[result.count] = new;
+                result.count += 1;
+            }
+            return result;
+        }
+
+        fn items(set: *const Self) []const T {
+            return set.data[0..set.count];
+        }
+    };
+}
