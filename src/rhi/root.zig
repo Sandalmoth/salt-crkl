@@ -217,6 +217,8 @@ pub const Context = struct {
             log.warn("Failed deviceWaitIdle in vulkan_context deinit: {}", .{e});
         };
 
+        ctx.allocator.deinit();
+
         ctx.deinitPipelineLayout();
 
         for (ctx.old_swapchains.items) |*swapchain| swapchain.deinit(ctx);
@@ -1015,6 +1017,11 @@ const Allocator = struct {
         };
     }
 
+    fn deinit(alloc: *Allocator) void {
+        for (alloc.buffer_slabs.items) |*slab| slab.deinit();
+        alloc.buffer_slabs.deinit(alloc.ctx.gpa);
+    }
+
     fn createBuffer(alloc: *Allocator, size: u32) !Buffer {
         std.debug.assert(size <= BufferSlab.slab_size);
         // we only have one kind of buffer, so this is very straightforward
@@ -1106,8 +1113,13 @@ const BufferSlab = struct {
     }
 
     fn deinit(slab: *BufferSlab) void {
-        errdefer slab.ctx.device.freeMemory(slab.memory, null);
-        errdefer slab.allocator.deinit(slab.ctx.gpa);
+        // TODO we should probably debug log when buffers weren't freed
+        // however, it's technically not required as all the actual resources are freed
+        // also, without adding cruft to createBuffer it's hard to really make it easy to follow
+        // although maybe copying the return address parts from the debug allocator could work?
+        slab.ctx.device.destroyBuffer(slab.buffer, null);
+        slab.ctx.device.freeMemory(slab.memory, null);
+        slab.allocator.deinit(slab.ctx.gpa);
     }
 
     fn alloc(slab: *BufferSlab, size: u32) !Buffer {
