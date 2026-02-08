@@ -30,6 +30,11 @@ pub fn main() !void {
     }, .{}, "example_rhi");
     defer ctx.destroy();
 
+    const vertex_buffer = try ctx.createBuffer(1024);
+    const index_buffer = try ctx.createBuffer(1024);
+    std.debug.print("{}\n", .{vertex_buffer});
+    std.debug.print("{}\n", .{index_buffer});
+
     var frame_in_flight: u32 = 0;
 
     main_loop: while (true) {

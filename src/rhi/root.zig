@@ -201,7 +201,7 @@ pub const Context = struct {
 
         try ctx.initPipelineLayout();
         errdefer ctx.deinitPipelineLayout();
-        ctx.allocator = try .init(ctx, physical_device_candidate.memory_properties);
+        ctx.allocator = try .init(ctx);
 
         ctx.command_buffers.set(.graphics, .init(ctx, .graphics));
         ctx.command_buffers.set(.async_compute, .init(ctx, .async_compute));
@@ -245,6 +245,10 @@ pub const Context = struct {
             }
         }
         command_buffer.buffer.clearRetainingCapacity();
+    }
+
+    pub fn createBuffer(ctx: *Context, size: u32) !Buffer {
+        return ctx.allocator.createBuffer(size);
     }
 
     fn initInstance(
@@ -493,6 +497,7 @@ pub const Context = struct {
         ctx.queue_semaphores.set(.present, .null_handle);
 
         ctx.physical_device = candidate.device;
+        ctx.physical_device_memory_properties = candidate.memory_properties;
     }
 
     fn deinitDevice(ctx: *Context) void {
@@ -999,14 +1004,47 @@ const Swapchain = struct {
 
 const Allocator = struct {
     ctx: *Context,
-    buffer_slabs: std.ArrayList(MemorySlab),
-    image_slabs: std.MultiArrayList(struct { mask: u32, slab: MemorySlab }),
-
-    buffer_memory_type_bits: u32,
+    buffer_slabs: std.ArrayList(BufferSlab),
+    // image_slabs: std.MultiArrayList(struct { mask: u32, slab: MemorySlab }),
 
     fn init(ctx: *Context) !Allocator {
+        return .{
+            .ctx = ctx,
+            .buffer_slabs = .empty,
+            // .image_slabs = .{},
+        };
+    }
+
+    fn createBuffer(alloc: *Allocator, size: u32) !Buffer {
+        std.debug.assert(size <= BufferSlab.slab_size);
+        // we only have one kind of buffer, so this is very straightforward
+        for (alloc.buffer_slabs.items) |*slab| return slab.alloc(size) catch continue;
+        // no slab with enough space, make a new one
+        const slab = try alloc.buffer_slabs.addOne(alloc.ctx.gpa);
+        errdefer _ = alloc.buffer_slabs.pop();
+        slab.* = try .init(alloc.ctx);
+        return slab.alloc(size) catch unreachable;
+    }
+};
+
+pub const AllocationPool = struct {};
+
+const BufferSlab = struct {
+    const slab_size = 256 * 1024 * 1024;
+
+    ctx: *Context,
+    buffer: vk.Buffer,
+    buffer_device_address: u64,
+    buffer_ptr: ?*anyopaque,
+    memory: vk.DeviceMemory,
+    memory_type_index: u32,
+    needs_staging: bool,
+    needs_flush: bool,
+    allocator: OffsetAllocator, // allocator for 256 byte blocks
+
+    fn init(ctx: *Context) !BufferSlab {
         const buffer_info = vk.BufferCreateInfo{
-            .size = 64,
+            .size = slab_size,
             .usage = .{
                 .transfer_src_bit = true,
                 .transfer_dst_bit = true,
@@ -1018,87 +1056,71 @@ const Allocator = struct {
             .sharing_mode = .exclusive,
         };
         const buffer = try ctx.device.createBuffer(&buffer_info, null);
-        defer ctx.device.destroyBuffer(buffer, null);
+        errdefer ctx.device.destroyBuffer(buffer, null);
+        const buffer_memreq = ctx.device.getBufferMemoryRequirements(buffer);
 
-        return .{
-            .ctx = ctx,
-            .buffer_slabs = .empty,
-            .image_slabs = .{},
-            .buffer_memory_type_bits = ctx.device.getBufferMemoryRequirements(buffer)
-                .memory_type_bits,
-        };
-    }
-
-    fn createBuffer(alloc: *Allocator, size: u32, alignment: u32) Buffer {
-        // we only have one kind of buffer, so this is very straightforward
-        var allocation: Allocation = undefined;
-        var allocation_slab: *MemorySlab = undefined;
-        for (&alloc.buffer_slabs.items) |*slab| {
-            allocation = slab.alloc(size + alignment - 1) catch continue;
-            allocation_slab = slab;
-            break;
-        } else {
-            // no slab with enough space, make a new one
-            // const buffer
-        }
-    }
-};
-
-pub const AllocationPool = struct {};
-
-const MemorySlab = struct {
-    const MemoryRequirement = struct {
-        size: usize,
-        memory_type_bits: u32,
-    };
-
-    ctx: *Context,
-    memory: vk.DeviceMemory,
-    memory_type_index: u32,
-    needs_staging: bool,
-    needs_flush: bool,
-    allocator: OffsetAllocator,
-
-    fn init(ctx: *Context, req: MemoryRequirement) !MemorySlab {
         const memory_type_index = findMemoryType(
-            req.memory_type_bits,
+            buffer_memreq.memory_type_bits,
             ctx.physical_device_memory_properties,
         );
+        const alloc_flags = vk.MemoryAllocateFlagsInfo{
+            .flags = .{ .device_address_bit = true },
+            .device_mask = undefined, // note, not used
+        };
         const alloc_info = vk.MemoryAllocateInfo{
-            .allocation_size = req.size,
+            .allocation_size = buffer_memreq.size,
             .memory_type_index = memory_type_index,
+            .p_next = &alloc_flags,
         };
         const memory = try ctx.device.allocateMemory(&alloc_info, null);
         errdefer ctx.device.freeMemory(memory, null);
 
-        const allocator: OffsetAllocator = try .init(ctx.gpa, req.size, req.size / 4096);
+        try ctx.device.bindBufferMemory(buffer, memory, 0);
+        const buffer_device_address = ctx.device.getBufferDeviceAddress(&.{
+            .buffer = buffer,
+        });
+
+        var allocator: OffsetAllocator = try .init(ctx.gpa, slab_size / 256, slab_size / 4096);
         errdefer allocator.deinit(ctx.gpa);
 
         const property_flags = ctx.physical_device_memory_properties
             .memory_types[memory_type_index].property_flags;
 
+        var buffer_ptr: ?*anyopaque = null;
         if (property_flags.host_visible_bit) {
             // UMA system, map it so we can transfer directly
-            ctx.device.mapMemory(memory, 0, req.size, .{});
+            buffer_ptr = try ctx.device.mapMemory(memory, 0, slab_size, .{});
         }
 
         return .{
             .ctx = ctx,
+            .buffer = buffer,
+            .buffer_device_address = buffer_device_address,
+            .buffer_ptr = buffer_ptr,
             .memory = memory,
             .memory_type_index = memory_type_index,
-            .needs_staging = !property_flags.host_visible,
-            .needs_flush = !property_flags.host_coherent,
+            .needs_staging = !property_flags.host_visible_bit,
+            .needs_flush = !property_flags.host_coherent_bit,
             .allocator = allocator,
         };
     }
 
-    fn deinit(slab: *MemorySlab) void {
+    fn deinit(slab: *BufferSlab) void {
         errdefer slab.ctx.device.freeMemory(slab.memory, null);
         errdefer slab.allocator.deinit(slab.ctx.gpa);
     }
 
-    fn alloc(slab: *MemorySlab, size: u32) !Allocation {
-        return slab.allocator.allocate(size);
+    fn alloc(slab: *BufferSlab, size: u32) !Buffer {
+        // by letting the allocator operate on 256 byte blocks
+        // we skip needing to handle alignment, since 256 is enough for everything
+        // at the cost of always using at least 256 bytes, which seems fine to me
+        const allocation = try slab.allocator.allocate(size / 256);
+        return .{
+            .slab = slab,
+            .allocation = allocation,
+            .size = size,
+            .buffer_device_address = slab.buffer_device_address + 256 * allocation.offset,
+        };
     }
 
     fn findMemoryType(
@@ -1111,7 +1133,7 @@ const MemorySlab = struct {
         {
             if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
             if (!memory_type.property_flags.device_local_bit) continue;
-            if (memory_type.property_flags.host_visible) continue;
+            if (memory_type.property_flags.host_visible_bit) continue;
             return @intCast(i);
         }
         // if not possible, pick also host visible
@@ -1120,7 +1142,7 @@ const MemorySlab = struct {
         {
             if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
             if (!memory_type.property_flags.device_local_bit) continue;
-            if (!memory_type.property_flags.host_visible) continue;
+            if (!memory_type.property_flags.host_visible_bit) continue;
             return @intCast(i);
         }
         // otherwise, just pick whatever is possible
@@ -1134,6 +1156,95 @@ const MemorySlab = struct {
         unreachable;
     }
 };
+
+// const MemorySlab = struct {
+//     const MemoryRequirement = struct {
+//         size: usize,
+//         memory_type_bits: u32,
+//     };
+
+//     ctx: *Context,
+//     memory: vk.DeviceMemory,
+//     memory_type_index: u32,
+//     needs_staging: bool,
+//     needs_flush: bool,
+//     allocator: OffsetAllocator,
+
+//     fn init(ctx: *Context, req: MemoryRequirement) !MemorySlab {
+//         const memory_type_index = findMemoryType(
+//             req.memory_type_bits,
+//             ctx.physical_device_memory_properties,
+//         );
+//         const alloc_info = vk.MemoryAllocateInfo{
+//             .allocation_size = req.size,
+//             .memory_type_index = memory_type_index,
+//         };
+//         const memory = try ctx.device.allocateMemory(&alloc_info, null);
+//         errdefer ctx.device.freeMemory(memory, null);
+
+//         const allocator: OffsetAllocator = try .init(ctx.gpa, req.size, req.size / 4096);
+//         errdefer allocator.deinit(ctx.gpa);
+
+//         const property_flags = ctx.physical_device_memory_properties
+//             .memory_types[memory_type_index].property_flags;
+
+//         if (property_flags.host_visible_bit) {
+//             // UMA system, map it so we can transfer directly
+//             ctx.device.mapMemory(memory, 0, req.size, .{});
+//         }
+
+//         return .{
+//             .ctx = ctx,
+//             .memory = memory,
+//             .memory_type_index = memory_type_index,
+//             .needs_staging = !property_flags.host_visible,
+//             .needs_flush = !property_flags.host_coherent,
+//             .allocator = allocator,
+//         };
+//     }
+
+//     fn deinit(slab: *MemorySlab) void {
+//         errdefer slab.ctx.device.freeMemory(slab.memory, null);
+//         errdefer slab.allocator.deinit(slab.ctx.gpa);
+//     }
+
+//     fn alloc(slab: *MemorySlab, size: u32) !Allocation {
+//         return slab.allocator.allocate(size);
+//     }
+
+//     fn findMemoryType(
+//         memory_type_bits: u32,
+//         physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
+//     ) u32 {
+//         // first try to pick device local only memory
+//         for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
+//             .memory_type_count], 0..) |memory_type, i|
+//         {
+//             if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
+//             if (!memory_type.property_flags.device_local_bit) continue;
+//             if (memory_type.property_flags.host_visible) continue;
+//             return @intCast(i);
+//         }
+//         // if not possible, pick also host visible
+//         for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
+//             .memory_type_count], 0..) |memory_type, i|
+//         {
+//             if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
+//             if (!memory_type.property_flags.device_local_bit) continue;
+//             if (!memory_type.property_flags.host_visible) continue;
+//             return @intCast(i);
+//         }
+//         // otherwise, just pick whatever is possible
+//         for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
+//             .memory_type_count], 0..) |memory_type, i|
+//         {
+//             if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
+//             log.warn("Ideal memory type not found, picking {}", .{memory_type});
+//             return @intCast(i);
+//         }
+//         unreachable;
+//     }
+// };
 
 const Command = union(enum) {
     begin_render_pass: struct {},
@@ -1173,6 +1284,11 @@ const GraphicsPipeline = struct {};
 
 const ComputePipeline = struct {};
 
-const Buffer = struct {};
+const Buffer = struct {
+    slab: *BufferSlab,
+    allocation: Allocation,
+    size: u32,
+    buffer_device_address: u64,
+};
 
 const Texture = struct {};
