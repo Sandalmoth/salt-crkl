@@ -30,10 +30,16 @@ pub fn main() !void {
     }, .{}, "example_rhi");
     defer ctx.destroy();
 
+    const upload_buffer = try ctx.createUploadBuffer(65536);
+    // std.debug.print("{}\n", .{upload_buffer});
     const vertex_buffer = try ctx.createBuffer(1024);
     const index_buffer = try ctx.createBuffer(1024);
-    std.debug.print("{}\n", .{vertex_buffer});
-    std.debug.print("{}\n", .{index_buffer});
+    // std.debug.print("{}\n", .{vertex_buffer});
+    // std.debug.print("{}\n", .{index_buffer});
+
+    _ = upload_buffer;
+    _ = vertex_buffer;
+    _ = index_buffer;
 
     var frame_in_flight: u32 = 0;
 

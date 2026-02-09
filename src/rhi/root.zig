@@ -248,6 +248,7 @@ pub const Context = struct {
             switch (command) {
                 .begin_render_pass => {},
                 .end_render_pass => {},
+                .upload_to_buffer => {},
             }
         }
         command_buffer.buffer.clearRetainingCapacity();
@@ -255,6 +256,10 @@ pub const Context = struct {
 
     pub fn createBuffer(ctx: *Context, size: u32) !Buffer {
         return ctx.allocator.createBuffer(size);
+    }
+
+    pub fn createUploadBuffer(ctx: *Context, size: u32) !UploadBuffer {
+        return ctx.allocator.createUploadBuffer(size);
     }
 
     fn initInstance(
@@ -1012,12 +1017,14 @@ const Swapchain = struct {
 const Allocator = struct {
     ctx: *Context,
     buffer_slabs: std.ArrayList(BufferSlab),
+    upload_slabs: std.ArrayList(UploadSlab),
     // image_slabs: std.MultiArrayList(struct { mask: u32, slab: MemorySlab }),
 
     fn init(ctx: *Context) !Allocator {
         return .{
             .ctx = ctx,
             .buffer_slabs = .empty,
+            .upload_slabs = .empty,
             // .image_slabs = .{},
         };
     }
@@ -1025,6 +1032,8 @@ const Allocator = struct {
     fn deinit(alloc: *Allocator) void {
         for (alloc.buffer_slabs.items) |*slab| slab.deinit();
         alloc.buffer_slabs.deinit(alloc.ctx.gpa);
+        for (alloc.upload_slabs.items) |*slab| slab.deinit();
+        alloc.upload_slabs.deinit(alloc.ctx.gpa);
     }
 
     fn createBuffer(alloc: *Allocator, size: u32) !Buffer {
@@ -1034,6 +1043,15 @@ const Allocator = struct {
         // no slab with enough space, make a new one
         const slab = try alloc.buffer_slabs.addOne(alloc.ctx.gpa);
         errdefer _ = alloc.buffer_slabs.pop();
+        slab.* = try .init(alloc.ctx);
+        return slab.alloc(size) catch unreachable;
+    }
+
+    fn createUploadBuffer(alloc: *Allocator, size: u32) !UploadBuffer {
+        std.debug.assert(size <= UploadSlab.slab_size);
+        for (alloc.upload_slabs.items) |*slab| return slab.alloc(size) catch continue;
+        const slab = try alloc.upload_slabs.addOne(alloc.ctx.gpa);
+        errdefer _ = alloc.upload_slabs.pop();
         slab.* = try .init(alloc.ctx);
         return slab.alloc(size) catch unreachable;
     }
@@ -1182,6 +1200,7 @@ const UploadSlab = struct {
     buffer: vk.Buffer,
     buffer_ptr: ?*anyopaque,
     memory: vk.DeviceMemory,
+    allocator: OffsetAllocator,
 
     fn init(ctx: *Context) !UploadSlab {
         const queue_family_indices: FixedSet(3, u32) = .init(&.{
@@ -1215,6 +1234,15 @@ const UploadSlab = struct {
 
         try ctx.device.bindBufferMemory(buffer, memory, 0);
 
+        const alignment: u32 = @intCast(ctx.physical_device_properties.limits
+            .optimal_buffer_copy_offset_alignment);
+        var allocator: OffsetAllocator = try .init(
+            ctx.gpa,
+            slab_size / alignment,
+            slab_size / 4096,
+        );
+        errdefer allocator.deinit(ctx.gpa);
+
         const buffer_ptr = try ctx.device.mapMemory(memory, 0, slab_size, .{});
 
         return .{
@@ -1222,12 +1250,30 @@ const UploadSlab = struct {
             .buffer = buffer,
             .buffer_ptr = buffer_ptr,
             .memory = memory,
+            .allocator = allocator,
         };
     }
 
     fn deinit(slab: *UploadSlab) void {
+        // TODO we should probably debug log when buffers weren't freed
+        slab.allocator.deinit(slab.ctx.gpa);
         slab.ctx.device.destroyBuffer(slab.buffer, null);
         slab.ctx.device.freeMemory(slab.memory, null);
+    }
+
+    fn alloc(slab: *UploadSlab, size: u32) !UploadBuffer {
+        const alignment: u32 = @intCast(slab.ctx.physical_device_properties.limits
+            .optimal_buffer_copy_offset_alignment);
+        const allocation = try slab.allocator.allocate(size / alignment);
+        return .{
+            .slab = slab,
+            .allocation = allocation,
+            .size = size,
+            .allocator = .init(@as(
+                [*]u8,
+                @ptrCast(slab.buffer_ptr),
+            )[alignment * allocation.offset .. alignment + allocation.offset + size]),
+        };
     }
 
     fn findMemoryType(
@@ -1343,6 +1389,12 @@ const UploadSlab = struct {
 const Command = union(enum) {
     begin_render_pass: struct {},
     end_render_pass: struct {},
+    upload_to_buffer: struct {
+        size: u32,
+        src_offset: u32,
+        dst_buffer: vk.Buffer,
+        dst_offset: u32,
+    },
 };
 
 // TODO
@@ -1362,15 +1414,23 @@ pub const CommandBuffer = struct {
     }
 
     pub fn beginRenderPass(buffer: *CommandBuffer) !void {
-        try buffer.buffer.append(buffer.ctx.gpa, .{
-            .begin_render_pass = .{},
-        });
+        try buffer.buffer.append(buffer.ctx.gpa, .{ .begin_render_pass = .{} });
     }
 
     pub fn endRenderPass(buffer: *CommandBuffer) !void {
-        try buffer.buffer.append(buffer.ctx.gpa, .{
-            .end_render_pass = .{},
-        });
+        try buffer.buffer.append(buffer.ctx.gpa, .{ .end_render_pass = .{} });
+    }
+
+    pub fn uploadToBuffer(
+        buffer: *CommandBuffer,
+        src: []const u8,
+        staging: *UploadBuffer,
+        dst: *Buffer,
+    ) !void {
+        const staged = try staging.allocator.allocator().dupe(u8, src);
+        _ = staged;
+        _ = dst;
+        try buffer.buffer.append(buffer.ctx.gpa, .{ .upload_to_buffer = .{} });
     }
 };
 
@@ -1383,6 +1443,15 @@ const Buffer = struct {
     allocation: Allocation,
     size: u32,
     buffer_device_address: u64,
+};
+
+const UploadBuffer = struct {
+    slab: *UploadSlab,
+    allocation: Allocation,
+    size: u32,
+
+    // TODO this needs to contain a linear allocator
+    allocator: std.heap.FixedBufferAllocator,
 };
 
 const Texture = struct {};
