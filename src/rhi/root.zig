@@ -83,63 +83,6 @@ pub const QueueType = enum {
     present,
 };
 
-pub const CommandPool = struct {
-    ctx: *const Context,
-    pool: vk.CommandPool,
-
-    buffers: std.ArrayList(vk.CommandBuffer),
-    n_used: u32,
-
-    pub fn init(ctx: *const Context, queue: QueueType) !CommandPool {
-        return .{
-            .ctx = ctx,
-            .pool = try ctx.device.createCommandPool(&.{
-                .flags = .{},
-                .queue_family_index = ctx.queue_families.get(queue),
-            }, null),
-            .buffers = .empty,
-            .n_used = 0,
-        };
-    }
-
-    pub fn deinit(pool: *CommandPool) void {
-        pool.ctx.device.destroyCommandPool(pool.pool, null);
-        pool.buffers.deinit(pool.ctx.gpa);
-        pool.* = undefined;
-    }
-
-    pub fn getTransientCommandBuffer(pool: *CommandPool) !vk.CommandBuffer {
-        var command_buffer: vk.CommandBuffer = .null_handle;
-
-        if (pool.n_used == pool.buffers.items.len) {
-            try pool.buffers.ensureUnusedCapacity(pool.ctx.gpa, 1);
-            try pool.ctx.device.allocateCommandBuffers(&.{
-                .command_pool = pool.pool,
-                .level = .primary,
-                .command_buffer_count = 1,
-            }, @ptrCast(&command_buffer));
-            pool.buffers.appendAssumeCapacity(command_buffer);
-            pool.n_used += 1;
-        } else {
-            command_buffer = pool.buffers.items[pool.n_used];
-            pool.n_used += 1;
-        }
-
-        try pool.ctx.device.beginCommandBuffer(command_buffer, &.{
-            .flags = .{ .one_time_submit_bit = true },
-        });
-
-        return command_buffer;
-    }
-
-    /// reset the command pool
-    /// invalidates all allocated transient command buffers handles
-    pub fn reset(pool: *CommandPool) void {
-        pool.ctx.device.resetCommandPool(pool.pool, .{});
-        pool.n_used = 0;
-    }
-};
-
 pub const Context = struct {
     gpa: std.mem.Allocator,
     platform: Platform,
@@ -157,6 +100,7 @@ pub const Context = struct {
     queues: std.EnumArray(QueueType, vk.QueueProxy),
     queue_families: std.EnumArray(QueueType, u32),
     queue_semaphores: std.EnumArray(QueueType, vk.Semaphore),
+    queue_semaphore_values: std.EnumArray(QueueType, u64),
 
     command_buffers: std.EnumArray(QueueType, CommandBuffer),
     active_command_buffer: ?QueueType,
@@ -169,7 +113,6 @@ pub const Context = struct {
     pipeline_layout: vk.PipelineLayout,
 
     allocator: Allocator,
-    upload_slab: UploadSlab,
 
     pub fn create(
         gpa: std.mem.Allocator,
@@ -204,12 +147,16 @@ pub const Context = struct {
         try ctx.initPipelineLayout();
         errdefer ctx.deinitPipelineLayout();
         ctx.allocator = try .init(ctx);
-        ctx.upload_slab = try .init(ctx);
+        errdefer ctx.allocator.deinit();
 
-        ctx.command_buffers.set(.graphics, .init(ctx, .graphics));
-        ctx.command_buffers.set(.async_compute, .init(ctx, .async_compute));
-        ctx.command_buffers.set(.transfer, .init(ctx, .transfer));
-        ctx.command_buffers.set(.present, .init(ctx, .present));
+        ctx.command_buffers.set(.graphics, try .init(ctx, .graphics));
+        errdefer ctx.command_buffers.getPtr(.graphics).deinit();
+        ctx.command_buffers.set(.async_compute, try .init(ctx, .async_compute));
+        errdefer ctx.command_buffers.getPtr(.async_compute).deinit();
+        ctx.command_buffers.set(.transfer, try .init(ctx, .transfer));
+        errdefer ctx.command_buffers.getPtr(.transfer).deinit();
+        ctx.command_buffers.set(.present, try .init(ctx, .present));
+        errdefer ctx.command_buffers.getPtr(.present).deinit();
         ctx.active_command_buffer = null;
 
         return ctx;
@@ -220,7 +167,11 @@ pub const Context = struct {
             log.warn("Failed deviceWaitIdle in vulkan_context deinit: {}", .{e});
         };
 
-        ctx.upload_slab.deinit();
+        ctx.command_buffers.getPtr(.graphics).deinit();
+        ctx.command_buffers.getPtr(.async_compute).deinit();
+        ctx.command_buffers.getPtr(.transfer).deinit();
+        ctx.command_buffers.getPtr(.present).deinit();
+
         ctx.allocator.deinit();
 
         ctx.deinitPipelineLayout();
@@ -244,14 +195,67 @@ pub const Context = struct {
     pub fn submitCommandBuffer(ctx: *Context, command_buffer: *CommandBuffer) !void {
         std.debug.assert(ctx.active_command_buffer == command_buffer.queue_type);
         ctx.active_command_buffer = null;
+
+        // FIXME add implicit pool of command buffers and check semaphores?
+        // or some other strategy to make sure we can safely reset them
+        try ctx.device.resetCommandPool(command_buffer.command_pool, .{});
+        const cmd = command_buffer.command_buffer;
+        try ctx.device.beginCommandBuffer(cmd, &.{
+            .flags = .{ .one_time_submit_bit = true },
+        });
+
+        // this is basically like a vm parsing bytecode
+        // meaning we could apply compiler theory to simplify it i think
+        // hell yeah
+
         for (command_buffer.buffer.items) |command| {
             switch (command) {
                 .begin_render_pass => {},
                 .end_render_pass => {},
-                .upload_to_buffer => {},
+                .upload_to_buffer => {
+                    // NOTE we could accumulate regions per buffer combination and batch
+                    const region: vk.BufferCopy = .{
+                        .src_offset = command.upload_to_buffer.src_offset,
+                        .dst_offset = command.upload_to_buffer.dst_offset,
+                        .size = command.upload_to_buffer.size,
+                    };
+                    ctx.device.cmdCopyBuffer(
+                        cmd,
+                        command.upload_to_buffer.src_buffer,
+                        command.upload_to_buffer.dst_buffer,
+                        1,
+                        @ptrCast(&region),
+                    );
+                },
             }
         }
         command_buffer.buffer.clearRetainingCapacity();
+        try ctx.device.endCommandBuffer(cmd);
+
+        const semval = ctx.queue_semaphore_values.get(.graphics);
+        ctx.queue_semaphore_values.set(.graphics, semval + 1);
+        const timeline_semaphore_info: vk.TimelineSemaphoreSubmitInfo = .{
+            .p_wait_semaphore_values = @ptrCast(&semval),
+            .p_signal_semaphore_values = @ptrCast(&(semval + 1)),
+            .signal_semaphore_value_count = 1,
+            .wait_semaphore_value_count = 1,
+        };
+        const wait_dst_stage_mask: vk.PipelineStageFlags = .{ .top_of_pipe_bit = true };
+        const submit_info: vk.SubmitInfo = .{
+            .command_buffer_count = 1,
+            .p_command_buffers = @ptrCast(&cmd),
+            .wait_semaphore_count = 1,
+            .p_wait_semaphores = @ptrCast(ctx.queue_semaphores.getPtr(command_buffer.queue_type)),
+            .p_wait_dst_stage_mask = @ptrCast(&wait_dst_stage_mask),
+            .signal_semaphore_count = 1,
+            .p_signal_semaphores = @ptrCast(ctx.queue_semaphores.getPtr(command_buffer.queue_type)),
+            .p_next = &timeline_semaphore_info,
+        };
+        try ctx.queues.get(command_buffer.queue_type).submit(
+            1,
+            @ptrCast(&submit_info),
+            .null_handle,
+        );
     }
 
     pub fn createBuffer(ctx: *Context, size: u32) !Buffer {
@@ -484,6 +488,7 @@ pub const Context = struct {
             ctx.device.wrapper,
         ));
 
+        ctx.queue_semaphore_values = .initFill(0);
         ctx.queue_semaphores.set(.graphics, try ctx.device.createSemaphore(&.{
             .p_next = &vk.SemaphoreTypeCreateInfo{
                 .semaphore_type = .timeline,
@@ -1198,7 +1203,7 @@ const UploadSlab = struct {
 
     ctx: *Context,
     buffer: vk.Buffer,
-    buffer_ptr: ?*anyopaque,
+    buffer_ptr: *anyopaque,
     memory: vk.DeviceMemory,
     allocator: OffsetAllocator,
 
@@ -1248,7 +1253,7 @@ const UploadSlab = struct {
         return .{
             .ctx = ctx,
             .buffer = buffer,
-            .buffer_ptr = buffer_ptr,
+            .buffer_ptr = buffer_ptr.?,
             .memory = memory,
             .allocator = allocator,
         };
@@ -1392,6 +1397,7 @@ const Command = union(enum) {
     upload_to_buffer: struct {
         size: u32,
         src_offset: u32,
+        src_buffer: vk.Buffer,
         dst_buffer: vk.Buffer,
         dst_offset: u32,
     },
@@ -1408,9 +1414,38 @@ pub const CommandBuffer = struct {
     ctx: *Context,
     queue_type: QueueType,
     buffer: std.ArrayList(Command),
+    command_pool: vk.CommandPool,
+    command_buffer: vk.CommandBuffer,
 
-    fn init(ctx: *Context, queue_type: QueueType) CommandBuffer {
-        return .{ .ctx = ctx, .queue_type = queue_type, .buffer = .empty };
+    fn init(ctx: *Context, queue_type: QueueType) !CommandBuffer {
+        var result: CommandBuffer = .{
+            .ctx = ctx,
+            .queue_type = queue_type,
+            .buffer = .empty,
+            .command_pool = .null_handle,
+            .command_buffer = .null_handle,
+        };
+        result.command_pool = try ctx.device.createCommandPool(&.{
+            .flags = .{},
+            .queue_family_index = ctx.queue_families.get(queue_type),
+        }, null);
+        errdefer ctx.device.destroyCommandPool(result.command_pool, null);
+        try ctx.device.allocateCommandBuffers(&.{
+            .command_pool = result.command_pool,
+            .level = .primary,
+            .command_buffer_count = 1,
+        }, @ptrCast(&result.command_buffer));
+        return result;
+    }
+
+    fn deinit(buffer: *CommandBuffer) void {
+        buffer.ctx.device.freeCommandBuffers(
+            buffer.command_pool,
+            1,
+            @ptrCast(&buffer.command_buffer),
+        );
+        buffer.ctx.device.destroyCommandPool(buffer.command_pool, null);
+        buffer.buffer.deinit(buffer.ctx.gpa);
     }
 
     pub fn beginRenderPass(buffer: *CommandBuffer) !void {
@@ -1426,11 +1461,16 @@ pub const CommandBuffer = struct {
         src: []const u8,
         staging: *UploadBuffer,
         dst: *Buffer,
+        dst_offset: u32,
     ) !void {
         const staged = try staging.allocator.allocator().dupe(u8, src);
-        _ = staged;
-        _ = dst;
-        try buffer.buffer.append(buffer.ctx.gpa, .{ .upload_to_buffer = .{} });
+        try buffer.buffer.append(buffer.ctx.gpa, .{ .upload_to_buffer = .{
+            .size = @intCast(src.len),
+            .src_offset = @intCast(@intFromPtr(staged.ptr) - @intFromPtr(staging.slab.buffer_ptr)),
+            .src_buffer = staging.slab.buffer,
+            .dst_offset = dst_offset,
+            .dst_buffer = dst.slab.buffer,
+        } });
     }
 };
 
