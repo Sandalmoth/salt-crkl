@@ -196,13 +196,15 @@ pub const Context = struct {
         std.debug.assert(ctx.active_command_buffer == command_buffer.queue_type);
         ctx.active_command_buffer = null;
 
-        // FIXME add implicit pool of command buffers and check semaphores?
-        // or some other strategy to make sure we can safely reset them
-        try ctx.device.resetCommandPool(command_buffer.command_pool, .{});
-        const cmd = command_buffer.command_buffer;
+        const cmd = try command_buffer.getVulkanCommandBuffer();
         try ctx.device.beginCommandBuffer(cmd, &.{
             .flags = .{ .one_time_submit_bit = true },
         });
+
+        std.debug.print("{} ", .{command_buffer.pool_free_command_buffers[0].items.len});
+        std.debug.print("{} ", .{command_buffer.pool_used_command_buffers[0].items.len});
+        std.debug.print("{} ", .{command_buffer.pool_free_command_buffers[1].items.len});
+        std.debug.print("{}\n", .{command_buffer.pool_used_command_buffers[1].items.len});
 
         // this is basically like a vm parsing bytecode
         // meaning we could apply compiler theory to simplify it i think
@@ -1414,38 +1416,103 @@ pub const CommandBuffer = struct {
     ctx: *Context,
     queue_type: QueueType,
     buffer: std.ArrayList(Command),
-    command_pool: vk.CommandPool,
-    command_buffer: vk.CommandBuffer,
+    command_pools: [2]vk.CommandPool,
+    pool_last_semaphore: [2]u64,
+    current_pool_index: u32,
+    pool_free_command_buffers: [2]std.ArrayList(vk.CommandBuffer),
+    pool_used_command_buffers: [2]std.ArrayList(vk.CommandBuffer),
 
     fn init(ctx: *Context, queue_type: QueueType) !CommandBuffer {
         var result: CommandBuffer = .{
             .ctx = ctx,
             .queue_type = queue_type,
             .buffer = .empty,
-            .command_pool = .null_handle,
-            .command_buffer = .null_handle,
+            .command_pools = .{ .null_handle, .null_handle },
+            .pool_last_semaphore = .{ 0, 0 },
+            .current_pool_index = 0,
+            .pool_free_command_buffers = .{ .empty, .empty },
+            .pool_used_command_buffers = .{ .empty, .empty },
         };
-        result.command_pool = try ctx.device.createCommandPool(&.{
+        result.command_pools[0] = try ctx.device.createCommandPool(&.{
             .flags = .{},
             .queue_family_index = ctx.queue_families.get(queue_type),
         }, null);
-        errdefer ctx.device.destroyCommandPool(result.command_pool, null);
-        try ctx.device.allocateCommandBuffers(&.{
-            .command_pool = result.command_pool,
-            .level = .primary,
-            .command_buffer_count = 1,
-        }, @ptrCast(&result.command_buffer));
+        errdefer ctx.device.destroyCommandPool(result.command_pools[0], null);
+        result.command_pools[1] = try ctx.device.createCommandPool(&.{
+            .flags = .{},
+            .queue_family_index = ctx.queue_families.get(queue_type),
+        }, null);
+        errdefer ctx.device.destroyCommandPool(result.command_pools[1], null);
         return result;
     }
 
     fn deinit(buffer: *CommandBuffer) void {
-        buffer.ctx.device.freeCommandBuffers(
-            buffer.command_pool,
-            1,
-            @ptrCast(&buffer.command_buffer),
-        );
-        buffer.ctx.device.destroyCommandPool(buffer.command_pool, null);
+        // should we wait for the semaphores here for safety?
+        // although ctx.deinit should have called deviceWaitIdle already anyway...
+        for (0..2) |i| {
+            if (buffer.pool_free_command_buffers[i].items.len > 0) {
+                buffer.ctx.device.freeCommandBuffers(
+                    buffer.command_pools[i],
+                    @intCast(buffer.pool_free_command_buffers[i].items.len),
+                    buffer.pool_free_command_buffers[i].items.ptr,
+                );
+            }
+            buffer.pool_free_command_buffers[i].deinit(buffer.ctx.gpa);
+            if (buffer.pool_used_command_buffers[i].items.len > 0) {
+                buffer.ctx.device.freeCommandBuffers(
+                    buffer.command_pools[i],
+                    @intCast(buffer.pool_used_command_buffers[i].items.len),
+                    buffer.pool_used_command_buffers[i].items.ptr,
+                );
+            }
+            buffer.pool_used_command_buffers[i].deinit(buffer.ctx.gpa);
+            buffer.ctx.device.destroyCommandPool(buffer.command_pools[i], null);
+        }
         buffer.buffer.deinit(buffer.ctx.gpa);
+    }
+
+    fn getVulkanCommandBuffer(buffer: *CommandBuffer) !vk.CommandBuffer {
+        // first check if the other command pool is done
+        // in that reset the pool and switch to using it
+        if ((try buffer.ctx.device.getSemaphoreCounterValue(
+            buffer.ctx.queue_semaphores.get(buffer.queue_type),
+        )) >= buffer.pool_last_semaphore[(buffer.current_pool_index + 1) % 2]) {
+            try buffer.ctx.device.resetCommandPool(
+                buffer.command_pools[(buffer.current_pool_index + 1) % 2],
+                .{},
+            );
+            buffer.current_pool_index = (buffer.current_pool_index + 1) % 2;
+            for (buffer.pool_used_command_buffers[buffer.current_pool_index].items) |cmd| {
+                try buffer.pool_free_command_buffers[buffer.current_pool_index].append(
+                    buffer.ctx.gpa,
+                    cmd,
+                );
+            }
+            buffer.pool_used_command_buffers[buffer.current_pool_index].clearRetainingCapacity();
+        }
+
+        // if there are free command buffers for this pool use one
+        // otherwise create a new one and use that
+        if (buffer.pool_free_command_buffers[buffer.current_pool_index].items.len > 0) {
+            const cmd = buffer.pool_free_command_buffers[buffer.current_pool_index].pop().?;
+            try buffer.pool_used_command_buffers[buffer.current_pool_index].append(
+                buffer.ctx.gpa,
+                cmd,
+            );
+            return cmd;
+        } else {
+            var cmd: vk.CommandBuffer = .null_handle;
+            try buffer.ctx.device.allocateCommandBuffers(&.{
+                .command_pool = buffer.command_pools[buffer.current_pool_index],
+                .level = .primary,
+                .command_buffer_count = 1,
+            }, @ptrCast(&cmd));
+            try buffer.pool_used_command_buffers[buffer.current_pool_index].append(
+                buffer.ctx.gpa,
+                cmd,
+            );
+            return cmd;
+        }
     }
 
     pub fn beginRenderPass(buffer: *CommandBuffer) !void {
