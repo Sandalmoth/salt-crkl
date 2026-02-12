@@ -1541,38 +1541,66 @@ pub const CommandBuffer = struct {
     }
 };
 
-const GraphicsPipeline = struct {
-    ctx: *Context,
+const Shader = struct {
+    const ShaderType = enum { vertex, fragment, compute };
+    stage: vk.ShaderStageFlags,
+    module: vk.ShaderModule,
 
     fn init(
         ctx: *Context,
-        vertex_spv: []const u8,
-        fragment_spv: []const u8,
-    ) !GraphicsPipeline {
-        std.debug.assert((@intFromPtr(vertex_spv.ptr) & 3) == 0); // needs to be aligned to u32
-        std.debug.assert((@intFromPtr(fragment_spv.ptr) & 3) == 0); // needs to be aligned to u32
-        const vertex_shader = ctx.device.createShaderModule(&.{
-            .code_size = vertex_spv.len,
-            .p_code = @ptrCast(@alignCast(vertex_spv.ptr)),
-        }, null);
-        defer ctx.device.destroyShaderModule(vertex_shader, null);
-        const fragment_shader = ctx.device.createShaderModule(&.{
-            .code_size = fragment_spv.len,
-            .p_code = @ptrCast(@alignCast(fragment_spv.ptr)),
-        }, null);
-        defer ctx.device.destroyShaderModule(fragment_shader, null);
+        shader_type: ShaderType,
+        spv: []const u8,
+    ) !Shader {
+        std.debug.assert((@intFromPtr(spv.ptr) & 3) == 0); // needs to be aligned as a u32
+        return .{ .shader = try ctx.device.createShaderModule(&.{
+            .code_size = spv.len,
+            .p_code = @ptrCast(@alignCast(spv.ptr)),
+        }, null), .module = switch (shader_type) {
+            .vertex => .{ .vertex_bit = true },
+            .fragment => .{ .fragment_bit = true },
+            .compute => .{ .compute_bit = true },
+        } };
+    }
 
+    fn deinit(shader: *Shader, ctx: *Context) void {
+        ctx.device.destroyShaderModule(shader.module, null);
+    }
+};
+
+const GraphicsPipeline = struct {
+    const StaticState = struct {
+        // the formats and blending for color attachments
+        // the format for depth and stencil attachments
+        // the polygon mode
+        // the multisampling state
+
+        vertex_shader: *const Shader,
+        fragment_shader: *const Shader,
+    };
+    const DynamicState = struct {};
+
+    ctx: *Context,
+    dynamic_state: DynamicState,
+    pipeline: vk.Pipeline,
+
+    fn init(
+        ctx: *Context,
+        static_state: StaticState,
+        dynamic_state: DynamicState,
+    ) !GraphicsPipeline {
         const shader_stages = [_]vk.PipelineShaderStageCreateInfo{ .{
-            .stage = .{ .vertex_bit = true },
-            .module = vertex_shader,
+            .stage = static_state.vertex_shader.stage,
+            .module = static_state.vertex_shader.module,
             .p_name = "main",
         }, .{
-            .stage = .{ .fragment_bit = true },
-            .module = fragment_shader,
+            .stage = static_state.fragment_shader.stage,
+            .module = static_state.fragment_shader.module,
             .p_name = "main",
         } };
 
         const dynamic_states = [_]vk.DynamicState{
+            .viewport,
+            .scissor,
             .line_width,
             .depth_bias,
             .blend_constants,
@@ -1583,8 +1611,6 @@ const GraphicsPipeline = struct {
             .cull_mode,
             .front_face,
             .primitive_topology,
-            .viewport_with_count,
-            .scissor_with_count,
             .depth_test_enable,
             .depth_write_enable,
             .depth_compare_op,
@@ -1615,7 +1641,7 @@ const GraphicsPipeline = struct {
             .p_color_attachment_formats = @ptrCast(&color_attachment_formats[0]),
             .depth_attachment_format = .undefined,
             .stencil_attachment_format = .undefined,
-            .view_mask = 0,
+            .view_mask = 0, // multiview is not supported
         };
 
         const create_info: vk.GraphicsPipelineCreateInfo = .{
@@ -1623,7 +1649,12 @@ const GraphicsPipeline = struct {
             .p_stages = @ptrCast(&shader_stages[0]),
             .p_vertex_input_state = &.{}, // vertex buffers are not supported
             .p_input_assembly_state = &.{}, // dynamic
-            .p_viewport_state = &.{}, // dynamic
+            .p_viewport_state = &.{
+                .viewport_count = 1, // multiple viewports are not supported
+                .p_viewports = null, // dynamic
+                .scissor_count = 1, // multiple viewports are not supported
+                .p_scissors = null, // dynamic
+            },
             .p_rasterization_state = &.{
                 .depth_clamp_enable = .false, // dynamic
                 .rasterizer_discard_enable = .false, // dynamic
@@ -1656,8 +1687,8 @@ const GraphicsPipeline = struct {
                 .max_depth_bounds = 0.0, // dynamic
             },
             .p_color_blend_state = &.{
-                .logic_op_enable = vk.FALSE,
-                .logic_op = .copy,
+                .logic_op_enable = .false, // logic op is not supported
+                .logic_op = .clear, // logic op is not supported
                 .attachment_count = @intCast(color_blend_attachments.len),
                 .p_attachments = @ptrCast(&color_blend_attachments[0]),
                 .blend_constants = .{ 0.0, 0.0, 0.0, 0.0 }, // dynamic
@@ -1674,7 +1705,20 @@ const GraphicsPipeline = struct {
             .p_next = &dynamic_rendering,
         };
 
-        _ = create_info;
+        var pipeline: vk.Pipeline = undefined;
+        _ = try ctx.device.createGraphicsPipelines(
+            .null_handle,
+            1,
+            @ptrCast(&create_info),
+            null,
+            @ptrCast(&pipeline),
+        );
+
+        return .{
+            .ctx = ctx,
+            .dynamic_state = dynamic_state,
+            .pipeline = pipeline,
+        };
     }
 };
 
