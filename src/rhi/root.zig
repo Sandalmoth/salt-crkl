@@ -1541,7 +1541,142 @@ pub const CommandBuffer = struct {
     }
 };
 
-const GraphicsPipeline = struct {};
+const GraphicsPipeline = struct {
+    ctx: *Context,
+
+    fn init(
+        ctx: *Context,
+        vertex_spv: []const u8,
+        fragment_spv: []const u8,
+    ) !GraphicsPipeline {
+        std.debug.assert((@intFromPtr(vertex_spv.ptr) & 3) == 0); // needs to be aligned to u32
+        std.debug.assert((@intFromPtr(fragment_spv.ptr) & 3) == 0); // needs to be aligned to u32
+        const vertex_shader = ctx.device.createShaderModule(&.{
+            .code_size = vertex_spv.len,
+            .p_code = @ptrCast(@alignCast(vertex_spv.ptr)),
+        }, null);
+        defer ctx.device.destroyShaderModule(vertex_shader, null);
+        const fragment_shader = ctx.device.createShaderModule(&.{
+            .code_size = fragment_spv.len,
+            .p_code = @ptrCast(@alignCast(fragment_spv.ptr)),
+        }, null);
+        defer ctx.device.destroyShaderModule(fragment_shader, null);
+
+        const shader_stages = [_]vk.PipelineShaderStageCreateInfo{ .{
+            .stage = .{ .vertex_bit = true },
+            .module = vertex_shader,
+            .p_name = "main",
+        }, .{
+            .stage = .{ .fragment_bit = true },
+            .module = fragment_shader,
+            .p_name = "main",
+        } };
+
+        const dynamic_states = [_]vk.DynamicState{
+            .line_width,
+            .depth_bias,
+            .blend_constants,
+            .depth_bounds,
+            .stencil_compare_mask,
+            .stencil_write_mask,
+            .stencil_reference,
+            .cull_mode,
+            .front_face,
+            .primitive_topology,
+            .viewport_with_count,
+            .scissor_with_count,
+            .depth_test_enable,
+            .depth_write_enable,
+            .depth_compare_op,
+            .depth_bounds_test_enable,
+            .stencil_test_enable,
+            .stencil_op,
+            .rasterizer_discard_enable,
+            .depth_bias_enable,
+            .primitive_restart_enable,
+        };
+
+        const color_blend_attachments = [_]vk.PipelineColorBlendAttachmentState{.{
+            .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
+            .blend_enable = vk.FALSE,
+            .src_color_blend_factor = .one,
+            .dst_color_blend_factor = .zero,
+            .color_blend_op = .add,
+            .src_alpha_blend_factor = .one,
+            .dst_alpha_blend_factor = .zero,
+            .alpha_blend_op = .add,
+        }};
+
+        const color_attachment_formats = [_]vk.Format{
+            .b8g8r8a8_srgb,
+        };
+        const dynamic_rendering: vk.PipelineRenderingCreateInfo = .{
+            .color_attachment_count = @intCast(color_attachment_formats.len),
+            .p_color_attachment_formats = @ptrCast(&color_attachment_formats[0]),
+            .depth_attachment_format = .undefined,
+            .stencil_attachment_format = .undefined,
+            .view_mask = 0,
+        };
+
+        const create_info: vk.GraphicsPipelineCreateInfo = .{
+            .stage_count = @intCast(shader_stages.len),
+            .p_stages = @ptrCast(&shader_stages[0]),
+            .p_vertex_input_state = &.{}, // vertex buffers are not supported
+            .p_input_assembly_state = &.{}, // dynamic
+            .p_viewport_state = &.{}, // dynamic
+            .p_rasterization_state = &.{
+                .depth_clamp_enable = .false, // dynamic
+                .rasterizer_discard_enable = .false, // dynamic
+                .polygon_mode = .fill,
+                .line_width = 1.0, // dynamic
+                .cull_mode = .{}, // dynamic
+                .front_face = .counter_clockwise, // dynamic
+                .depth_bias_enable = .false, // dynamic
+                .depth_bias_constant_factor = 0.0, // dynyamic
+                .depth_bias_clamp = 0.0, // dynamic
+                .depth_bias_slope_factor = 0.0, // dynamic
+            },
+            .p_multisample_state = &.{
+                .rasterization_samples = .{ .@"1_bit" = true },
+                .sample_shading_enable = .false,
+                .min_sample_shading = 1.0,
+                .p_sample_mask = null,
+                .alpha_to_coverage_enable = .false,
+                .alpha_to_one_enable = .false,
+            },
+            .p_depth_stencil_state = &.{
+                .depth_test_enable = .true, // dynamic
+                .depth_write_enable = .true, // dynamic
+                .depth_compare_op = .greater, // dynamic
+                .depth_bounds_test_enable = .false, // dynamic
+                .stencil_test_enable = .false, // dynamic
+                .front = std.mem.zeroes(vk.StencilOpState), // dynamic
+                .back = std.mem.zeroes(vk.StencilOpState), // dynamic
+                .min_depth_bounds = 0.0, // dynamic
+                .max_depth_bounds = 0.0, // dynamic
+            },
+            .p_color_blend_state = &.{
+                .logic_op_enable = vk.FALSE,
+                .logic_op = .copy,
+                .attachment_count = @intCast(color_blend_attachments.len),
+                .p_attachments = @ptrCast(&color_blend_attachments[0]),
+                .blend_constants = .{ 0.0, 0.0, 0.0, 0.0 }, // dynamic
+            },
+            .p_dynamic_state = &.{
+                .dynamic_state_count = @intCast(dynamic_states.len),
+                .p_dynamic_states = &dynamic_states,
+            },
+            .layout = ctx.pipeline_layout,
+            .render_pass = .null_handle, // dynamic rendering
+            .subpass = 0,
+            .base_pipeline_handle = .null_handle,
+            .base_pipeline_index = -1,
+            .p_next = &dynamic_rendering,
+        };
+
+        _ = create_info;
+    }
+};
 
 const ComputePipeline = struct {};
 

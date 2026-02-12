@@ -92,6 +92,12 @@ pub fn main() !void {
         // just to see what needs to be abstracted
         frame_in_flight = (frame_in_flight + 1) % 2;
         const command_buffer = ctx.acquireCommandBuffer(.graphics);
+
+        // bind a pipeline
+        // bind the index buffer
+        // push constant upload with the vertex buffer address
+        // draw
+
         try ctx.submitCommandBuffer(command_buffer);
     }
 }
