@@ -268,6 +268,34 @@ pub const Context = struct {
         return ctx.allocator.createUploadBuffer(size);
     }
 
+    pub fn createGraphicsPipeline(
+        ctx: *Context,
+        static_state: GraphicsPipeline.StaticState,
+        dynamic_state: GraphicsPipeline.DynamicState,
+    ) !GraphicsPipeline {
+        return try .init(ctx, static_state, dynamic_state);
+    }
+
+    pub fn destroyGraphicsPipeline(ctx: *Context, pipeline: *GraphicsPipeline) void {
+        _ = ctx;
+        pipeline.deinit();
+    }
+
+    pub fn createShader(
+        ctx: *Context,
+        shader_type: Shader.ShaderType,
+        spv: []const u32,
+    ) !Shader {
+        return try .init(ctx, shader_type, spv);
+    }
+
+    pub fn destroyShader(
+        ctx: *Context,
+        shader: *Shader,
+    ) void {
+        shader.deinit(ctx);
+    }
+
     fn initInstance(
         ctx: *Context,
         arena: std.mem.Allocator,
@@ -1549,12 +1577,11 @@ const Shader = struct {
     fn init(
         ctx: *Context,
         shader_type: ShaderType,
-        spv: []const u8,
+        spv: []const u32,
     ) !Shader {
-        std.debug.assert((@intFromPtr(spv.ptr) & 3) == 0); // needs to be aligned as a u32
         return .{ .shader = try ctx.device.createShaderModule(&.{
-            .code_size = spv.len,
-            .p_code = @ptrCast(@alignCast(spv.ptr)),
+            .code_size = spv.len * 4,
+            .p_code = @ptrCast(&spv[0]),
         }, null), .module = switch (shader_type) {
             .vertex => .{ .vertex_bit = true },
             .fragment => .{ .fragment_bit = true },
@@ -1567,17 +1594,166 @@ const Shader = struct {
     }
 };
 
+pub const Format = enum {
+    undefined,
+};
+
 const GraphicsPipeline = struct {
     const StaticState = struct {
-        // the formats and blending for color attachments
-        // the format for depth and stencil attachments
-        // the polygon mode
-        // the multisampling state
+        const PolygonMode = enum { fill, line, point };
+        const MultisampleState = struct {
+            const SampleCount = enum { @"1", @"2", @"4", @"8", @"16", @"32", @"64" };
+
+            sample_count: SampleCount = .@"1",
+            enable_alpha_to_coverage: bool = false,
+        };
+        const ColorAttachment = struct {
+            const ColorWriteMask = struct {
+                r: bool = true,
+                g: bool = true,
+                b: bool = true,
+                a: bool = true,
+            };
+
+            const BlendState = struct {
+                const BlendFactor = enum {
+                    zero,
+                    one,
+                    src_color,
+                    one_minus_src_color,
+                    dst_color,
+                    one_minus_dst_color,
+                    src_alpha,
+                    one_minus_src_alpha,
+                    dst_alpha,
+                    one_minus_dst_alpha,
+                    constant_color,
+                    one_minus_constant_color,
+                    constant_alpha,
+                    one_minus_constant_alpha,
+                    src_alpha_saturate,
+                };
+
+                const BlendOp = enum {
+                    add,
+                    subtract,
+                    reverse_subtract,
+                    min,
+                    max,
+                };
+
+                src_color_blend_factor: BlendFactor,
+                dst_color_blend_factor: BlendFactor,
+                color_blend_op: BlendOp,
+                src_alpha_blend_factor: BlendFactor,
+                dst_alpha_blend_factor: BlendFactor,
+                alpha_blend_op: BlendOp,
+            };
+
+            format: Format,
+            color_write_mask: ColorWriteMask = .{},
+            blend_state: ?BlendState = null,
+        };
 
         vertex_shader: *const Shader,
         fragment_shader: *const Shader,
+        polygon_mode: PolygonMode,
+        multisample_state: MultisampleState = .{},
+        color_attachments: []const ColorAttachment,
+        depth_attachment_format: Format,
+        stencil_attachment_format: Format,
     };
-    const DynamicState = struct {};
+
+    const DynamicState = struct {
+        const Viewport = extern struct {
+            x: f32 = 0.0,
+            y: f32 = 0.0,
+            width: f32,
+            height: f32,
+            min_depth: f32,
+            max_depth: f32,
+        };
+        const Scissor = extern struct {
+            x: i32 = 0,
+            y: i32 = 0,
+            width: u32,
+            height: u32,
+        };
+        const InputAssemblyState = struct {
+            const PrimitiveTopology = enum {
+                point_list,
+                line_list,
+                line_strip,
+                triangle_list,
+                triangle_strip,
+                triangle_fan,
+            };
+            primitive_topology: PrimitiveTopology = .triangle_list,
+            enable_primitive_restart: bool = .false,
+        };
+        const RasterizationState = struct {
+            const CullMode = struct { front: bool = false, back: bool = true };
+            const FrontFace = enum { counter_clockwise, clockwise };
+            const DepthBias = struct {
+                constant_factor: f32,
+                clamp: f32,
+                slope_factor: f32,
+            };
+
+            enable_rasterizer_discard: bool = false,
+            cull_mode: CullMode = .{},
+            line_width: f32 = 0.0,
+            front_face: FrontFace = .counter_clockwise,
+            depth_bias: ?DepthBias = null,
+        };
+        const DepthStencilState = struct {
+            const CompareOp = enum {
+                never,
+                less,
+                equal,
+                less_or_equal,
+                greater,
+                not_equal,
+                greater_or_equal,
+                always,
+            };
+            const StencilState = struct {
+                const StencilOp = enum {
+                    keep,
+                    zero,
+                    replace,
+                    increment_and_clamp,
+                    decrement_and_clamp,
+                    invert,
+                    increment_and_wrap,
+                    decrement_and_wrap,
+                };
+                const StencilOpState = struct {
+                    fail_op: StencilOp,
+                    pass_op: StencilOp,
+                    depth_fail_op: StencilOp,
+                    compare_op: CompareOp,
+                    compare_mask: u32 = 0xFFFFFFFF,
+                    write_mask: u32 = 0xFFFFFFFF,
+                    reference: u32,
+                };
+
+                front: StencilOpState,
+                back: StencilOpState,
+            };
+
+            depth_test: ?CompareOp = .greater,
+            enable_depth_write: bool = true,
+            stencil_test: ?StencilState = null,
+        };
+
+        viewport: Viewport,
+        scissor: Scissor,
+        input_assembly: InputAssemblyState = .{},
+        rasterization: RasterizationState = .{},
+        depth_stencil: DepthStencilState = .{},
+        blend_constants: [4]f32 = .{ 0.0, 0.0, 0.0, 0.0 },
+    };
 
     ctx: *Context,
     dynamic_state: DynamicState,
@@ -1656,7 +1832,7 @@ const GraphicsPipeline = struct {
                 .p_scissors = null, // dynamic
             },
             .p_rasterization_state = &.{
-                .depth_clamp_enable = .false, // dynamic
+                .depth_clamp_enable = .false, // depth clamp not supported
                 .rasterizer_discard_enable = .false, // dynamic
                 .polygon_mode = .fill,
                 .line_width = 1.0, // dynamic
@@ -1679,12 +1855,12 @@ const GraphicsPipeline = struct {
                 .depth_test_enable = .true, // dynamic
                 .depth_write_enable = .true, // dynamic
                 .depth_compare_op = .greater, // dynamic
-                .depth_bounds_test_enable = .false, // dynamic
+                .depth_bounds_test_enable = .false, // depth boudns not supported
                 .stencil_test_enable = .false, // dynamic
                 .front = std.mem.zeroes(vk.StencilOpState), // dynamic
                 .back = std.mem.zeroes(vk.StencilOpState), // dynamic
-                .min_depth_bounds = 0.0, // dynamic
-                .max_depth_bounds = 0.0, // dynamic
+                .min_depth_bounds = 0.0, // depth boudns not supported
+                .max_depth_bounds = 0.0, // depth boudns not supported
             },
             .p_color_blend_state = &.{
                 .logic_op_enable = .false, // logic op is not supported
@@ -1719,6 +1895,11 @@ const GraphicsPipeline = struct {
             .dynamic_state = dynamic_state,
             .pipeline = pipeline,
         };
+    }
+
+    fn deinit(pipeline: *GraphicsPipeline) void {
+        pipeline.ctx.device.destroyPipeline(pipeline.pipeline, null);
+        GraphicsPipeline.* = undefined;
     }
 };
 

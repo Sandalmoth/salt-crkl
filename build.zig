@@ -71,6 +71,8 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    addSlangShader(b, "src/examples/rhi/shader.slang", "vertex", example_rhi_exe);
+    addSlangShader(b, "src/examples/rhi/shader.slang", "fragment", example_rhi_exe);
     example_rhi_exe.root_module.linkLibrary(sdl_lib);
     b.installArtifact(example_rhi_exe);
 
@@ -80,4 +82,34 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(rhi_tests).step);
+}
+
+fn addSlangShader(
+    b: *std.Build,
+    source_path: []const u8,
+    stage: []const u8,
+    exe: *std.Build.Step.Compile,
+) void {
+    const cmd = b.addSystemCommand(&.{ "slangc", source_path });
+    const stem = std.fs.path.stem(source_path);
+    cmd.addArgs(&.{
+        "-target", "spirv",
+        "-entry",  b.fmt("{s}Main", .{stage}),
+        "-stage",  stage,
+        "-O3",
+    });
+    cmd.addArg("-o");
+    const spv_name = b.fmt("slang_{s}_{s}.spv", .{ stage, stem });
+    const spv = cmd.addOutputFileArg(spv_name);
+    cmd.addArg("-reflection-json");
+    const json_name = b.fmt("slang_{s}_{s}.json", .{ stage, stem });
+    const json = cmd.addOutputFileArg(json_name);
+    exe.root_module.addAnonymousImport(
+        b.fmt("slang_{s}_{s}_spv", .{ stage, stem }),
+        .{ .root_source_file = spv },
+    );
+    exe.root_module.addAnonymousImport(
+        b.fmt("slang_{s}_{s}_spv", .{ stage, stem }),
+        .{ .root_source_file = json },
+    );
 }

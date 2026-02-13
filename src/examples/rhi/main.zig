@@ -37,6 +37,13 @@ pub fn main() !void {
     // std.debug.print("{}\n", .{vertex_buffer});
     // std.debug.print("{}\n", .{index_buffer});
 
+    const pipeline = try ctx.createGraphicsPipeline(.{
+        //
+    }, .{
+        //
+    });
+    defer ctx.destroyGraphicsPipeline(pipeline);
+
     {
         const command_buffer = ctx.acquireCommandBuffer(.graphics);
         try command_buffer.uploadToBuffer(
