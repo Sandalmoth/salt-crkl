@@ -3,6 +3,9 @@ const std = @import("std");
 
 const sdl = @import("sdl.zig");
 
+const shader_vertex_spv align(@alignOf(u32)) = @embedFile("slang_shader_vertex_spv").*;
+const shader_fragment_spv align(@alignOf(u32)) = @embedFile("slang_shader_fragment_spv").*;
+
 pub fn main() !void {
     sdl.setMainReady();
 
@@ -37,12 +40,41 @@ pub fn main() !void {
     // std.debug.print("{}\n", .{vertex_buffer});
     // std.debug.print("{}\n", .{index_buffer});
 
-    const pipeline = try ctx.createGraphicsPipeline(.{
-        //
+    var vertex_shader = try ctx.createShader(
+        .vertex,
+        std.mem.bytesAsSlice(u32, &shader_vertex_spv),
+    );
+    defer ctx.destroyShader(&vertex_shader);
+    var fragment_shader = try ctx.createShader(
+        .fragment,
+        std.mem.bytesAsSlice(u32, &shader_fragment_spv),
+    );
+    defer ctx.destroyShader(&fragment_shader);
+
+    var pipeline = try ctx.createGraphicsPipeline(.{
+        .vertex_shader = &vertex_shader,
+        .fragment_shader = &fragment_shader,
+        .polygon_mode = .fill,
+        .color_attachments = &.{},
+        .depth_attachment_format = undefined,
+        .stencil_attachment_format = undefined,
     }, .{
-        //
+        .viewport = .{
+            .x = 0,
+            .y = 0,
+            .width = 640,
+            .height = 640,
+            .min_depth = 0,
+            .max_depth = 1,
+        },
+        .scissor = .{
+            .x = 0,
+            .y = 0,
+            .width = 640,
+            .height = 640,
+        },
     });
-    defer ctx.destroyGraphicsPipeline(pipeline);
+    defer ctx.destroyGraphicsPipeline(&pipeline);
 
     {
         const command_buffer = ctx.acquireCommandBuffer(.graphics);

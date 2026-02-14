@@ -99,17 +99,17 @@ fn addSlangShader(
         "-O3",
     });
     cmd.addArg("-o");
-    const spv_name = b.fmt("slang_{s}_{s}.spv", .{ stage, stem });
+    const spv_name = b.fmt("slang_{s}_{s}.spv", .{ stem, stage });
     const spv = cmd.addOutputFileArg(spv_name);
     cmd.addArg("-reflection-json");
-    const json_name = b.fmt("slang_{s}_{s}.json", .{ stage, stem });
+    const json_name = b.fmt("slang_{s}_{s}.json", .{ stem, stage });
     const json = cmd.addOutputFileArg(json_name);
     exe.root_module.addAnonymousImport(
-        b.fmt("slang_{s}_{s}_spv", .{ stage, stem }),
+        b.fmt("slang_{s}_{s}_spv", .{ stem, stage }),
         .{ .root_source_file = spv },
     );
     exe.root_module.addAnonymousImport(
-        b.fmt("slang_{s}_{s}_spv", .{ stage, stem }),
+        b.fmt("slang_{s}_{s}_json", .{ stem, stage }),
         .{ .root_source_file = json },
     );
 }

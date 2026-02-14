@@ -1579,14 +1579,17 @@ const Shader = struct {
         shader_type: ShaderType,
         spv: []const u32,
     ) !Shader {
-        return .{ .shader = try ctx.device.createShaderModule(&.{
-            .code_size = spv.len * 4,
-            .p_code = @ptrCast(&spv[0]),
-        }, null), .module = switch (shader_type) {
-            .vertex => .{ .vertex_bit = true },
-            .fragment => .{ .fragment_bit = true },
-            .compute => .{ .compute_bit = true },
-        } };
+        return .{
+            .module = try ctx.device.createShaderModule(&.{
+                .code_size = spv.len * 4,
+                .p_code = @ptrCast(&spv[0]),
+            }, null),
+            .stage = switch (shader_type) {
+                .vertex => .{ .vertex_bit = true },
+                .fragment => .{ .fragment_bit = true },
+                .compute => .{ .compute_bit = true },
+            },
+        };
     }
 
     fn deinit(shader: *Shader, ctx: *Context) void {
@@ -1689,7 +1692,7 @@ const GraphicsPipeline = struct {
                 triangle_fan,
             };
             primitive_topology: PrimitiveTopology = .triangle_list,
-            enable_primitive_restart: bool = .false,
+            enable_primitive_restart: bool = false,
         };
         const RasterizationState = struct {
             const CullMode = struct { front: bool = false, back: bool = true };
@@ -1800,7 +1803,7 @@ const GraphicsPipeline = struct {
 
         const color_blend_attachments = [_]vk.PipelineColorBlendAttachmentState{.{
             .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
-            .blend_enable = vk.FALSE,
+            .blend_enable = .false,
             .src_color_blend_factor = .one,
             .dst_color_blend_factor = .zero,
             .color_blend_op = .add,
@@ -1824,7 +1827,11 @@ const GraphicsPipeline = struct {
             .stage_count = @intCast(shader_stages.len),
             .p_stages = @ptrCast(&shader_stages[0]),
             .p_vertex_input_state = &.{}, // vertex buffers are not supported
-            .p_input_assembly_state = &.{}, // dynamic
+            .p_input_assembly_state = &.{
+                .topology = .triangle_list,
+
+                .primitive_restart_enable = .false,
+            }, // dynamic
             .p_viewport_state = &.{
                 .viewport_count = 1, // multiple viewports are not supported
                 .p_viewports = null, // dynamic
@@ -1899,7 +1906,7 @@ const GraphicsPipeline = struct {
 
     fn deinit(pipeline: *GraphicsPipeline) void {
         pipeline.ctx.device.destroyPipeline(pipeline.pipeline, null);
-        GraphicsPipeline.* = undefined;
+        pipeline.* = undefined;
     }
 };
 
