@@ -1597,8 +1597,17 @@ const Shader = struct {
     }
 };
 
-pub const Format = enum {
-    undefined,
+pub const Format = enum(u32) {
+    placeholder,
+
+    fn vulkan(format: Format) vk.Format {
+        return switch (format) {
+            else => blk: {
+                log.debug("Format {} does not have a matching vulkan format", .{format});
+                break :blk .undefined;
+            },
+        };
+    }
 };
 
 const GraphicsPipeline = struct {
@@ -1616,6 +1625,15 @@ const GraphicsPipeline = struct {
                 g: bool = true,
                 b: bool = true,
                 a: bool = true,
+
+                fn vulkan(mask: ColorWriteMask) vk.ColorComponentFlags {
+                    return .{
+                        .r_bit = mask.r,
+                        .g_bit = mask.g,
+                        .b_bit = mask.b,
+                        .a_bit = mask.a,
+                    };
+                }
             };
 
             const BlendState = struct {
@@ -1635,6 +1653,26 @@ const GraphicsPipeline = struct {
                     constant_alpha,
                     one_minus_constant_alpha,
                     src_alpha_saturate,
+
+                    fn vulkan(blend_factor: BlendFactor) vk.BlendFactor {
+                        return switch (blend_factor) {
+                            .zero => .zero,
+                            .one => .one,
+                            .src_color => .src_color,
+                            .one_minus_src_color => .one_minus_src_color,
+                            .dst_color => .dst_color,
+                            .one_minus_dst_color => .one_minus_dst_color,
+                            .src_alpha => .src_alpha,
+                            .one_minus_src_alpha => .one_minus_src_alpha,
+                            .dst_alpha => .dst_alpha,
+                            .one_minus_dst_alpha => .one_minus_dst_alpha,
+                            .constant_color => .constant_color,
+                            .one_minus_constant_color => .one_minus_constant_color,
+                            .constant_alpha => .constant_alpha,
+                            .one_minus_constant_alpha => .one_minus_constant_alpha,
+                            .src_alpha_saturate => .src_alpha_saturate,
+                        };
+                    }
                 };
 
                 const BlendOp = enum {
@@ -1643,6 +1681,16 @@ const GraphicsPipeline = struct {
                     reverse_subtract,
                     min,
                     max,
+
+                    fn vulkan(blend_op: BlendOp) vk.BlendOp {
+                        return switch (blend_op) {
+                            .add => .add,
+                            .subtract => .subtract,
+                            .reverse_subtract => .reverse_subtract,
+                            .min => .min,
+                            .max => .max,
+                        };
+                    }
                 };
 
                 src_color_blend_factor: BlendFactor,
@@ -1662,9 +1710,9 @@ const GraphicsPipeline = struct {
         fragment_shader: *const Shader,
         polygon_mode: PolygonMode,
         multisample_state: MultisampleState = .{},
-        color_attachments: []const ColorAttachment,
-        depth_attachment_format: Format,
-        stencil_attachment_format: Format,
+        color_attachments: []const ColorAttachment = &.{},
+        depth_attachment_format: ?Format = null,
+        stencil_attachment_format: ?Format = null,
     };
 
     const DynamicState = struct {
@@ -1801,25 +1849,60 @@ const GraphicsPipeline = struct {
             .primitive_restart_enable,
         };
 
-        const color_blend_attachments = [_]vk.PipelineColorBlendAttachmentState{.{
-            .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
-            .blend_enable = .false,
-            .src_color_blend_factor = .one,
-            .dst_color_blend_factor = .zero,
-            .color_blend_op = .add,
-            .src_alpha_blend_factor = .one,
-            .dst_alpha_blend_factor = .zero,
-            .alpha_blend_op = .add,
-        }};
+        // const color_blend_attachments = [_]vk.PipelineColorBlendAttachmentState{.{
+        //     .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
+        //     .blend_enable = .false,
+        //     .src_color_blend_factor = .one,
+        //     .dst_color_blend_factor = .zero,
+        //     .color_blend_op = .add,
+        //     .src_alpha_blend_factor = .one,
+        //     .dst_alpha_blend_factor = .zero,
+        //     .alpha_blend_op = .add,
+        // }};
 
-        const color_attachment_formats = [_]vk.Format{
-            .b8g8r8a8_srgb,
-        };
+        // TODO probably better to have a reusable arena in Context
+        var arena_impl: std.heap.ArenaAllocator = .init(ctx.gpa);
+        defer arena_impl.deinit();
+        const arena = arena_impl.allocator();
+
+        const color_attachment_formats = try arena.alloc(
+            vk.Format,
+            static_state.color_attachments.len,
+        );
+        const color_blend_attachments = try arena.alloc(
+            vk.PipelineColorBlendAttachmentState,
+            static_state.color_attachments.len,
+        );
+        for (static_state.color_attachments, 0..) |color_attachment, i| {
+            color_attachment_formats[i] = color_attachment.format.vulkan();
+            var cba = std.mem.zeroes(vk.PipelineColorBlendAttachmentState);
+            cba.color_write_mask = color_attachment.color_write_mask.vulkan();
+            if (color_attachment.blend_state) |blend_state| {
+                cba.blend_enable = .true;
+                cba.src_color_blend_factor = blend_state.src_color_blend_factor.vulkan();
+                cba.dst_color_blend_factor = blend_state.dst_color_blend_factor.vulkan();
+                cba.color_blend_op = blend_state.color_blend_op.vulkan();
+                cba.src_alpha_blend_factor = blend_state.src_alpha_blend_factor.vulkan();
+                cba.dst_alpha_blend_factor = blend_state.dst_alpha_blend_factor.vulkan();
+                cba.alpha_blend_op = blend_state.alpha_blend_op.vulkan();
+            }
+            color_blend_attachments[i] = cba;
+        }
+
         const dynamic_rendering: vk.PipelineRenderingCreateInfo = .{
             .color_attachment_count = @intCast(color_attachment_formats.len),
-            .p_color_attachment_formats = @ptrCast(&color_attachment_formats[0]),
-            .depth_attachment_format = .undefined,
-            .stencil_attachment_format = .undefined,
+            .p_color_attachment_formats = if (color_attachment_formats.len > 0)
+                @ptrCast(&color_attachment_formats[0])
+            else
+                null,
+            .depth_attachment_format = if (static_state.depth_attachment_format) |format|
+                format.vulkan()
+            else
+                .undefined,
+            .stencil_attachment_format = if (static_state.stencil_attachment_format) |format|
+                format.vulkan()
+            else
+                .undefined,
             .view_mask = 0, // multiview is not supported
         };
 
@@ -1873,7 +1956,11 @@ const GraphicsPipeline = struct {
                 .logic_op_enable = .false, // logic op is not supported
                 .logic_op = .clear, // logic op is not supported
                 .attachment_count = @intCast(color_blend_attachments.len),
-                .p_attachments = @ptrCast(&color_blend_attachments[0]),
+                .p_attachments = if (color_blend_attachments.len > 0)
+                    @ptrCast(&color_blend_attachments[0])
+                else
+                    null,
+
                 .blend_constants = .{ 0.0, 0.0, 0.0, 0.0 }, // dynamic
             },
             .p_dynamic_state = &.{

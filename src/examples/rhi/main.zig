@@ -55,9 +55,6 @@ pub fn main() !void {
         .vertex_shader = &vertex_shader,
         .fragment_shader = &fragment_shader,
         .polygon_mode = .fill,
-        .color_attachments = &.{},
-        .depth_attachment_format = undefined,
-        .stencil_attachment_format = undefined,
     }, .{
         .viewport = .{
             .x = 0,
