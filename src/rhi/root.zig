@@ -1830,6 +1830,19 @@ const GraphicsPipeline = struct {
                 not_equal,
                 greater_or_equal,
                 always,
+
+                fn vulkan(compare_op: CompareOp) vk.CompareOp {
+                    return switch (compare_op) {
+                        .never => .never,
+                        .less => .less,
+                        .equal => .equal,
+                        .less_or_equal => .less_or_equal,
+                        .greater => .greater,
+                        .not_equal => .not_equal,
+                        .greater_or_equal => .greater_or_equal,
+                        .always => .always,
+                    };
+                }
             };
             const StencilState = struct {
                 const StencilOp = enum {
@@ -1841,6 +1854,19 @@ const GraphicsPipeline = struct {
                     invert,
                     increment_and_wrap,
                     decrement_and_wrap,
+
+                    fn vulkan(stencil_op: StencilOp) vk.StencilOp {
+                        return switch (stencil_op) {
+                            .keep => .keep,
+                            .zero => .zero,
+                            .replace => .replace,
+                            .increment_and_clamp => .increment_and_clamp,
+                            .decrement_and_clamp => .decrement_and_clamp,
+                            .invert => .invert,
+                            .increment_and_wrap => .increment_and_wrap,
+                            .decrement_and_wrap => .decrement_and_wrap,
+                        };
+                    }
                 };
                 const StencilOpState = struct {
                     fail_op: StencilOp,
@@ -1850,6 +1876,18 @@ const GraphicsPipeline = struct {
                     compare_mask: u32 = 0xFFFFFFFF,
                     write_mask: u32 = 0xFFFFFFFF,
                     reference: u32,
+
+                    fn vulkan(stencil_op_state: StencilOpState) vk.StencilOpState {
+                        return .{
+                            .fail_op = stencil_op_state.fail_op.vulkan(),
+                            .pass_op = stencil_op_state.pass_op.vulkan(),
+                            .depth_fail_op = stencil_op_state.depth_fail_op.vulkan(),
+                            .compare_op = stencil_op_state.compare_op.vulkan(),
+                            .compare_mask = stencil_op_state.compare_mask,
+                            .write_mask = stencil_op_state.write_mask,
+                            .reference = stencil_op_state.reference,
+                        };
+                    }
                 };
 
                 front: StencilOpState,
@@ -2000,13 +2038,13 @@ const GraphicsPipeline = struct {
                 .alpha_to_one_enable = .false, // alpha to one not supported
             },
             .p_depth_stencil_state = &.{
-                .depth_test_enable = .true, // dynamic
-                .depth_write_enable = .true, // dynamic
-                .depth_compare_op = .greater, // dynamic
+                .depth_test_enable = if (dynamic_state.depth_stencil.depth_test != null) .true else .false,
+                .depth_write_enable = if (dynamic_state.depth_stencil.enable_depth_write) .true else .false,
+                .depth_compare_op = if (dynamic_state.depth_stencil.depth_test) |compare_op| compare_op.vulkan() else .never,
                 .depth_bounds_test_enable = .false, // depth boudns not supported
-                .stencil_test_enable = .false, // dynamic
-                .front = std.mem.zeroes(vk.StencilOpState), // dynamic
-                .back = std.mem.zeroes(vk.StencilOpState), // dynamic
+                .stencil_test_enable = if (dynamic_state.depth_stencil.stencil_test != null) .true else .false,
+                .front = if (dynamic_state.depth_stencil.stencil_test) |stencil_test| stencil_test.front.vulkan() else std.mem.zeroes(vk.StencilOpState),
+                .back = if (dynamic_state.depth_stencil.stencil_test) |stencil_test| stencil_test.back.vulkan() else std.mem.zeroes(vk.StencilOpState),
                 .min_depth_bounds = 0.0, // depth boudns not supported
                 .max_depth_bounds = 0.0, // depth boudns not supported
             },
@@ -2014,12 +2052,8 @@ const GraphicsPipeline = struct {
                 .logic_op_enable = .false, // logic op is not supported
                 .logic_op = .clear, // logic op is not supported
                 .attachment_count = @intCast(color_blend_attachments.len),
-                .p_attachments = if (color_blend_attachments.len > 0)
-                    @ptrCast(&color_blend_attachments[0])
-                else
-                    null,
-
-                .blend_constants = .{ 0.0, 0.0, 0.0, 0.0 }, // dynamic
+                .p_attachments = if (color_blend_attachments.len > 0) @ptrCast(&color_blend_attachments[0]) else null,
+                .blend_constants = dynamic_state.blend_constants,
             },
             .p_dynamic_state = &.{
                 .dynamic_state_count = @intCast(dynamic_states.len),
