@@ -29,6 +29,7 @@ const device_features = vk.PhysicalDeviceFeatures{
     .multi_draw_indirect = .true,
     .draw_indirect_first_instance = .true,
     .shader_int_64 = .true,
+    .texture_compression_bc = .true,
 };
 const device_features_1_1 = vk.PhysicalDeviceVulkan11Features{
     .p_next = @ptrCast(@constCast(&device_features_1_2)),
@@ -962,9 +963,8 @@ const Swapchain = struct {
         const fences = try ctx.gpa.alloc(vk.Fence, swapchain_images.len);
         errdefer ctx.gpa.free(fences);
         for (0..swapchain_images.len) |i| {
-            // NOTE do we want to create it signalled ?
             fences[i] = ctx.device.createFence(&.{
-                .flags = .{ .signaled_bit = true },
+                .flags = .{ .signaled_bit = true }, // create signalled so we can use it right away
             }, null) catch |e| {
                 var j = i;
                 while (j > 0) : (j -= 1) ctx.device.destroyFence(fences[j - 1], null);
@@ -1597,15 +1597,34 @@ const Shader = struct {
     }
 };
 
-pub const Format = enum(u32) {
-    placeholder,
+pub const Format = enum {
+    r8g8b8a8_unorm,
+    r8g8b8a8_srgb,
+    b8g8r8a8_unorm,
+    b8g8r8a8_srgb,
+    r16g16b16a16_sfloat,
+    r32_uint,
+    s8_uint,
+    d16_unorm,
+    d16_unorm_s8_uint,
+    d24_unorm_s8_uint,
+    d32_sfloat,
+    d32_sfloat_s8_uint,
 
     fn vulkan(format: Format) vk.Format {
         return switch (format) {
-            else => blk: {
-                log.debug("Format {} does not have a matching vulkan format", .{format});
-                break :blk .undefined;
-            },
+            .r8g8b8a8_unorm => .r8g8b8a8_unorm,
+            .r8g8b8a8_srgb => .r8g8b8a8_srgb,
+            .b8g8r8a8_unorm => .b8g8r8a8_unorm,
+            .b8g8r8a8_srgb => .b8g8r8a8_srgb,
+            .r16g16b16a16_sfloat => .r16g16b16a16_sfloat,
+            .r32_uint => .r32_uint,
+            .s8_uint => .s8_uint,
+            .d16_unorm => .d16_unorm,
+            .d16_unorm_s8_uint => .d16_unorm_s8_uint,
+            .d24_unorm_s8_uint => .d24_unorm_s8_uint,
+            .d32_sfloat => .d32_sfloat,
+            .d32_sfloat_s8_uint => .d32_sfloat_s8_uint,
         };
     }
 };

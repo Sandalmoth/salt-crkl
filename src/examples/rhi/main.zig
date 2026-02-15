@@ -73,6 +73,8 @@ pub fn main() !void {
     });
     defer ctx.destroyGraphicsPipeline(&pipeline);
 
+    // create an off-screen texture to render to
+
     {
         const command_buffer = ctx.acquireCommandBuffer(.graphics);
         try command_buffer.uploadToBuffer(
@@ -111,25 +113,13 @@ pub fn main() !void {
 
         std.Thread.sleep(100_000_000);
 
-        // i guess we should make creating image arrays easy
-        // since we cant do the cycle abstraction or it would break the bindless handles i think
-        // const backbuffer = ctx.createTexture(size, format, );
-
-        // const command_buffer = ctx.acquireCommandBuffer(.graphics);
-        // const pass = command_buffer.beginRenderPass(.{
-        //     .color_target = backbuffer[frame_index],
-        // });
-        // pass.bindPipeline(pipeline_handle);
-        // pass.bindIndexBuffer(index_buffer_handle);
-        // pass.drawIndexed(index_count);
-        // pass.endAndPresent(backbuffer);
-
-        // lets just write out the code to do an empty present
+        // lets just aim for a hello triangle as step one
         // just to see what needs to be abstracted
         frame_in_flight = (frame_in_flight + 1) % 2;
         const command_buffer = ctx.acquireCommandBuffer(.graphics);
 
-        // bind a pipeline
+        // bind our pipeline
+        // bind the off-screen texture as the render target
         // bind the index buffer
         // push constant upload with the vertex buffer address
         // draw
