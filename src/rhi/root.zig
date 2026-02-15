@@ -1612,9 +1612,41 @@ pub const Format = enum(u32) {
 
 const GraphicsPipeline = struct {
     const StaticState = struct {
-        const PolygonMode = enum { fill, line, point };
+        const PolygonMode = enum {
+            fill,
+            line,
+            point,
+
+            fn vulkan(polygon_mode: PolygonMode) vk.PolygonMode {
+                return switch (polygon_mode) {
+                    .fill => .fill,
+                    .line => .line,
+                    .point => .point,
+                };
+            }
+        };
         const MultisampleState = struct {
-            const SampleCount = enum { @"1", @"2", @"4", @"8", @"16", @"32", @"64" };
+            const SampleCount = enum {
+                @"1",
+                @"2",
+                @"4",
+                @"8",
+                @"16",
+                @"32",
+                @"64",
+
+                fn vulkan(sample_count: SampleCount) vk.SampleCountFlags {
+                    return .{
+                        .@"1_bit" = sample_count == .@"1",
+                        .@"2_bit" = sample_count == .@"2",
+                        .@"4_bit" = sample_count == .@"4",
+                        .@"8_bit" = sample_count == .@"8",
+                        .@"16_bit" = sample_count == .@"16",
+                        .@"32_bit" = sample_count == .@"32",
+                        .@"64_bit" = sample_count == .@"64",
+                    };
+                }
+            };
 
             sample_count: SampleCount = .@"1",
             enable_alpha_to_coverage: bool = false,
@@ -1709,7 +1741,7 @@ const GraphicsPipeline = struct {
         vertex_shader: *const Shader,
         fragment_shader: *const Shader,
         polygon_mode: PolygonMode,
-        multisample_state: MultisampleState = .{},
+        multisample: MultisampleState = .{},
         color_attachments: []const ColorAttachment = &.{},
         depth_attachment_format: ?Format = null,
         stencil_attachment_format: ?Format = null,
@@ -1738,13 +1770,44 @@ const GraphicsPipeline = struct {
                 triangle_list,
                 triangle_strip,
                 triangle_fan,
+
+                fn vulkan(primitive_topology: PrimitiveTopology) vk.PrimitiveTopology {
+                    return switch (primitive_topology) {
+                        .point_list => .point_list,
+                        .line_list => .line_list,
+                        .line_strip => .line_strip,
+                        .triangle_list => .triangle_list,
+                        .triangle_strip => .triangle_strip,
+                        .triangle_fan => .triangle_fan,
+                    };
+                }
             };
             primitive_topology: PrimitiveTopology = .triangle_list,
             enable_primitive_restart: bool = false,
         };
         const RasterizationState = struct {
-            const CullMode = struct { front: bool = false, back: bool = true };
-            const FrontFace = enum { counter_clockwise, clockwise };
+            const CullMode = struct {
+                front: bool = false,
+                back: bool = true,
+
+                fn vulkan(cull_mode: CullMode) vk.CullModeFlags {
+                    return .{
+                        .front_bit = cull_mode.front,
+                        .back_bit = cull_mode.back,
+                    };
+                }
+            };
+            const FrontFace = enum {
+                counter_clockwise,
+                clockwise,
+
+                fn vulkan(front_face: FrontFace) vk.FrontFace {
+                    return switch (front_face) {
+                        .counter_clockwise => .counter_clockwise,
+                        .clockwise => .clockwise,
+                    };
+                }
+            };
             const DepthBias = struct {
                 constant_factor: f32,
                 clamp: f32,
@@ -1849,17 +1912,6 @@ const GraphicsPipeline = struct {
             .primitive_restart_enable,
         };
 
-        // const color_blend_attachments = [_]vk.PipelineColorBlendAttachmentState{.{
-        //     .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
-        //     .blend_enable = .false,
-        //     .src_color_blend_factor = .one,
-        //     .dst_color_blend_factor = .zero,
-        //     .color_blend_op = .add,
-        //     .src_alpha_blend_factor = .one,
-        //     .dst_alpha_blend_factor = .zero,
-        //     .alpha_blend_op = .add,
-        // }};
-
         // TODO probably better to have a reusable arena in Context
         var arena_impl: std.heap.ArenaAllocator = .init(ctx.gpa);
         defer arena_impl.deinit();
@@ -1891,18 +1943,9 @@ const GraphicsPipeline = struct {
 
         const dynamic_rendering: vk.PipelineRenderingCreateInfo = .{
             .color_attachment_count = @intCast(color_attachment_formats.len),
-            .p_color_attachment_formats = if (color_attachment_formats.len > 0)
-                @ptrCast(&color_attachment_formats[0])
-            else
-                null,
-            .depth_attachment_format = if (static_state.depth_attachment_format) |format|
-                format.vulkan()
-            else
-                .undefined,
-            .stencil_attachment_format = if (static_state.stencil_attachment_format) |format|
-                format.vulkan()
-            else
-                .undefined,
+            .p_color_attachment_formats = if (color_attachment_formats.len > 0) @ptrCast(&color_attachment_formats[0]) else null,
+            .depth_attachment_format = if (static_state.depth_attachment_format) |format| format.vulkan() else .undefined,
+            .stencil_attachment_format = if (static_state.stencil_attachment_format) |format| format.vulkan() else .undefined,
             .view_mask = 0, // multiview is not supported
         };
 
@@ -1911,35 +1954,50 @@ const GraphicsPipeline = struct {
             .p_stages = @ptrCast(&shader_stages[0]),
             .p_vertex_input_state = &.{}, // vertex buffers are not supported
             .p_input_assembly_state = &.{
-                .topology = .triangle_list,
-
-                .primitive_restart_enable = .false,
-            }, // dynamic
+                .topology = dynamic_state.input_assembly.primitive_topology.vulkan(),
+                .primitive_restart_enable = if (dynamic_state.input_assembly.enable_primitive_restart) .true else .false,
+            },
             .p_viewport_state = &.{
                 .viewport_count = 1, // multiple viewports are not supported
-                .p_viewports = null, // dynamic
+                .p_viewports = @ptrCast(&.{
+                    .x = dynamic_state.viewport.x,
+                    .y = dynamic_state.viewport.y,
+                    .width = dynamic_state.viewport.width,
+                    .height = dynamic_state.viewport.height,
+                    .min_depth = dynamic_state.viewport.min_depth,
+                    .max_depth = dynamic_state.viewport.max_depth,
+                }),
                 .scissor_count = 1, // multiple viewports are not supported
-                .p_scissors = null, // dynamic
+                .p_scissors = @ptrCast(&.{
+                    .offset = .{
+                        .x = dynamic_state.scissor.x,
+                        .y = dynamic_state.scissor.y,
+                    },
+                    .extent = .{
+                        .width = dynamic_state.scissor.width,
+                        .height = dynamic_state.scissor.height,
+                    },
+                }),
             },
             .p_rasterization_state = &.{
                 .depth_clamp_enable = .false, // depth clamp not supported
-                .rasterizer_discard_enable = .false, // dynamic
-                .polygon_mode = .fill,
-                .line_width = 1.0, // dynamic
-                .cull_mode = .{}, // dynamic
-                .front_face = .counter_clockwise, // dynamic
-                .depth_bias_enable = .false, // dynamic
-                .depth_bias_constant_factor = 0.0, // dynyamic
-                .depth_bias_clamp = 0.0, // dynamic
-                .depth_bias_slope_factor = 0.0, // dynamic
+                .rasterizer_discard_enable = if (dynamic_state.rasterization.enable_rasterizer_discard) .true else .false,
+                .polygon_mode = static_state.polygon_mode.vulkan(),
+                .line_width = dynamic_state.rasterization.line_width,
+                .cull_mode = dynamic_state.rasterization.cull_mode.vulkan(),
+                .front_face = dynamic_state.rasterization.front_face.vulkan(),
+                .depth_bias_enable = if (dynamic_state.rasterization.depth_bias != null) .true else .false,
+                .depth_bias_constant_factor = if (dynamic_state.rasterization.depth_bias) |depth_bias| depth_bias.constant_factor else 0.0,
+                .depth_bias_clamp = if (dynamic_state.rasterization.depth_bias) |depth_bias| depth_bias.clamp else 0.0,
+                .depth_bias_slope_factor = if (dynamic_state.rasterization.depth_bias) |depth_bias| depth_bias.slope_factor else 0.0,
             },
             .p_multisample_state = &.{
-                .rasterization_samples = .{ .@"1_bit" = true },
-                .sample_shading_enable = .false,
-                .min_sample_shading = 1.0,
-                .p_sample_mask = null,
-                .alpha_to_coverage_enable = .false,
-                .alpha_to_one_enable = .false,
+                .rasterization_samples = static_state.multisample.sample_count.vulkan(),
+                .sample_shading_enable = .false, // sample shading not supported
+                .min_sample_shading = 1.0, // sample shading not supported
+                .p_sample_mask = null, // sample mask not supported
+                .alpha_to_coverage_enable = if (static_state.multisample.enable_alpha_to_coverage) .true else .false,
+                .alpha_to_one_enable = .false, // alpha to one not supported
             },
             .p_depth_stencil_state = &.{
                 .depth_test_enable = .true, // dynamic
