@@ -51,29 +51,12 @@ pub fn build(b: *std.Build) void {
     });
     _ = profiler;
 
-    const rhi_vma = b.addModule("rhi_vma", .{
-        .root_source_file = b.path("src/rhi/vma.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "vulkan", .module = vulkan },
-        },
-        .link_libcpp = true,
-    });
-    // rhi_vma.addIncludePath(b.path("lib"));
-    rhi_vma.addCSourceFile(.{
-        .file = b.path("lib/vk_mem_alloc.cpp"),
-        .flags = &.{ "-std=c++17", "-O3" },
-        .language = .cpp,
-    });
-
     const rhi = b.addModule("rhi", .{
         .root_source_file = b.path("src/rhi/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "vulkan", .module = vulkan },
-            .{ .name = "vma", .module = rhi_vma },
         },
     });
     rhi.addIncludePath(b.path("lib"));

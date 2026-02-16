@@ -1,8 +1,6 @@
 const std = @import("std");
 pub const vk = @import("vulkan");
 
-const vma = @import("vma.zig");
-
 const OffsetAllocator = @import("OffsetAllocator.zig").Allocator;
 const Allocation = @import("OffsetAllocator.zig").Allocation;
 
@@ -113,8 +111,7 @@ pub const Context = struct {
     descriptor_set_layout: vk.DescriptorSetLayout,
     pipeline_layout: vk.PipelineLayout,
 
-    // allocator: Allocator,
-    allocator: vma.VulkanMemoryAllocator,
+    allocator: Allocator,
 
     pub fn create(
         gpa: std.mem.Allocator,
@@ -148,7 +145,7 @@ pub const Context = struct {
 
         try ctx.initPipelineLayout();
         errdefer ctx.deinitPipelineLayout();
-        ctx.allocator = try .init(ctx.instance, ctx.device, ctx.physical_device);
+        ctx.allocator = try .init(ctx);
         errdefer ctx.allocator.deinit();
 
         ctx.command_buffers.set(.graphics, try .init(ctx, .graphics));
