@@ -1,6 +1,8 @@
 const std = @import("std");
 pub const vk = @import("vulkan");
 
+const vma = @import("vma.zig");
+
 const OffsetAllocator = @import("OffsetAllocator.zig").Allocator;
 const Allocation = @import("OffsetAllocator.zig").Allocation;
 
@@ -51,8 +53,6 @@ const device_features_1_3 = vk.PhysicalDeviceVulkan13Features{
     .synchronization_2 = .true,
     .maintenance_4 = .true,
 };
-
-const frames_in_flight = 2;
 
 const Platform = struct {
     getInstanceProcAddress: *const fn (vk.Instance, [*:0]const u8) vk.PfnVoidFunction,
@@ -113,7 +113,8 @@ pub const Context = struct {
     descriptor_set_layout: vk.DescriptorSetLayout,
     pipeline_layout: vk.PipelineLayout,
 
-    allocator: Allocator,
+    // allocator: Allocator,
+    allocator: vma.VulkanMemoryAllocator,
 
     pub fn create(
         gpa: std.mem.Allocator,
@@ -147,7 +148,7 @@ pub const Context = struct {
 
         try ctx.initPipelineLayout();
         errdefer ctx.deinitPipelineLayout();
-        ctx.allocator = try .init(ctx);
+        ctx.allocator = try .init(ctx.instance, ctx.device, ctx.physical_device);
         errdefer ctx.allocator.deinit();
 
         ctx.command_buffers.set(.graphics, try .init(ctx, .graphics));
@@ -261,13 +262,13 @@ pub const Context = struct {
         );
     }
 
-    pub fn createBuffer(ctx: *Context, size: u32) !Buffer {
-        return ctx.allocator.createBuffer(size);
-    }
+    // pub fn createBuffer(ctx: *Context, size: u32) !Buffer {
+    //     return ctx.allocator.createBuffer(size);
+    // }
 
-    pub fn createUploadBuffer(ctx: *Context, size: u32) !UploadBuffer {
-        return ctx.allocator.createUploadBuffer(size);
-    }
+    // pub fn createUploadBuffer(ctx: *Context, size: u32) !UploadBuffer {
+    //     return ctx.allocator.createUploadBuffer(size);
+    // }
 
     pub fn createGraphicsPipeline(
         ctx: *Context,

@@ -33,10 +33,10 @@ pub fn main() !void {
     }, .{}, "example_rhi");
     defer ctx.destroy();
 
-    var upload_buffer = try ctx.createUploadBuffer(65536);
+    // var upload_buffer = try ctx.createUploadBuffer(65536);
     // std.debug.print("{}\n", .{upload_buffer});
-    var vertex_buffer = try ctx.createBuffer(1024);
-    var index_buffer = try ctx.createBuffer(1024);
+    // var vertex_buffer = try ctx.createBuffer(1024);
+    // var index_buffer = try ctx.createBuffer(1024);
     // std.debug.print("{}\n", .{vertex_buffer});
     // std.debug.print("{}\n", .{index_buffer});
 
@@ -75,27 +75,27 @@ pub fn main() !void {
 
     // create an off-screen texture to render to
 
-    {
-        const command_buffer = ctx.acquireCommandBuffer(.graphics);
-        try command_buffer.uploadToBuffer(
-            std.mem.sliceAsBytes(&[4][3]f32{
-                .{ -1, -1, 0.5 },
-                .{ 1, -1, 0.5 },
-                .{ -1, 1, 0.5 },
-                .{ 1, 1, 0.5 },
-            }),
-            &upload_buffer,
-            &vertex_buffer,
-            0,
-        );
-        try command_buffer.uploadToBuffer(
-            std.mem.sliceAsBytes(&[6]u32{ 0, 2, 1, 2, 3, 1 }),
-            &upload_buffer,
-            &index_buffer,
-            0,
-        );
-        try ctx.submitCommandBuffer(command_buffer);
-    }
+    // {
+    //     const command_buffer = ctx.acquireCommandBuffer(.graphics);
+    //     try command_buffer.uploadToBuffer(
+    //         std.mem.sliceAsBytes(&[4][3]f32{
+    //             .{ -1, -1, 0.5 },
+    //             .{ 1, -1, 0.5 },
+    //             .{ -1, 1, 0.5 },
+    //             .{ 1, 1, 0.5 },
+    //         }),
+    //         &upload_buffer,
+    //         &vertex_buffer,
+    //         0,
+    //     );
+    //     try command_buffer.uploadToBuffer(
+    //         std.mem.sliceAsBytes(&[6]u32{ 0, 2, 1, 2, 3, 1 }),
+    //         &upload_buffer,
+    //         &index_buffer,
+    //         0,
+    //     );
+    //     try ctx.submitCommandBuffer(command_buffer);
+    // }
 
     var frame_in_flight: u32 = 0;
 
@@ -123,6 +123,8 @@ pub fn main() !void {
         // bind the index buffer
         // push constant upload with the vertex buffer address
         // draw
+        // present
+        //   - queue ownership transfer of off-screen buffer
 
         try ctx.submitCommandBuffer(command_buffer);
     }
