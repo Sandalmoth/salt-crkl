@@ -1025,7 +1025,10 @@ const Swapchain = struct {
         return vk.PresentModeKHR.fifo_khr; // guaranteed support, should be fine not to check
     }
 
-    fn getSwapchainExtent(platform: Platform, capabilities: vk.SurfaceCapabilitiesKHR) !vk.Extent2D {
+    fn getSwapchainExtent(
+        platform: Platform,
+        capabilities: vk.SurfaceCapabilitiesKHR,
+    ) !vk.Extent2D {
         var extent = try platform.getFramebufferSize(platform.window);
         extent.width = std.math.clamp(
             extent.width,
@@ -1047,288 +1050,377 @@ const Swapchain = struct {
     }
 };
 
+// i think we can scrap bufferusage completely and always allow everything
+// const BufferUsage = packed struct(u32) {
+//     transfer_src: bool = false,
+//     transfer_dst: bool = false,
+//     storage_buffer: bool = false,
+//     index_buffer: bool = false,
+//     indirect_buffer: bool = false,
+//     // note the
+//     // _padding
+// };
+
+// what should be features of the allocator
+// and what should we actually expose in the rhi?
+
+// rhi needs
+// createBuffer(
+// - usage is always everything so not relevant
+// - queue family ownership is always concurrent so not relevant
+// - mapped_and_write or mapped_and_read or gpu_only
+//   maybe a gpu_only_but_mapped_and_read_if_available?
+// - size
+// - maybe dedicated flag, checks if dedicated is desirable and uses it if so
+// - since we don't support uniform buffers, 256 byte alignment is fine for everything
+// ) -> buffer
+// createImage(
+// - storage, sampled, transfer_src/dst, color/depth/stencil_attahcment,
+// - queue family ownership (always exclusive)
+// - memory is always gpu_only
+// - size, samplecount, etc
+// - since we do gpu only and no host_image_transfer, i think tiling can always be optimal
+// - maybe dedicated flag, checks if dedicated is desirable and uses it if so
+// ) -> image
+// createUnion(
+// - array of image create info
+// - array of buffer create info
+// ) -> union of aliased resources
+
+// but we could opt to make the allocator more general than that?
+// but why though?
+
+pub const BufferCreateInfo = struct {
+    size: usize,
+    access_mode: enum { host_write, host_read, device },
+    maybe_dedicated: bool = false,
+};
+
+pub const ImageCreateInfo = struct {
+    usage: packed struct(u32) {
+        storage: bool = false,
+        sampled: bool = false,
+        transfer_src: bool = false,
+        transfer_dst: bool = false,
+        color_attachment: bool = false,
+        depth_attachment: bool = false,
+        stencil_attachment: bool = false,
+        _padding: u25,
+    },
+    format: Format,
+    view_formats: []const Format = &.{}, // if not empty implies mutable format with given list
+
+};
+
+// partial rewrite-ish of VMA https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator
 const Allocator = struct {
+    const AllocationCreateFlags = packed struct(u32) {
+        dedicated_memory: bool,
+        never_allocate: bool,
+        create_mapped: bool,
+        within_budget: bool,
+        host_access_sequential_write: bool,
+        host_access_random: bool,
+    };
+
+    const BufferImageUsage = struct {};
+    // const AllocationCreateInfo =
+
     ctx: *Context,
-    buffer_slabs: std.ArrayList(BufferSlab),
-    upload_slabs: std.ArrayList(UploadSlab),
-    // image_slabs: std.MultiArrayList(struct { mask: u32, slab: MemorySlab }),
+    is_integrated_gpu: bool,
 
-    fn init(ctx: *Context) !Allocator {
-        return .{
-            .ctx = ctx,
-            .buffer_slabs = .empty,
-            .upload_slabs = .empty,
-            // .image_slabs = .{},
-        };
-    }
+    fn createBuffer(allocator: *Allocator, size: u32) fn findMemoryPreference(allocator: *Allocator, usage: BufferImageUsage) void {
+        var required_flags: vk.MemoryPropertyFlags = .{};
+        var preferred_flags: vk.MemoryPropertyFlags = .{};
+        var not_preferred_flags: vk.MemoryPropertyFlags = .{};
 
-    fn deinit(alloc: *Allocator) void {
-        for (alloc.buffer_slabs.items) |*slab| slab.deinit();
-        alloc.buffer_slabs.deinit(alloc.ctx.gpa);
-        for (alloc.upload_slabs.items) |*slab| slab.deinit();
-        alloc.upload_slabs.deinit(alloc.ctx.gpa);
-    }
-
-    fn createBuffer(alloc: *Allocator, size: u32) !Buffer {
-        std.debug.assert(size <= BufferSlab.slab_size);
-        // we only have one kind of buffer, so this is very straightforward
-        for (alloc.buffer_slabs.items) |*slab| return slab.alloc(size) catch continue;
-        // no slab with enough space, make a new one
-        const slab = try alloc.buffer_slabs.addOne(alloc.ctx.gpa);
-        errdefer _ = alloc.buffer_slabs.pop();
-        slab.* = try .init(alloc.ctx);
-        return slab.alloc(size) catch unreachable;
-    }
-
-    fn createUploadBuffer(alloc: *Allocator, size: u32) !UploadBuffer {
-        std.debug.assert(size <= UploadSlab.slab_size);
-        for (alloc.upload_slabs.items) |*slab| return slab.alloc(size) catch continue;
-        const slab = try alloc.upload_slabs.addOne(alloc.ctx.gpa);
-        errdefer _ = alloc.upload_slabs.pop();
-        slab.* = try .init(alloc.ctx);
-        return slab.alloc(size) catch unreachable;
+        // const device_access = usage.containsDeviceAccess();
+        // const host_access_sequential_write =
     }
 };
 
-pub const AllocationPool = struct {};
+// const Allocator = struct {
+//     ctx: *Context,
+//     buffer_slabs: std.ArrayList(BufferSlab),
+//     upload_slabs: std.ArrayList(UploadSlab),
+//     // image_slabs: std.MultiArrayList(struct { mask: u32, slab: MemorySlab }),
 
-const BufferSlab = struct {
-    const slab_size = 256 * 1024 * 1024;
+//     fn init(ctx: *Context) !Allocator {
+//         return .{
+//             .ctx = ctx,
+//             .buffer_slabs = .empty,
+//             .upload_slabs = .empty,
+//             // .image_slabs = .{},
+//         };
+//     }
 
-    ctx: *Context,
-    buffer: vk.Buffer,
-    buffer_device_address: u64,
-    buffer_ptr: ?*anyopaque,
-    memory: vk.DeviceMemory,
-    host_visible: bool,
-    host_coherent: bool,
-    allocator: OffsetAllocator, // allocator for 256 byte blocks
+//     fn deinit(alloc: *Allocator) void {
+//         for (alloc.buffer_slabs.items) |*slab| slab.deinit();
+//         alloc.buffer_slabs.deinit(alloc.ctx.gpa);
+//         for (alloc.upload_slabs.items) |*slab| slab.deinit();
+//         alloc.upload_slabs.deinit(alloc.ctx.gpa);
+//     }
 
-    fn init(ctx: *Context) !BufferSlab {
-        const queue_family_indices: FixedSet(3, u32) = .init(&.{
-            ctx.queue_families.get(.graphics),
-            ctx.queue_families.get(.async_compute),
-            ctx.queue_families.get(.transfer),
-        });
-        const buffer_info = vk.BufferCreateInfo{
-            .size = slab_size,
-            .usage = .{
-                .transfer_src_bit = true,
-                .transfer_dst_bit = true,
-                .storage_buffer_bit = true,
-                .index_buffer_bit = true,
-                .indirect_buffer_bit = true,
-                .shader_device_address_bit = true,
-            },
-            .sharing_mode = .concurrent,
-            .p_queue_family_indices = @ptrCast(queue_family_indices.items().ptr),
-            .queue_family_index_count = @intCast(queue_family_indices.items().len),
-        };
-        const buffer = try ctx.device.createBuffer(&buffer_info, null);
-        errdefer ctx.device.destroyBuffer(buffer, null);
-        const buffer_memreq = ctx.device.getBufferMemoryRequirements(buffer);
+//     fn createBuffer(alloc: *Allocator, size: u32) !Buffer {
+//         std.debug.assert(size <= BufferSlab.slab_size);
+//         // we only have one kind of buffer, so this is very straightforward
+//         for (alloc.buffer_slabs.items) |*slab| return slab.alloc(size) catch continue;
+//         // no slab with enough space, make a new one
+//         const slab = try alloc.buffer_slabs.addOne(alloc.ctx.gpa);
+//         errdefer _ = alloc.buffer_slabs.pop();
+//         slab.* = try .init(alloc.ctx);
+//         return slab.alloc(size) catch unreachable;
+//     }
 
-        const memory_type_index = findMemoryType(
-            buffer_memreq.memory_type_bits,
-            ctx.physical_device_memory_properties,
-        );
-        const alloc_flags = vk.MemoryAllocateFlagsInfo{
-            .flags = .{ .device_address_bit = true },
-            .device_mask = undefined, // note, not used
-        };
-        const alloc_info = vk.MemoryAllocateInfo{
-            .allocation_size = buffer_memreq.size,
-            .memory_type_index = memory_type_index,
-            .p_next = &alloc_flags,
-        };
-        const memory = try ctx.device.allocateMemory(&alloc_info, null);
-        errdefer ctx.device.freeMemory(memory, null);
+//     fn createUploadBuffer(alloc: *Allocator, size: u32) !UploadBuffer {
+//         std.debug.assert(size <= UploadSlab.slab_size);
+//         for (alloc.upload_slabs.items) |*slab| return slab.alloc(size) catch continue;
+//         const slab = try alloc.upload_slabs.addOne(alloc.ctx.gpa);
+//         errdefer _ = alloc.upload_slabs.pop();
+//         slab.* = try .init(alloc.ctx);
+//         return slab.alloc(size) catch unreachable;
+//     }
+// };
 
-        try ctx.device.bindBufferMemory(buffer, memory, 0);
-        const buffer_device_address = ctx.device.getBufferDeviceAddress(&.{
-            .buffer = buffer,
-        });
+// pub const AllocationPool = struct {};
 
-        var allocator: OffsetAllocator = try .init(ctx.gpa, slab_size / 256, slab_size / 4096);
-        errdefer allocator.deinit(ctx.gpa);
+// const BufferSlab = struct {
+//     const slab_size = 256 * 1024 * 1024;
 
-        const property_flags = ctx.physical_device_memory_properties
-            .memory_types[memory_type_index].property_flags;
+//     ctx: *Context,
+//     buffer: vk.Buffer,
+//     buffer_device_address: u64,
+//     buffer_ptr: ?*anyopaque,
+//     memory: vk.DeviceMemory,
+//     host_visible: bool,
+//     host_coherent: bool,
+//     allocator: OffsetAllocator, // allocator for 256 byte blocks
 
-        var buffer_ptr: ?*anyopaque = null;
-        if (property_flags.host_visible_bit) {
-            // UMA system, map it so we can transfer directly
-            buffer_ptr = try ctx.device.mapMemory(memory, 0, slab_size, .{});
-        }
+//     fn init(ctx: *Context) !BufferSlab {
+//         const queue_family_indices: FixedSet(3, u32) = .init(&.{
+//             ctx.queue_families.get(.graphics),
+//             ctx.queue_families.get(.async_compute),
+//             ctx.queue_families.get(.transfer),
+//         });
+//         const buffer_info = vk.BufferCreateInfo{
+//             .size = slab_size,
+//             .usage = .{
+//                 .transfer_src_bit = true,
+//                 .transfer_dst_bit = true,
+//                 .storage_buffer_bit = true,
+//                 .index_buffer_bit = true,
+//                 .indirect_buffer_bit = true,
+//                 .shader_device_address_bit = true,
+//             },
+//             .sharing_mode = .concurrent,
+//             .p_queue_family_indices = @ptrCast(queue_family_indices.items().ptr),
+//             .queue_family_index_count = @intCast(queue_family_indices.items().len),
+//         };
+//         const buffer = try ctx.device.createBuffer(&buffer_info, null);
+//         errdefer ctx.device.destroyBuffer(buffer, null);
+//         const buffer_memreq = ctx.device.getBufferMemoryRequirements(buffer);
 
-        return .{
-            .ctx = ctx,
-            .buffer = buffer,
-            .buffer_device_address = buffer_device_address,
-            .buffer_ptr = buffer_ptr,
-            .memory = memory,
-            .host_visible = !property_flags.host_visible_bit,
-            .host_coherent = !property_flags.host_coherent_bit,
-            .allocator = allocator,
-        };
-    }
+//         const memory_type_index = findMemoryType(
+//             buffer_memreq.memory_type_bits,
+//             ctx.physical_device_memory_properties,
+//         );
+//         const alloc_flags = vk.MemoryAllocateFlagsInfo{
+//             .flags = .{ .device_address_bit = true },
+//             .device_mask = undefined, // note, not used
+//         };
+//         const alloc_info = vk.MemoryAllocateInfo{
+//             .allocation_size = buffer_memreq.size,
+//             .memory_type_index = memory_type_index,
+//             .p_next = &alloc_flags,
+//         };
+//         const memory = try ctx.device.allocateMemory(&alloc_info, null);
+//         errdefer ctx.device.freeMemory(memory, null);
 
-    fn deinit(slab: *BufferSlab) void {
-        // TODO we should probably debug log when buffers weren't freed
-        // however, it's technically not required as all the actual resources are freed
-        // also, without adding cruft to createBuffer it's hard to really make it easy to follow
-        // although maybe copying the return address parts from the debug allocator could work?
-        slab.ctx.device.destroyBuffer(slab.buffer, null);
-        slab.ctx.device.freeMemory(slab.memory, null);
-        slab.allocator.deinit(slab.ctx.gpa);
-    }
+//         try ctx.device.bindBufferMemory(buffer, memory, 0);
+//         const buffer_device_address = ctx.device.getBufferDeviceAddress(&.{
+//             .buffer = buffer,
+//         });
 
-    fn alloc(slab: *BufferSlab, size: u32) !Buffer {
-        // by letting the allocator operate on 256 byte blocks
-        // we skip needing to handle alignment, since 256 is enough for everything
-        // at the cost of always using at least 256 bytes, which seems fine to me
-        const allocation = try slab.allocator.allocate(size / 256);
-        return .{
-            .slab = slab,
-            .allocation = allocation,
-            .size = size,
-            .buffer_device_address = slab.buffer_device_address + 256 * allocation.offset,
-        };
-    }
+//         var allocator: OffsetAllocator = try .init(ctx.gpa, slab_size / 256, slab_size / 4096);
+//         errdefer allocator.deinit(ctx.gpa);
 
-    fn findMemoryType(
-        memory_type_bits: u32,
-        physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
-    ) u32 {
-        // first try to pick device local only memory
-        for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
-            .memory_type_count], 0..) |memory_type, i|
-        {
-            if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
-            if (!memory_type.property_flags.device_local_bit) continue;
-            if (memory_type.property_flags.host_visible_bit) continue;
-            return @intCast(i);
-        }
-        // if not possible, pick also host visible
-        for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
-            .memory_type_count], 0..) |memory_type, i|
-        {
-            if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
-            if (!memory_type.property_flags.device_local_bit) continue;
-            if (!memory_type.property_flags.host_visible_bit) continue;
-            return @intCast(i);
-        }
-        // vulkan spec
-        // There must be at least one memory type with the
-        // VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT bit set in its propertyFlags
-        // hence the above tests should always find a suitable memory type
-        unreachable;
-    }
-};
+//         const property_flags = ctx.physical_device_memory_properties
+//             .memory_types[memory_type_index].property_flags;
 
-const UploadSlab = struct {
-    const slab_size = 256 * 1024 * 1024;
+//         var buffer_ptr: ?*anyopaque = null;
+//         if (property_flags.host_visible_bit) {
+//             // UMA system, map it so we can transfer directly
+//             buffer_ptr = try ctx.device.mapMemory(memory, 0, slab_size, .{});
+//         }
 
-    ctx: *Context,
-    buffer: vk.Buffer,
-    buffer_ptr: *anyopaque,
-    memory: vk.DeviceMemory,
-    allocator: OffsetAllocator,
+//         return .{
+//             .ctx = ctx,
+//             .buffer = buffer,
+//             .buffer_device_address = buffer_device_address,
+//             .buffer_ptr = buffer_ptr,
+//             .memory = memory,
+//             .host_visible = !property_flags.host_visible_bit,
+//             .host_coherent = !property_flags.host_coherent_bit,
+//             .allocator = allocator,
+//         };
+//     }
 
-    fn init(ctx: *Context) !UploadSlab {
-        const queue_family_indices: FixedSet(3, u32) = .init(&.{
-            ctx.queue_families.get(.graphics),
-            ctx.queue_families.get(.async_compute),
-            ctx.queue_families.get(.transfer),
-        });
-        const buffer_info = vk.BufferCreateInfo{
-            .size = slab_size,
-            .usage = .{
-                .transfer_src_bit = true,
-            },
-            .sharing_mode = .concurrent,
-            .p_queue_family_indices = @ptrCast(queue_family_indices.items().ptr),
-            .queue_family_index_count = @intCast(queue_family_indices.items().len),
-        };
-        const buffer = try ctx.device.createBuffer(&buffer_info, null);
-        errdefer ctx.device.destroyBuffer(buffer, null);
-        const buffer_memreq = ctx.device.getBufferMemoryRequirements(buffer);
+//     fn deinit(slab: *BufferSlab) void {
+//         // TODO we should probably debug log when buffers weren't freed
+//         // however, it's technically not required as all the actual resources are freed
+//         // also, without adding cruft to createBuffer it's hard to really make it easy to follow
+//         // although maybe copying the return address parts from the debug allocator could work?
+//         slab.ctx.device.destroyBuffer(slab.buffer, null);
+//         slab.ctx.device.freeMemory(slab.memory, null);
+//         slab.allocator.deinit(slab.ctx.gpa);
+//     }
 
-        const memory_type_index = findMemoryType(
-            buffer_memreq.memory_type_bits,
-            ctx.physical_device_memory_properties,
-        );
-        const alloc_info = vk.MemoryAllocateInfo{
-            .allocation_size = buffer_memreq.size,
-            .memory_type_index = memory_type_index,
-        };
-        const memory = try ctx.device.allocateMemory(&alloc_info, null);
-        errdefer ctx.device.freeMemory(memory, null);
+//     fn alloc(slab: *BufferSlab, size: u32) !Buffer {
+//         // by letting the allocator operate on 256 byte blocks
+//         // we skip needing to handle alignment, since 256 is enough for everything
+//         // at the cost of always using at least 256 bytes, which seems fine to me
+//         const allocation = try slab.allocator.allocate(size / 256);
+//         return .{
+//             .slab = slab,
+//             .allocation = allocation,
+//             .size = size,
+//             .buffer_device_address = slab.buffer_device_address + 256 * allocation.offset,
+//         };
+//     }
 
-        try ctx.device.bindBufferMemory(buffer, memory, 0);
+//     fn findMemoryType(
+//         memory_type_bits: u32,
+//         physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
+//     ) u32 {
+//         // first try to pick device local only memory
+//         for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
+//             .memory_type_count], 0..) |memory_type, i|
+//         {
+//             if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
+//             if (!memory_type.property_flags.device_local_bit) continue;
+//             if (memory_type.property_flags.host_visible_bit) continue;
+//             return @intCast(i);
+//         }
+//         // if not possible, pick also host visible
+//         for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
+//             .memory_type_count], 0..) |memory_type, i|
+//         {
+//             if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
+//             if (!memory_type.property_flags.device_local_bit) continue;
+//             if (!memory_type.property_flags.host_visible_bit) continue;
+//             return @intCast(i);
+//         }
+//         // vulkan spec
+//         // There must be at least one memory type with the
+//         // VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT bit set in its propertyFlags
+//         // hence the above tests should always find a suitable memory type
+//         unreachable;
+//     }
+// };
 
-        const alignment: u32 = @intCast(ctx.physical_device_properties.limits
-            .optimal_buffer_copy_offset_alignment);
-        var allocator: OffsetAllocator = try .init(
-            ctx.gpa,
-            slab_size / alignment,
-            slab_size / 4096,
-        );
-        errdefer allocator.deinit(ctx.gpa);
+// const UploadSlab = struct {
+//     const slab_size = 256 * 1024 * 1024;
 
-        const buffer_ptr = try ctx.device.mapMemory(memory, 0, slab_size, .{});
+//     ctx: *Context,
+//     buffer: vk.Buffer,
+//     buffer_ptr: *anyopaque,
+//     memory: vk.DeviceMemory,
+//     allocator: OffsetAllocator,
 
-        return .{
-            .ctx = ctx,
-            .buffer = buffer,
-            .buffer_ptr = buffer_ptr.?,
-            .memory = memory,
-            .allocator = allocator,
-        };
-    }
+//     fn init(ctx: *Context) !UploadSlab {
+//         const queue_family_indices: FixedSet(3, u32) = .init(&.{
+//             ctx.queue_families.get(.graphics),
+//             ctx.queue_families.get(.async_compute),
+//             ctx.queue_families.get(.transfer),
+//         });
+//         const buffer_info = vk.BufferCreateInfo{
+//             .size = slab_size,
+//             .usage = .{
+//                 .transfer_src_bit = true,
+//             },
+//             .sharing_mode = .concurrent,
+//             .p_queue_family_indices = @ptrCast(queue_family_indices.items().ptr),
+//             .queue_family_index_count = @intCast(queue_family_indices.items().len),
+//         };
+//         const buffer = try ctx.device.createBuffer(&buffer_info, null);
+//         errdefer ctx.device.destroyBuffer(buffer, null);
+//         const buffer_memreq = ctx.device.getBufferMemoryRequirements(buffer);
 
-    fn deinit(slab: *UploadSlab) void {
-        // TODO we should probably debug log when buffers weren't freed
-        slab.allocator.deinit(slab.ctx.gpa);
-        slab.ctx.device.destroyBuffer(slab.buffer, null);
-        slab.ctx.device.freeMemory(slab.memory, null);
-    }
+//         const memory_type_index = findMemoryType(
+//             buffer_memreq.memory_type_bits,
+//             ctx.physical_device_memory_properties,
+//         );
+//         const alloc_info = vk.MemoryAllocateInfo{
+//             .allocation_size = buffer_memreq.size,
+//             .memory_type_index = memory_type_index,
+//         };
+//         const memory = try ctx.device.allocateMemory(&alloc_info, null);
+//         errdefer ctx.device.freeMemory(memory, null);
 
-    fn alloc(slab: *UploadSlab, size: u32) !UploadBuffer {
-        const alignment: u32 = @intCast(slab.ctx.physical_device_properties.limits
-            .optimal_buffer_copy_offset_alignment);
-        const allocation = try slab.allocator.allocate(size / alignment);
-        return .{
-            .slab = slab,
-            .allocation = allocation,
-            .size = size,
-            .allocator = .init(@as(
-                [*]u8,
-                @ptrCast(slab.buffer_ptr),
-            )[alignment * allocation.offset .. alignment + allocation.offset + size]),
-        };
-    }
+//         try ctx.device.bindBufferMemory(buffer, memory, 0);
 
-    fn findMemoryType(
-        memory_type_bits: u32,
-        physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
-    ) u32 {
-        // vulkan spec
-        // There must be at least one memory type with both the
-        // VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT and VK_MEMORY_PROPERTY_HOST_COHERENT_BIT bits
-        // set in its propertyFlags
-        // so this should always work
-        for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
-            .memory_type_count], 0..) |memory_type, i|
-        {
-            if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
-            if (!memory_type.property_flags.host_visible_bit) continue;
-            if (!memory_type.property_flags.host_coherent_bit) continue;
-            return @intCast(i);
-        }
-        unreachable;
-    }
-};
+//         const alignment: u32 = @intCast(ctx.physical_device_properties.limits
+//             .optimal_buffer_copy_offset_alignment);
+//         var allocator: OffsetAllocator = try .init(
+//             ctx.gpa,
+//             slab_size / alignment,
+//             slab_size / 4096,
+//         );
+//         errdefer allocator.deinit(ctx.gpa);
+
+//         const buffer_ptr = try ctx.device.mapMemory(memory, 0, slab_size, .{});
+
+//         return .{
+//             .ctx = ctx,
+//             .buffer = buffer,
+//             .buffer_ptr = buffer_ptr.?,
+//             .memory = memory,
+//             .allocator = allocator,
+//         };
+//     }
+
+//     fn deinit(slab: *UploadSlab) void {
+//         // TODO we should probably debug log when buffers weren't freed
+//         slab.allocator.deinit(slab.ctx.gpa);
+//         slab.ctx.device.destroyBuffer(slab.buffer, null);
+//         slab.ctx.device.freeMemory(slab.memory, null);
+//     }
+
+//     fn alloc(slab: *UploadSlab, size: u32) !UploadBuffer {
+//         const alignment: u32 = @intCast(slab.ctx.physical_device_properties.limits
+//             .optimal_buffer_copy_offset_alignment);
+//         const allocation = try slab.allocator.allocate(size / alignment);
+//         return .{
+//             .slab = slab,
+//             .allocation = allocation,
+//             .size = size,
+//             .allocator = .init(@as(
+//                 [*]u8,
+//                 @ptrCast(slab.buffer_ptr),
+//             )[alignment * allocation.offset .. alignment + allocation.offset + size]),
+//         };
+//     }
+
+//     fn findMemoryType(
+//         memory_type_bits: u32,
+//         physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
+//     ) u32 {
+//         // vulkan spec
+//         // There must be at least one memory type with both the
+//         // VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT and VK_MEMORY_PROPERTY_HOST_COHERENT_BIT bits
+//         // set in its propertyFlags
+//         // so this should always work
+//         for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
+//             .memory_type_count], 0..) |memory_type, i|
+//         {
+//             if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
+//             if (!memory_type.property_flags.host_visible_bit) continue;
+//             if (!memory_type.property_flags.host_coherent_bit) continue;
+//             return @intCast(i);
+//         }
+//         unreachable;
+//     }
+// };
 
 // const MemorySlab = struct {
 //     const MemoryRequirement = struct {
