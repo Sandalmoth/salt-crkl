@@ -1096,6 +1096,17 @@ pub const BufferCreateInfo = struct {
     maybe_dedicated: bool = false,
 };
 
+pub const ImageLayout = enum {
+    unknown,
+    general,
+    read_only,
+    attachment,
+    transfer_src,
+    transfer_dst,
+    depth_attachment_stencil_read_only,
+    depth_read_only_stencil_attachment,
+};
+
 pub const ImageCreateInfo = struct {
     usage: packed struct(u32) {
         storage: bool = false,
@@ -1108,8 +1119,35 @@ pub const ImageCreateInfo = struct {
         _padding: u25,
     },
     format: Format,
-    view_formats: []const Format = &.{}, // if not empty implies mutable format with given list
+    // view_formats: []const Format = &.{}, // if not empty implies mutable format with given list
+    cubemap: bool,
+    image_type: enum { image_1d, image_2d, image_3d },
+    mip_levels: u32,
+    array_layers: u32,
+    size: [3]u32,
+    samples: SampleCount,
+    queue: QueueType, // always exclusive
+    layout: ImageLayout,
+};
 
+pub const ImageViewCreateInfo = struct {
+    view_type: enum {
+        view_1d,
+        view_2d,
+        view_3d,
+        view_cube,
+        view_1d_array,
+        view_2d_array,
+        view_cube_array,
+    },
+    format: ?Format = null,
+    swizzle: struct {
+        const Component = enum { zero, one, r, g, b, a };
+        r: Component = .r,
+        g: Component = .g,
+        b: Component = .b,
+        a: Component = .a,
+    } = .{},
 };
 
 // partial rewrite-ish of VMA https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator
@@ -1719,6 +1757,28 @@ pub const Format = enum {
     }
 };
 
+const SampleCount = enum {
+    @"1",
+    @"2",
+    @"4",
+    @"8",
+    @"16",
+    @"32",
+    @"64",
+
+    fn vulkan(sample_count: SampleCount) vk.SampleCountFlags {
+        return .{
+            .@"1_bit" = sample_count == .@"1",
+            .@"2_bit" = sample_count == .@"2",
+            .@"4_bit" = sample_count == .@"4",
+            .@"8_bit" = sample_count == .@"8",
+            .@"16_bit" = sample_count == .@"16",
+            .@"32_bit" = sample_count == .@"32",
+            .@"64_bit" = sample_count == .@"64",
+        };
+    }
+};
+
 const GraphicsPipeline = struct {
     const StaticState = struct {
         const PolygonMode = enum {
@@ -1735,28 +1795,6 @@ const GraphicsPipeline = struct {
             }
         };
         const MultisampleState = struct {
-            const SampleCount = enum {
-                @"1",
-                @"2",
-                @"4",
-                @"8",
-                @"16",
-                @"32",
-                @"64",
-
-                fn vulkan(sample_count: SampleCount) vk.SampleCountFlags {
-                    return .{
-                        .@"1_bit" = sample_count == .@"1",
-                        .@"2_bit" = sample_count == .@"2",
-                        .@"4_bit" = sample_count == .@"4",
-                        .@"8_bit" = sample_count == .@"8",
-                        .@"16_bit" = sample_count == .@"16",
-                        .@"32_bit" = sample_count == .@"32",
-                        .@"64_bit" = sample_count == .@"64",
-                    };
-                }
-            };
-
             sample_count: SampleCount = .@"1",
             enable_alpha_to_coverage: bool = false,
         };
