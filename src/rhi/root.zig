@@ -1123,7 +1123,6 @@ pub const ImageCreateInfo = struct {
     cubemap: bool,
     image_type: enum { image_1d, image_2d, image_3d },
     mip_levels: u32,
-    array_layers: u32,
     size: [3]u32,
     samples: SampleCount,
     queue: QueueType, // always exclusive
@@ -1148,6 +1147,13 @@ pub const ImageViewCreateInfo = struct {
         b: Component = .b,
         a: Component = .a,
     } = .{},
+    range: struct {
+        base_mip_level: u32,
+        level_count: u32,
+        base_array_layer: u32,
+        layer_count: u32,
+        mask: ?enum { depth, stencil },
+    },
 };
 
 // partial rewrite-ish of VMA https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator
