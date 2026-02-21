@@ -44,12 +44,14 @@ const device_features_1_2 = vk.PhysicalDeviceVulkan12Features{
     .descriptor_binding_update_unused_while_pending = .true,
     .descriptor_indexing = .true,
     .runtime_descriptor_array = .true,
+    .shader_sampled_image_array_non_uniform_indexing = .true,
+    .shader_storage_image_array_non_uniform_indexing = .true,
     .timeline_semaphore = .true,
+    .scalar_block_layout = .true,
 };
 const device_features_1_3 = vk.PhysicalDeviceVulkan13Features{
     .dynamic_rendering = .true,
     .synchronization_2 = .true,
-    .maintenance_4 = .true,
 };
 
 const Platform = struct {
@@ -1107,7 +1109,7 @@ pub const ImageLayout = enum {
     depth_read_only_stencil_attachment,
 };
 
-pub const ImageCreateInfo = struct {
+pub const TextureCreateInfo = struct {
     usage: packed struct(u32) {
         storage: bool = false,
         sampled: bool = false,
@@ -1120,17 +1122,19 @@ pub const ImageCreateInfo = struct {
     },
     format: Format,
     // view_formats: []const Format = &.{}, // if not empty implies mutable format with given list
-    cubemap: bool,
+    cubemap: bool = false,
     image_type: enum { image_1d, image_2d, image_3d },
     mip_levels: u32,
     size: [3]u32,
-    samples: SampleCount,
+    samples: SampleCount = .@"1",
     queue: QueueType, // always exclusive
     layout: ImageLayout,
+    maybe_dedicated: bool = false,
+    views: []ImageViewCreateInfo,
 };
 
 pub const ImageViewCreateInfo = struct {
-    view_type: enum {
+    view_type: ?enum {
         view_1d,
         view_2d,
         view_3d,
@@ -1138,7 +1142,7 @@ pub const ImageViewCreateInfo = struct {
         view_1d_array,
         view_2d_array,
         view_cube_array,
-    },
+    } = null,
     format: ?Format = null,
     swizzle: struct {
         const Component = enum { zero, one, r, g, b, a };
@@ -1147,39 +1151,200 @@ pub const ImageViewCreateInfo = struct {
         b: Component = .b,
         a: Component = .a,
     } = .{},
-    range: struct {
+    range: ?struct {
         base_mip_level: u32,
         level_count: u32,
         base_array_layer: u32,
         layer_count: u32,
         mask: ?enum { depth, stencil },
-    },
+    } = null,
 };
 
 // partial rewrite-ish of VMA https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator
 const Allocator = struct {
-    const AllocationCreateFlags = packed struct(u32) {
-        dedicated_memory: bool,
-        never_allocate: bool,
-        create_mapped: bool,
-        within_budget: bool,
-        host_access_sequential_write: bool,
-        host_access_random: bool,
+    const AllocationCreateInfo = packed struct(u32) {
+        allow_dedicated_memory: bool = false,
+        prefer_create_mapped: bool = true,
+        location_preference: ?enum { host, device } = null,
+        usage: enum { gpu_only, host_access_sequential_write, host_access_sandom },
     };
 
-    const BufferImageUsage = struct {};
-    // const AllocationCreateInfo =
-
     ctx: *Context,
-    is_integrated_gpu: bool,
 
-    fn createBuffer(allocator: *Allocator, size: u32) fn findMemoryPreference(allocator: *Allocator, usage: BufferImageUsage) void {
+    fn createBuffer(
+        allocator: *Allocator,
+        allocation_create_info: AllocationCreateInfo,
+        buffer_create_info: BufferCreateInfo,
+    ) Buffer {
+        const queue_family_indices: FixedSet(3, u32) = .init(&.{
+            allocator.ctx.queue_families.get(.graphics),
+            allocator.ctx.queue_families.get(.async_compute),
+            allocator.ctx.queue_families.get(.transfer),
+        });
+        const buffer_info = vk.BufferCreateInfo{
+            .size = buffer_create_info.size,
+            .usage = .{
+                .transfer_src_bit = true,
+                .transfer_dst_bit = true,
+                .storage_buffer_bit = true,
+                .index_buffer_bit = true,
+                .indirect_buffer_bit = true,
+                .shader_device_address_bit = true,
+            },
+            .sharing_mode = .concurrent,
+            .p_queue_family_indices = @ptrCast(queue_family_indices.items().ptr),
+            .queue_family_index_count = @intCast(queue_family_indices.items().len),
+        };
+        const buffer = try allocator.ctx.device.createBuffer(&buffer_info, null);
+        errdefer allocator.ctx.device.destroyBuffer(buffer, null);
+        const buffer_memreq = allocator.ctx.device.getBufferMemoryRequirements(buffer);
+
+        const memory_preference = findMemoryPreference(
+            allocation_create_info,
+            buffer_create_info,
+            null,
+        );
+        _ = buffer_memreq;
+
+        var memory_type_index: u32 = undefined;
+        for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
+            .memory_type_count], 0..) |memory_type, i|
+        {
+            if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
+            if (!memory_type.property_flags.device_local_bit) continue;
+            if (memory_type.property_flags.host_visible_bit) continue;
+            return @intCast(i);
+        }
+        // if not possible, pick also host visible
+        for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
+            .memory_type_count], 0..) |memory_type, i|
+        {
+            if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
+            if (!memory_type.property_flags.device_local_bit) continue;
+            if (!memory_type.property_flags.host_visible_bit) continue;
+            return @intCast(i);
+        }
+        // vulkan spec
+        // There must be at least one memory type with the
+        // VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT bit set in its propertyFlags
+        // hence the above tests should always find a suitable memory type
+        unreachable;
+    }
+        
+
+        // const memory_type_index = findMemoryType(
+        //     buffer_memreq.memory_type_bits,
+        //     ctx.physical_device_memory_properties,
+        // );
+        // const alloc_flags = vk.MemoryAllocateFlagsInfo{
+        //     .flags = .{ .device_address_bit = true },
+        //     .device_mask = undefined, // note, not used
+        // };
+        // const alloc_info = vk.MemoryAllocateInfo{
+        //     .allocation_size = buffer_memreq.size,
+        //     .memory_type_index = memory_type_index,
+        //     .p_next = &alloc_flags,
+        // };
+        // const memory = try ctx.device.allocateMemory(&alloc_info, null);
+        // errdefer ctx.device.freeMemory(memory, null);
+
+        // try ctx.device.bindBufferMemory(buffer, memory, 0);
+        // const buffer_device_address = ctx.device.getBufferDeviceAddress(&.{
+        //     .buffer = buffer,
+        // });
+
+        // var allocator: OffsetAllocator = try .init(ctx.gpa, slab_size / 256, slab_size / 4096);
+        // errdefer allocator.deinit(ctx.gpa);
+
+        // const property_flags = ctx.physical_device_memory_properties
+        //     .memory_types[memory_type_index].property_flags;
+
+        // var buffer_ptr: ?*anyopaque = null;
+        // if (property_flags.host_visible_bit) {
+        //     // UMA system, map it so we can transfer directly
+        //     buffer_ptr = try ctx.device.mapMemory(memory, 0, slab_size, .{});
+        // }
+
+        // return .{
+        //     .ctx = ctx,
+        //     .buffer = buffer,
+        //     .buffer_device_address = buffer_device_address,
+        //     .buffer_ptr = buffer_ptr,
+        //     .memory = memory,
+        //     .host_visible = !property_flags.host_visible_bit,
+        //     .host_coherent = !property_flags.host_coherent_bit,
+        //     .allocator = allocator,
+        // };
+    }
+
+    fn createTexture(
+        allocator: *Allocator,
+        allocation_create_info: AllocationCreateInfo,
+        texture_create_info: TextureCreateInfo,
+    ) Texture {
+        _ = allocator;
+        _ = texture_create_info;
+        _ = allocation_create_info;
+    }
+
+    fn findMemoryPreference(
+        allocation_create_info: AllocationCreateInfo,
+        buffer_create_info: ?BufferCreateInfo,
+        texture_create_info: ?TextureCreateInfo,
+    ) struct {
+        required_flags: vk.MemoryPropertyFlags,
+        preferred_flags: vk.MemoryPropertyFlags,
+        not_required_flags: vk.MemoryPropertyFlags,
+    } {
+        std.debug.assert(buffer_create_info != null or texture_create_info != null);
         var required_flags: vk.MemoryPropertyFlags = .{};
         var preferred_flags: vk.MemoryPropertyFlags = .{};
         var not_preferred_flags: vk.MemoryPropertyFlags = .{};
 
-        // const device_access = usage.containsDeviceAccess();
-        // const host_access_sequential_write =
+        var device_access = undefined;
+        if (buffer_create_info) |_| {
+            // for simplicity, single buffertype that handles everything
+            device_access = true;
+        } else if (texture_create_info) |info| {
+            const qry: u32 = @bitCast(info.usage);
+            const ref: u32 = @bitCast(@TypeOf(info.usage){
+                .transfer_src = true,
+                .transfer_dst = true,
+            });
+            device_access = (qry & ~ref) != 0;
+        } else unreachable;
+        const host_access_sequential_write =
+            allocation_create_info.usage == .host_access_sequential_write;
+        const host_access_random = allocation_create_info.usage == .host_access_random;
+        const prefer_device =
+            if (allocation_create_info.location_preference) |lp| lp == .device else false;
+        const prefer_host =
+            if (allocation_create_info.location_preference) |lp| lp == .host else false;
+
+        if (host_access_random) {
+            required_flags.host_visible_bit = true;
+            preferred_flags.host_cached_bit = true;
+        } else if (host_access_sequential_write) {
+            required_flags.host_visible_bit = true;
+            not_preferred_flags.host_cached_bit = true;
+            if (device_access) {
+                if (prefer_host)
+                    not_preferred_flags.device_local_bit = true
+                else
+                    preferred_flags.device_local_bit = true;
+            } else {
+                if (prefer_device)
+                    preferred_flags.device_local_bit = true
+                else
+                    not_preferred_flags.device_local_bit = true;
+            }
+        } else {
+            if (prefer_device)
+                preferred_flags.device_local_bit = true
+            else
+                not_preferred_flags.device_local_bit = true;
+        }
+        return .{ .required_flags = required_flags, .preferred_flags = preferred_flags, .not_preferred_flags = not_preferred_flags };
     }
 };
 
@@ -1685,22 +1850,22 @@ pub const CommandBuffer = struct {
         try buffer.buffer.append(buffer.ctx.gpa, .{ .end_render_pass = .{} });
     }
 
-    pub fn uploadToBuffer(
-        buffer: *CommandBuffer,
-        src: []const u8,
-        staging: *UploadBuffer,
-        dst: *Buffer,
-        dst_offset: u32,
-    ) !void {
-        const staged = try staging.allocator.allocator().dupe(u8, src);
-        try buffer.buffer.append(buffer.ctx.gpa, .{ .upload_to_buffer = .{
-            .size = @intCast(src.len),
-            .src_offset = @intCast(@intFromPtr(staged.ptr) - @intFromPtr(staging.slab.buffer_ptr)),
-            .src_buffer = staging.slab.buffer,
-            .dst_offset = dst_offset,
-            .dst_buffer = dst.slab.buffer,
-        } });
-    }
+    // pub fn uploadtobuffer(
+    //     buffer: *commandbuffer,
+    //     src: []const u8,
+    //     staging: *uploadbuffer,
+    //     dst: *buffer,
+    //     dst_offset: u32,
+    // ) !void {
+    //     const staged = try staging.allocator.allocator().dupe(u8, src);
+    //     try buffer.buffer.append(buffer.ctx.gpa, .{ .upload_to_buffer = .{
+    //         .size = @intcast(src.len),
+    //         .src_offset = @intcast(@intfromptr(staged.ptr) - @intfromptr(staging.slab.buffer_ptr)),
+    //         .src_buffer = staging.slab.buffer,
+    //         .dst_offset = dst_offset,
+    //         .dst_buffer = dst.slab.buffer,
+    //     } });
+    // }
 };
 
 const Shader = struct {
@@ -2245,19 +2410,9 @@ const GraphicsPipeline = struct {
 const ComputePipeline = struct {};
 
 const Buffer = struct {
-    slab: *BufferSlab,
     allocation: Allocation,
     size: u32,
     buffer_device_address: u64,
-};
-
-const UploadBuffer = struct {
-    slab: *UploadSlab,
-    allocation: Allocation,
-    size: u32,
-
-    // TODO this needs to contain a linear allocator
-    allocator: std.heap.FixedBufferAllocator,
 };
 
 const Texture = struct {};
