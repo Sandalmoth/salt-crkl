@@ -269,6 +269,14 @@ pub const Context = struct {
     //     return ctx.allocator.createUploadBuffer(size);
     // }
 
+    pub fn createTransferBuffer(
+        ctx: *Context,
+        usage: TransferBuffer.Usage,
+        size: usize,
+    ) !TransferBuffer {
+        return try .init(ctx, usage, size);
+    }
+
     pub fn createGraphicsPipeline(
         ctx: *Context,
         static_state: GraphicsPipeline.StaticState,
@@ -1171,6 +1179,16 @@ const Allocator = struct {
 
     ctx: *Context,
 
+    fn init(ctx: *Context) !Allocator {
+        return .{
+            .ctx = ctx,
+        };
+    }
+
+    fn deinit(allocator: *Allocator) void {
+        allocator.* = undefined;
+    }
+
     fn createBuffer(
         allocator: *Allocator,
         allocation_create_info: AllocationCreateInfo,
@@ -1204,78 +1222,78 @@ const Allocator = struct {
             buffer_create_info,
             null,
         );
+        _ = memory_preference;
         _ = buffer_memreq;
 
-        var memory_type_index: u32 = undefined;
-        for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
-            .memory_type_count], 0..) |memory_type, i|
-        {
-            if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
-            if (!memory_type.property_flags.device_local_bit) continue;
-            if (memory_type.property_flags.host_visible_bit) continue;
-            return @intCast(i);
-        }
-        // if not possible, pick also host visible
-        for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
-            .memory_type_count], 0..) |memory_type, i|
-        {
-            if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
-            if (!memory_type.property_flags.device_local_bit) continue;
-            if (!memory_type.property_flags.host_visible_bit) continue;
-            return @intCast(i);
-        }
+        // var memory_type_index: u32 = undefined;
+        // for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
+        //     .memory_type_count], 0..) |memory_type, i|
+        // {
+        //     if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
+        //     if (!memory_type.property_flags.device_local_bit) continue;
+        //     if (memory_type.property_flags.host_visible_bit) continue;
+        //     return @intCast(i);
+        // }
+        // // if not possible, pick also host visible
+        // for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
+        //     .memory_type_count], 0..) |memory_type, i|
+        // {
+        //     if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
+        //     if (!memory_type.property_flags.device_local_bit) continue;
+        //     if (!memory_type.property_flags.host_visible_bit) continue;
+        //     return @intCast(i);
+        // }
         // vulkan spec
         // There must be at least one memory type with the
         // VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT bit set in its propertyFlags
         // hence the above tests should always find a suitable memory type
         unreachable;
     }
-        
 
-        // const memory_type_index = findMemoryType(
-        //     buffer_memreq.memory_type_bits,
-        //     ctx.physical_device_memory_properties,
-        // );
-        // const alloc_flags = vk.MemoryAllocateFlagsInfo{
-        //     .flags = .{ .device_address_bit = true },
-        //     .device_mask = undefined, // note, not used
-        // };
-        // const alloc_info = vk.MemoryAllocateInfo{
-        //     .allocation_size = buffer_memreq.size,
-        //     .memory_type_index = memory_type_index,
-        //     .p_next = &alloc_flags,
-        // };
-        // const memory = try ctx.device.allocateMemory(&alloc_info, null);
-        // errdefer ctx.device.freeMemory(memory, null);
+    // const memory_type_index = findMemoryType(
+    //     buffer_memreq.memory_type_bits,
+    //     ctx.physical_device_memory_properties,
+    // );
+    // const alloc_flags = vk.MemoryAllocateFlagsInfo{
+    //     .flags = .{ .device_address_bit = true },
+    //     .device_mask = undefined, // note, not used
+    // };
+    // const alloc_info = vk.MemoryAllocateInfo{
+    //     .allocation_size = buffer_memreq.size,
+    //     .memory_type_index = memory_type_index,
+    //     .p_next = &alloc_flags,
+    // };
+    // const memory = try ctx.device.allocateMemory(&alloc_info, null);
+    // errdefer ctx.device.freeMemory(memory, null);
 
-        // try ctx.device.bindBufferMemory(buffer, memory, 0);
-        // const buffer_device_address = ctx.device.getBufferDeviceAddress(&.{
-        //     .buffer = buffer,
-        // });
+    // try ctx.device.bindBufferMemory(buffer, memory, 0);
+    // const buffer_device_address = ctx.device.getBufferDeviceAddress(&.{
+    //     .buffer = buffer,
+    // });
 
-        // var allocator: OffsetAllocator = try .init(ctx.gpa, slab_size / 256, slab_size / 4096);
-        // errdefer allocator.deinit(ctx.gpa);
+    // var allocator: OffsetAllocator = try .init(ctx.gpa, slab_size / 256, slab_size / 4096);
+    // errdefer allocator.deinit(ctx.gpa);
 
-        // const property_flags = ctx.physical_device_memory_properties
-        //     .memory_types[memory_type_index].property_flags;
+    // const property_flags = ctx.physical_device_memory_properties
+    //     .memory_types[memory_type_index].property_flags;
 
-        // var buffer_ptr: ?*anyopaque = null;
-        // if (property_flags.host_visible_bit) {
-        //     // UMA system, map it so we can transfer directly
-        //     buffer_ptr = try ctx.device.mapMemory(memory, 0, slab_size, .{});
-        // }
+    // var buffer_ptr: ?*anyopaque = null;
+    // if (property_flags.host_visible_bit) {
+    //     // UMA system, map it so we can transfer directly
+    //     buffer_ptr = try ctx.device.mapMemory(memory, 0, slab_size, .{});
+    // }
 
-        // return .{
-        //     .ctx = ctx,
-        //     .buffer = buffer,
-        //     .buffer_device_address = buffer_device_address,
-        //     .buffer_ptr = buffer_ptr,
-        //     .memory = memory,
-        //     .host_visible = !property_flags.host_visible_bit,
-        //     .host_coherent = !property_flags.host_coherent_bit,
-        //     .allocator = allocator,
-        // };
-    }
+    // return .{
+    //     .ctx = ctx,
+    //     .buffer = buffer,
+    //     .buffer_device_address = buffer_device_address,
+    //     .buffer_ptr = buffer_ptr,
+    //     .memory = memory,
+    //     .host_visible = !property_flags.host_visible_bit,
+    //     .host_coherent = !property_flags.host_coherent_bit,
+    //     .allocator = allocator,
+    // };
+    // }
 
     fn createTexture(
         allocator: *Allocator,
@@ -2411,8 +2429,164 @@ const ComputePipeline = struct {};
 
 const Buffer = struct {
     allocation: Allocation,
-    size: u32,
+    size: usize,
     buffer_device_address: u64,
+    mapped_memory: ?[]u8,
+};
+
+const TransferBuffer = struct {
+    // upload -> HOST_VISIBLE HOST_COHERENT
+    // download -> HOST_VISIBLE HOST_CACHED if possible otherwise HOST_VISIBLE HOST_COHERENT
+    // and it should ideally not be DEVICE_LOCAL
+    // the ideal usage pattern should be a small number of large buffers
+    // so for simplicity it uses a dedicated allocation
+    const Usage = enum { upload, download };
+    ctx: *Context,
+    usage: Usage,
+    mapped_memory: []u8,
+    memory: vk.DeviceMemory,
+    buffer: vk.Buffer,
+
+    // ring buffer
+    // queue of (end, semaphore, semaphore_value) entries
+    // on allocate, see if start of queue is complete
+    queue: std.ArrayList(struct {
+        tail: u64,
+        semaphore: vk.Semaphore,
+        semaphore_value: u64,
+    }),
+    head: u64,
+    tail: u64,
+    optimal_alignment: u64,
+
+    fn init(ctx: *Context, usage: Usage, size: usize) !TransferBuffer {
+        const queue_family_indices: FixedSet(3, u32) = .init(&.{
+            ctx.queue_families.get(.graphics),
+            ctx.queue_families.get(.async_compute),
+            ctx.queue_families.get(.transfer),
+        });
+        const buffer_info = vk.BufferCreateInfo{
+            .size = size,
+            .usage = .{
+                .transfer_src_bit = usage == .upload,
+                .transfer_dst_bit = usage == .download,
+            },
+            .sharing_mode = .concurrent,
+            .p_queue_family_indices = @ptrCast(queue_family_indices.items().ptr),
+            .queue_family_index_count = @intCast(queue_family_indices.items().len),
+        };
+        const buffer = try ctx.device.createBuffer(&buffer_info, null);
+        errdefer ctx.device.destroyBuffer(buffer, null);
+
+        const optimal_alignment = ctx.physical_device_properties.limits
+            .optimal_buffer_copy_offset_alignment;
+        var buffer_memreq = ctx.device.getBufferMemoryRequirements(buffer);
+        buffer_memreq.alignment = @max(buffer_memreq.alignment, optimal_alignment);
+
+        const memory_type_index = findMemoryType(
+            buffer_memreq.memory_type_bits,
+            ctx.physical_device_memory_properties,
+            usage,
+        );
+        const alloc_info = vk.MemoryAllocateInfo{
+            .allocation_size = buffer_memreq.size,
+            .memory_type_index = memory_type_index,
+        };
+        const memory = try ctx.device.allocateMemory(&alloc_info, null);
+        errdefer ctx.device.freeMemory(memory, null);
+
+        try ctx.device.bindBufferMemory(buffer, memory, 0);
+        const buffer_ptr: [*]u8 = @ptrCast((try ctx.device.mapMemory(memory, 0, size, .{})).?);
+
+        return .{
+            .ctx = ctx,
+            .usage = usage,
+            .mapped_memory = buffer_ptr[0..size],
+            .memory = memory,
+            .buffer = buffer,
+            .queue = .empty,
+            .head = 0,
+            .tail = size,
+            .optimal_alignment = ctx.physical_device_properties.limits
+                .optimal_buffer_copy_offset_alignment,
+        };
+    }
+
+    pub fn deinit(buffer: *TransferBuffer) void {
+        buffer.ctx.device.destroyBuffer(buffer.buffer, null);
+        buffer.ctx.device.freeMemory(buffer.memory, null);
+        buffer.* = undefined;
+    }
+
+    fn alloc(buffer: *TransferBuffer, size: usize, queue: QueueType) ![]u8 {
+        if (size > buffer.mapped_memory.len) return error.TransferBufferOutOfMemory;
+        while (buffer.queue.items.len > 0) {
+            const semaphore_value = buffer.ctx.device.getSemaphoreCounterValue(
+                buffer.queue.items[0].semaphore,
+            );
+            if (semaphore_value < buffer.queue.items[0].semaphore_value) break;
+            buffer.tail = buffer.queue.items[0].tail;
+            buffer.queue.orderedRemove(0);
+        }
+
+        if (size > buffer.tail - buffer.head) return error.TransferBufferOutOfMemory;
+
+        buffer.head = std.mem.alignForward(u64, buffer.head, buffer.optimal_alignment);
+        var start = buffer.head % buffer.mapped_memory.len;
+        var end = (buffer.head + size) % buffer.mapped_memory.len;
+        if (start >= end) {
+            // advance head to next start
+            buffer.head = ((buffer.head + buffer.mapped_memory.len - 1) /
+                buffer.mapped_memory.len) * buffer.mapped_memory.len;
+            start = buffer.head % buffer.mapped_memory.len;
+            end = (buffer.head + size) % buffer.mapped_memory.len;
+        }
+
+        // recheck in case the head advance consumed the necessary memory
+        if (size > buffer.tail - buffer.head) return error.TransferBufferOutOfMemory;
+
+        try buffer.queue.append(buffer.ctx.gpa, .{
+            .tail = start + buffer.mapped_memory.len,
+            .semaphore = buffer.ctx.queue_semaphores.get(queue),
+            .semaphore_value = buffer.ctx.queue_semaphore_values.get(queue),
+        });
+        const bytes = buffer.mapped_memory[start..end];
+        return bytes;
+    }
+
+    fn findMemoryType(
+        memory_type_bits: u32,
+        physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
+        usage: Usage,
+    ) u32 {
+        var memory_type_index: ?u32 = null;
+        var best_score: i32 = -999;
+
+        for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
+            .memory_type_count], 0..) |memory_type, i|
+        {
+            // hard requirements
+            if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
+            if (!memory_type.property_flags.host_visible_bit) continue;
+            if (!memory_type.property_flags.host_coherent_bit) continue;
+            // soft requirements
+            var score: i32 = 0;
+            if (memory_type.property_flags.device_local_bit) score -= 1;
+            if (usage == .download and memory_type.property_flags.host_cached_bit) score += 2;
+            if (score > best_score) {
+                best_score = score;
+                memory_type_index = @intCast(i);
+            }
+        }
+
+        // vulkan spec
+        // There must be at least one memory type with both the
+        // VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT and VK_MEMORY_PROPERTY_HOST_COHERENT_BIT bits
+        // set in its propertyFlags
+        // so this should always work
+        std.debug.assert(memory_type_index != null);
+        return memory_type_index.?;
+    }
 };
 
 const Texture = struct {};
