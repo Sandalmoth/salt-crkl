@@ -40,8 +40,11 @@ pub fn main() !void {
     // std.debug.print("{}\n", .{vertex_buffer});
     // std.debug.print("{}\n", .{index_buffer});
 
-    var transfer_buffer = try ctx.createTransferBuffer(.upload, 1024);
+    var transfer_buffer = try ctx.createTransferBuffer(.upload, 1024 * 1024);
     defer transfer_buffer.deinit();
+
+    var vertex_buffer = try ctx.createBuffer(.{}, .{ .size = 1024 });
+    vertex_buffer = vertex_buffer;
 
     var vertex_shader = try ctx.createShader(
         .vertex,
