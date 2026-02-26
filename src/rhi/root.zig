@@ -263,7 +263,7 @@ pub const Context = struct {
 
     pub fn createBuffer(
         ctx: *Context,
-        allocation_create_info: Allocator.AllocationCreateInfo,
+        allocation_create_info: AllocationCreateInfo,
         buffer_create_info: BufferCreateInfo,
     ) !Buffer {
         return ctx.allocator.createBuffer(allocation_create_info, buffer_create_info);
@@ -1170,7 +1170,7 @@ pub const ImageViewCreateInfo = struct {
 };
 
 const AllocationCreateInfo = struct {
-    allow_dedicated_memory: bool = false,
+    dedicated: enum { if_required, if_preferred, always } = .if_required,
 };
 
 const Allocator = struct {
@@ -1183,6 +1183,7 @@ const Allocator = struct {
 
         allocator: OffsetAllocator,
         memory: vk.DeviceMemory,
+        mapped_memory: ?[]u8,
     };
 
     ctx: *Context,
@@ -1225,16 +1226,31 @@ const Allocator = struct {
         };
         const buffer = try allocator.ctx.device.createBuffer(&buffer_info, null);
         errdefer allocator.ctx.device.destroyBuffer(buffer, null);
-        const buffer_memreq = allocator.ctx.device.getBufferMemoryRequirements(buffer);
 
-        _ = buffer_memreq;
-        _ = allocation_create_info;
+        var dedicated_memreq: vk.MemoryDedicatedRequirements = .{
+            .prefers_dedicated_allocation = .false,
+            .requires_dedicated_allocation = .false,
+        };
+        var buffer_memreq: vk.MemoryRequirements2 = .{
+            .p_next = &dedicated_memreq,
+            .memory_requirements = undefined,
+        };
+        allocator.ctx.device.getBufferMemoryRequirements2(&.{
+            .buffer = buffer,
+        }, &buffer_memreq);
+
+        std.debug.print("{}\n", .{buffer_memreq});
+        std.debug.print("{}\n", .{dedicated_memreq});
 
         var memory_type_index: u32 = undefined;
         var best_score: i32 = -999;
 
-        for (allocator.ctx.physical_device_memory_properties.memory_types[0..allocator.ctx.physical_device_memory_properties.memory_type_count], 0..) |memory_type, i| {
-            // no hard requirements
+        const memory_types = allocator.ctx.physical_device_memory_properties.memory_types;
+        const memory_type_count = allocator.ctx.physical_device_memory_properties.memory_type_count;
+        for (memory_types[0..memory_type_count], 0..) |memory_type, i| {
+            // hard requirements
+            if (buffer_memreq.memory_requirements.memory_type_bits &
+                (@as(u32, 1) << @intCast(i)) == 0) continue;
             // soft requirements
             var score: i32 = 0;
             if (memory_type.property_flags.device_local_bit) score += 2;
@@ -1251,30 +1267,115 @@ const Allocator = struct {
             }
         }
 
-        std.debug.print("memory type index {}\n", .{memory_type_index});
-        return undefined;
+        if (allocation_create_info.dedicated == .always or
+            dedicated_memreq.requires_dedicated_allocation == .true or
+            (dedicated_memreq.prefers_dedicated_allocation == .true and
+                allocation_create_info.dedicated == .if_preferred) or
+            buffer_memreq.memory_requirements.size > Slab.slab_size / 2)
+        {
+            // dedicated allocation
+            const dedicated_info: vk.MemoryDedicatedAllocateInfo = .{
+                .buffer = buffer,
+            };
+            const alloc_flags: vk.MemoryAllocateFlagsInfo = .{
+                .flags = .{ .device_address_bit = true },
+                .device_mask = 0,
+                .p_next = &dedicated_info,
+            };
+            const memory = try allocator.ctx.device.allocateMemory(&.{
+                .allocation_size = buffer_memreq.memory_requirements.size,
+                .memory_type_index = memory_type_index,
+                .p_next = &alloc_flags,
+            }, null);
+            errdefer allocator.ctx.device.freeMemory(memory, null);
+            try allocator.ctx.device.bindBufferMemory(buffer, memory, 0);
+
+            const address = allocator.ctx.device.getBufferDeviceAddress(&.{
+                .buffer = buffer,
+            });
+
+            // NOTE if mapping fails, since it's not guaranteed just dont' do it
+            var mapped: ?[]u8 = null;
+            if (memory_types[memory_type_index].property_flags.host_visible_bit and
+                memory_types[memory_type_index].property_flags.host_coherent_bit)
+                mapped = blk: {
+                    const ptr: [*]u8 = @ptrCast(allocator.ctx.device.mapMemory(
+                        memory,
+                        0,
+                        buffer_create_info.size,
+                        .{},
+                    ) catch break :blk null);
+                    break :blk ptr[0..buffer_create_info.size];
+                };
+
+            return .{
+                .memory = .{ .dedicated = memory },
+                .buffer = buffer,
+                .size = buffer_create_info.size,
+                .buffer_device_address = address,
+                .mapped_memory = mapped,
+            };
+        }
+
+        // suballocate
+        const suballoc = try allocator.alloc(
+            memory_type_index,
+            memory_types[memory_type_index].property_flags,
+            .{ .device_address_bit = true },
+            buffer_create_info.size,
+        );
+
+        try allocator.ctx.device.bindBufferMemory(
+            buffer,
+            suballoc.slab.memory,
+            suballoc.allocation.offset,
+        );
+
+        const address = allocator.ctx.device.getBufferDeviceAddress(&.{
+            .buffer = buffer,
+        });
+
+        const offset = suballoc.allocation.offset * Slab.granularity;
+        const mapped: ?[]u8 = if (suballoc.slab.mapped_memory) |mm|
+            mm[offset .. offset + buffer_create_info.size]
+        else
+            null;
+
+        return .{
+            .memory = .{ .slab = .{
+                .allocation = suballoc.allocation,
+                .slab = suballoc.slab,
+            } },
+            .buffer = buffer,
+            .size = buffer_create_info.size,
+            .buffer_device_address = address,
+            .mapped_memory = mapped,
+        };
     }
 
     fn alloc(
         allocator: *Allocator,
         memory_type_index: u32,
+        memory_property_flags: vk.MemoryPropertyFlags,
         flags: vk.MemoryAllocateFlags,
         size: u64,
     ) !struct {
         allocation: Allocation,
-        memory: vk.DeviceMemory,
+        slab: *Slab,
     } {
+        const granule_size: u32 = @intCast(size / Slab.granularity);
+
         // ideally there should be some allocation policy where we try to match flags
         // and we try to allocate into the most full slab first (i think?)
-        for (allocator.slabs.items) |slab| {
+        for (allocator.slabs.items) |*slab| {
             if (slab.memory_type_index != memory_type_index) continue;
             if (slab.flags.toInt() & flags.toInt() != flags.toInt()) continue;
 
             // slab is usable
-            const allocation = try slab.allocator.allocate(size) catch continue;
+            const allocation = slab.allocator.allocate(granule_size) catch continue;
             return .{
-                .memory = slab.memory,
                 .allocation = allocation,
+                .slab = slab,
             };
         }
 
@@ -1296,16 +1397,29 @@ const Allocator = struct {
             .memory_type_index = memory_type_index,
             .flags = flags,
             .memory = memory,
-            .allocator = .init(
+            .allocator = try .init(
                 allocator.ctx.gpa,
                 Slab.slab_size / Slab.granularity,
                 Slab.slab_size / Slab.granularity,
             ),
+            .mapped_memory = null,
         };
 
-        const allocation = try slab.allocator.allocate(size);
+        if (memory_property_flags.host_visible_bit and
+            memory_property_flags.host_coherent_bit)
+            slab.mapped_memory = blk: {
+                const ptr: [*]u8 = @ptrCast(allocator.ctx.device.mapMemory(
+                    memory,
+                    0,
+                    Slab.slab_size,
+                    .{},
+                ) catch break :blk null);
+                break :blk ptr[0..Slab.slab_size];
+            };
+
+        const allocation = try slab.allocator.allocate(granule_size);
         return .{
-            .memory = slab.memory,
+            .slab = slab,
             .allocation = allocation,
         };
     }
@@ -2428,10 +2542,17 @@ const GraphicsPipeline = struct {
 const ComputePipeline = struct {};
 
 const Buffer = struct {
-    allocation: Allocation,
+    memory: union(enum) {
+        slab: struct {
+            allocation: Allocation,
+            slab: *Allocator.Slab,
+        },
+        dedicated: vk.DeviceMemory,
+    },
+    buffer: vk.Buffer,
     size: usize,
     buffer_device_address: u64,
-    mapped_memory: ?[]u8,
+    mapped_memory: ?[]u8, // should maybe have a flag saying if it's coherent or cached?
 };
 
 const TransferBuffer = struct {

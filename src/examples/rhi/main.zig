@@ -44,6 +44,7 @@ pub fn main() !void {
     defer transfer_buffer.deinit();
 
     var vertex_buffer = try ctx.createBuffer(.{}, .{ .size = 1024 });
+    std.debug.print("{}\n", .{vertex_buffer});
     vertex_buffer = vertex_buffer;
 
     var vertex_shader = try ctx.createShader(
