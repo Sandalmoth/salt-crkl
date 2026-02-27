@@ -269,9 +269,30 @@ pub const Context = struct {
         return ctx.allocator.createBuffer(allocation_create_info, buffer_create_info);
     }
 
-    // pub fn createUploadBuffer(ctx: *Context, size: u32) !UploadBuffer {
-    //     return ctx.allocator.createUploadBuffer(size);
-    // }
+    pub fn destroyBuffer(
+        ctx: *Context,
+        buffer: *Buffer,
+    ) void {
+        switch (buffer.memory) {
+            .slab => |memory| {
+                ctx.device.destroyBuffer(buffer.buffer, null);
+                memory.slab.allocator.free(memory.allocation);
+            },
+            .dedicated => |memory| {
+                ctx.device.destroyBuffer(buffer.buffer, null);
+                ctx.device.freeMemory(memory, null);
+            },
+        }
+        buffer.* = undefined;
+    }
+
+    pub fn createTexture(
+        ctx: *Context,
+        allocation_create_info: AllocationCreateInfo,
+        texture_create_info: TextureCreateInfo,
+    ) !Texture {
+        return ctx.allocator.createTexture(allocation_create_info, texture_create_info);
+    }
 
     pub fn createTransferBuffer(
         ctx: *Context,
@@ -1118,6 +1139,19 @@ pub const ImageLayout = enum {
     transfer_dst,
     depth_attachment_stencil_read_only,
     depth_read_only_stencil_attachment,
+
+    fn vulkan(layout: ImageLayout) vk.ImageLayout {
+        return switch (layout) {
+            .unknown => .undefined,
+            .general => .general,
+            .read_only => .read_only_optimal,
+            .attachment => .attachment_optimal,
+            .transfer_src => .transfer_src_optimal,
+            .transfer_dst => .transfer_dst_optimal,
+            .depth_attachment_stencil_read_only => .depth_attachment_stencil_read_only_optimal,
+            .depth_read_only_stencil_attachment => .depth_read_only_stencil_attachment_optimal,
+        };
+    }
 };
 
 pub const TextureCreateInfo = struct {
@@ -1127,19 +1161,30 @@ pub const TextureCreateInfo = struct {
         transfer_src: bool = false,
         transfer_dst: bool = false,
         color_attachment: bool = false,
-        depth_attachment: bool = false,
-        stencil_attachment: bool = false,
-        _padding: u25 = 0,
+        depth_stencil_attachment: bool = false,
+        _padding: u26 = 0,
     },
     format: Format,
     cubemap: bool = false,
-    image_type: enum { image_1d, image_2d, image_3d },
+    image_type: enum {
+        image_1d,
+        image_2d,
+        image_3d,
+
+        fn vulkan(image_type: @This()) vk.ImageType {
+            return switch (image_type) {
+                .image_1d => .@"1d",
+                .image_2d => .@"2d",
+                .image_3d => .@"3d",
+            };
+        }
+    },
     mip_levels: u32,
-    size: [3]u32,
+    size: [3]u32, // x, y, z or depth
     samples: SampleCount = .@"1",
     queue: QueueType, // always exclusive
-    layout: ImageLayout,
-    views: []ImageViewCreateInfo,
+    layout: ImageLayout = .unknown,
+    views: []const ImageViewCreateInfo = &.{.{}},
 };
 
 pub const ImageViewCreateInfo = struct {
@@ -1197,6 +1242,11 @@ const Allocator = struct {
     }
 
     fn deinit(allocator: *Allocator) void {
+        for (allocator.slabs.items) |*slab| {
+            allocator.ctx.device.freeMemory(slab.memory, null);
+            slab.allocator.deinit(allocator.ctx.gpa);
+        }
+        allocator.slabs.deinit(allocator.ctx.gpa);
         allocator.* = undefined;
     }
 
@@ -1473,10 +1523,87 @@ const Allocator = struct {
         allocator: *Allocator,
         allocation_create_info: AllocationCreateInfo,
         texture_create_info: TextureCreateInfo,
-    ) Texture {
-        _ = allocator;
-        _ = texture_create_info;
+    ) !Texture {
         _ = allocation_create_info;
+
+        switch (texture_create_info.image_type) {
+            .image_1d => {
+                std.debug.assert(texture_create_info.size[0] > 0);
+                std.debug.assert(texture_create_info.size[1] == 1);
+                std.debug.assert(texture_create_info.size[2] > 0);
+            },
+            .image_2d => {
+                std.debug.assert(texture_create_info.size[0] > 0);
+                std.debug.assert(texture_create_info.size[1] > 0);
+                std.debug.assert(texture_create_info.size[2] > 0);
+            },
+            .image_3d => {
+                std.debug.assert(texture_create_info.size[0] > 0);
+                std.debug.assert(texture_create_info.size[1] > 0);
+                std.debug.assert(texture_create_info.size[2] > 0);
+            },
+        }
+
+        const multiformat: bool = blk: {
+            const base_format = texture_create_info.format;
+            for (texture_create_info.views) |view| {
+                if (view.format) |format| {
+                    if (format != base_format) break :blk true;
+                }
+            }
+            break :blk false;
+        };
+
+        const arrayview: bool = blk: {
+            if (texture_create_info.image_type != .image_3d) break :blk false;
+            for (texture_create_info.views) |view| {
+                if (view.view_type == .view_2d_array) break :blk true;
+            }
+            break :blk false;
+        };
+
+        const image_info: vk.ImageCreateInfo = .{
+            .flags = .{
+                .mutable_format_bit = multiformat,
+                .cube_compatible_bit = texture_create_info.cubemap,
+                .@"2d_array_compatible_bit" = arrayview,
+            },
+            .image_type = texture_create_info.image_type.vulkan(),
+            .format = texture_create_info.format.vulkan(),
+            .extent = .{
+                .width = texture_create_info.size[0],
+                .height = texture_create_info.size[1],
+                .depth = if (texture_create_info.image_type == .image_3d)
+                    texture_create_info.size[2]
+                else
+                    1,
+            },
+            .mip_levels = texture_create_info.mip_levels,
+            .array_layers = if (texture_create_info.image_type == .image_3d)
+                1
+            else
+                texture_create_info.size[2],
+            .samples = texture_create_info.samples.vulkan(),
+            .tiling = .optimal,
+            .usage = .{
+                .storage_bit = texture_create_info.usage.storage,
+                .sampled_bit = texture_create_info.usage.sampled,
+                .transfer_src_bit = texture_create_info.usage.transfer_src,
+                .transfer_dst_bit = texture_create_info.usage.transfer_dst,
+                .color_attachment_bit = texture_create_info.usage.color_attachment,
+                .depth_stencil_attachment_bit = texture_create_info.usage.depth_stencil_attachment,
+            },
+            .sharing_mode = .exclusive,
+            .queue_family_index_count = 1,
+            .p_queue_family_indices = @ptrCast(allocator.ctx.queue_families.getPtrConst(
+                texture_create_info.queue,
+            )),
+            .initial_layout = texture_create_info.layout.vulkan(),
+        };
+        const image = try allocator.ctx.device.createImage(&image_info, null);
+        errdefer allocator.ctx.device.destroyImage(image);
+
+        return undefined;
     }
 };
 
@@ -2190,7 +2317,7 @@ const GraphicsPipeline = struct {
 
         vertex_shader: *const Shader,
         fragment_shader: *const Shader,
-        polygon_mode: PolygonMode,
+        polygon_mode: PolygonMode = .fill,
         multisample: MultisampleState = .{},
         color_attachments: []const ColorAttachment = &.{},
         depth_attachment_format: ?Format = null,

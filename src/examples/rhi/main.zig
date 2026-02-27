@@ -33,19 +33,16 @@ pub fn main() !void {
     }, .{}, "example_rhi");
     defer ctx.destroy();
 
-    // var upload_buffer = try ctx.createUploadBuffer(65536);
-    // std.debug.print("{}\n", .{upload_buffer});
-    // var vertex_buffer = try ctx.createBuffer(1024);
-    // var index_buffer = try ctx.createBuffer(1024);
-    // std.debug.print("{}\n", .{vertex_buffer});
-    // std.debug.print("{}\n", .{index_buffer});
-
     var transfer_buffer = try ctx.createTransferBuffer(.upload, 1024 * 1024);
     defer transfer_buffer.deinit();
 
     var vertex_buffer = try ctx.createBuffer(.{}, .{ .size = 1024 });
+    defer ctx.destroyBuffer(&vertex_buffer);
     std.debug.print("{}\n", .{vertex_buffer});
-    vertex_buffer = vertex_buffer;
+
+    var index_buffer = try ctx.createBuffer(.{}, .{ .size = 1024 });
+    defer ctx.destroyBuffer(&index_buffer);
+    std.debug.print("{}\n", .{index_buffer});
 
     var vertex_shader = try ctx.createShader(
         .vertex,
@@ -58,10 +55,27 @@ pub fn main() !void {
     );
     defer ctx.destroyShader(&fragment_shader);
 
+    // const color_target_views: [1]rhi.ImageViewCreateInfo = .{
+    //     .{},
+    // };
+    var color_target = try ctx.createTexture(.{ .dedicated = .if_preferred }, .{
+        .usage = .{
+            .color_attachment = true,
+            .sampled = true,
+        },
+        .image_type = .image_2d,
+        .mip_levels = 1,
+        .size = .{ 640, 480, 1 },
+        .queue = .graphics,
+        .format = .r8g8b8a8_srgb,
+        // .views = &color_target_views,
+    });
+    color_target = color_target;
+    std.debug.print("{}\n", .{color_target});
+
     var pipeline = try ctx.createGraphicsPipeline(.{
         .vertex_shader = &vertex_shader,
         .fragment_shader = &fragment_shader,
-        .polygon_mode = .fill,
     }, .{
         .viewport = .{
             .x = 0,
