@@ -70,7 +70,7 @@ pub fn main() !void {
         .format = .r8g8b8a8_srgb,
         // .views = &color_target_views,
     });
-    color_target = color_target;
+    defer ctx.destroyTexture(&color_target);
     std.debug.print("{}\n", .{color_target});
 
     var pipeline = try ctx.createGraphicsPipeline(.{

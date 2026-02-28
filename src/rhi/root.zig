@@ -269,10 +269,7 @@ pub const Context = struct {
         return ctx.allocator.createBuffer(allocation_create_info, buffer_create_info);
     }
 
-    pub fn destroyBuffer(
-        ctx: *Context,
-        buffer: *Buffer,
-    ) void {
+    pub fn destroyBuffer(ctx: *Context, buffer: *Buffer) void {
         switch (buffer.memory) {
             .slab => |memory| {
                 ctx.device.destroyBuffer(buffer.buffer, null);
@@ -292,6 +289,22 @@ pub const Context = struct {
         texture_create_info: TextureCreateInfo,
     ) !Texture {
         return ctx.allocator.createTexture(allocation_create_info, texture_create_info);
+    }
+
+    pub fn destroyTexture(ctx: *Context, texture: *Texture) void {
+        switch (texture.memory) {
+            .slab => |memory| {
+                ctx.device.destroyImageView(texture.default_view, null);
+                ctx.device.destroyImage(texture.image, null);
+                memory.slab.allocator.free(memory.allocation);
+            },
+            .dedicated => |memory| {
+                ctx.device.destroyImageView(texture.default_view, null);
+                ctx.device.destroyImage(texture.image, null);
+                ctx.device.freeMemory(memory, null);
+            },
+        }
+        texture.* = undefined;
     }
 
     pub fn createTransferBuffer(
@@ -1417,11 +1430,13 @@ const Allocator = struct {
         }
 
         // suballocate
+        std.debug.assert(buffer_memreq.memory_requirements.alignment <= Slab.granularity);
         const suballoc = try allocator.alloc(
             memory_type_index,
             memory_types[memory_type_index].property_flags,
             .{ .device_address_bit = true },
-            buffer_create_info.size,
+            // buffer_create_info.size,
+            buffer_memreq.memory_requirements.size,
         );
 
         try allocator.ctx.device.bindBufferMemory(
@@ -1573,8 +1588,6 @@ const Allocator = struct {
         allocation_create_info: AllocationCreateInfo,
         texture_create_info: TextureCreateInfo,
     ) !Texture {
-        _ = allocation_create_info;
-
         // switch (texture_create_info.image_type) {
         //     .image_1d => {
         //         std.debug.assert(texture_create_info.size[0] > 0);
@@ -1652,6 +1665,93 @@ const Allocator = struct {
         const image = try allocator.ctx.device.createImage(&image_info, null);
         errdefer allocator.ctx.device.destroyImage(image, null);
 
+        var dedicated_memreq: vk.MemoryDedicatedRequirements = .{
+            .prefers_dedicated_allocation = .false,
+            .requires_dedicated_allocation = .false,
+        };
+        var image_memreq: vk.MemoryRequirements2 = .{
+            .p_next = &dedicated_memreq,
+            .memory_requirements = undefined,
+        };
+        allocator.ctx.device.getImageMemoryRequirements2(&.{
+            .image = image,
+        }, &image_memreq);
+
+        std.debug.print("{}\n", .{image_memreq});
+        std.debug.print("{}\n", .{dedicated_memreq});
+
+        var memory_type_index: u32 = undefined;
+        var best_score: i32 = -999;
+
+        const memory_types = allocator.ctx.physical_device_memory_properties.memory_types;
+        const memory_type_count = allocator.ctx.physical_device_memory_properties.memory_type_count;
+        for (memory_types[0..memory_type_count], 0..) |memory_type, i| {
+            // hard requirements
+            if (image_memreq.memory_requirements.memory_type_bits &
+                (@as(u32, 1) << @intCast(i)) == 0) continue;
+            // soft requirements
+            var score: i32 = 0;
+            if (memory_type.property_flags.device_local_bit) score += 1;
+            if (score > best_score) {
+                best_score = score;
+                memory_type_index = @intCast(i);
+            }
+        }
+
+        var texture: Texture = undefined;
+        texture.image = image;
+
+        if (allocation_create_info.dedicated == .always or
+            dedicated_memreq.requires_dedicated_allocation == .true or
+            (dedicated_memreq.prefers_dedicated_allocation == .true and
+                allocation_create_info.dedicated == .if_preferred) or
+            image_memreq.memory_requirements.size > Slab.slab_size / 2)
+        {
+            // dedicated allocation
+            const dedicated_info: vk.MemoryDedicatedAllocateInfo = .{
+                .image = image,
+            };
+            const alloc_flags: vk.MemoryAllocateFlagsInfo = .{
+                .device_mask = 0,
+                .p_next = &dedicated_info,
+            };
+            const memory = try allocator.ctx.device.allocateMemory(&.{
+                .allocation_size = image_memreq.memory_requirements.size,
+                .memory_type_index = memory_type_index,
+                .p_next = &alloc_flags,
+            }, null);
+            errdefer allocator.ctx.device.freeMemory(memory, null);
+            try allocator.ctx.device.bindImageMemory(image, memory, 0);
+
+            texture.memory = .{ .dedicated = memory };
+        } else {
+            // suballocate
+            const suballoc = try allocator.alloc(
+                memory_type_index,
+                memory_types[memory_type_index].property_flags,
+                .{ .device_address_bit = true },
+                if (image_memreq.memory_requirements.alignment <= Slab.granularity)
+                    image_memreq.memory_requirements.size
+                else
+                    image_memreq.memory_requirements.size + image_memreq.memory_requirements.alignment,
+            );
+
+            try allocator.ctx.device.bindImageMemory(
+                image,
+                suballoc.slab.memory,
+                std.mem.alignForward(
+                    u32,
+                    suballoc.allocation.offset,
+                    @intCast(image_memreq.memory_requirements.alignment),
+                ),
+            );
+
+            texture.memory = .{ .slab = .{
+                .allocation = suballoc.allocation,
+                .slab = suballoc.slab,
+            } };
+        }
+
         const default_view_info: vk.ImageViewCreateInfo = .{
             .image = image,
             .view_type = texture_create_info.image_type.vulkanImageViewType(),
@@ -1677,10 +1777,9 @@ const Allocator = struct {
         const default_view = try allocator.ctx.device.createImageView(&default_view_info, null);
         errdefer allocator.ctx.device.destroyImageView(default_view, null);
 
-        return .{
-            .image = image,
-            .default_view = default_view,
-        };
+        texture.default_view = default_view;
+
+        return texture;
     }
 };
 
@@ -2915,6 +3014,13 @@ const TransferBuffer = struct {
 };
 
 const Texture = struct {
+    memory: union(enum) {
+        slab: struct {
+            allocation: Allocation,
+            slab: *Allocator.Slab,
+        },
+        dedicated: vk.DeviceMemory,
+    },
     image: vk.Image,
     default_view: vk.ImageView,
 };
