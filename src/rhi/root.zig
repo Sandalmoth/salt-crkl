@@ -1167,15 +1167,37 @@ pub const TextureCreateInfo = struct {
     format: Format,
     cubemap: bool = false,
     image_type: enum {
+        // more distinct than the vulkan image type
+        // to allow us to make a useful default view
         image_1d,
         image_2d,
         image_3d,
+        image_cube,
+        image_1d_array,
+        image_2d_array,
+        image_cube_array,
 
-        fn vulkan(image_type: @This()) vk.ImageType {
+        fn vulkanImageType(image_type: @This()) vk.ImageType {
             return switch (image_type) {
                 .image_1d => .@"1d",
                 .image_2d => .@"2d",
                 .image_3d => .@"3d",
+                .image_cube => .@"2d",
+                .image_1d_array => .@"1d",
+                .image_2d_array => .@"2d",
+                .image_cube_array => .@"2d",
+            };
+        }
+
+        fn vulkanImageViewType(image_type: @This()) vk.ImageViewType {
+            return switch (image_type) {
+                .image_1d => .@"1d",
+                .image_2d => .@"2d",
+                .image_3d => .@"3d",
+                .image_cube => .cube,
+                .image_1d_array => .@"1d_array",
+                .image_2d_array => .@"2d_array",
+                .image_cube_array => .cube_array,
             };
         }
     },
@@ -1184,7 +1206,7 @@ pub const TextureCreateInfo = struct {
     samples: SampleCount = .@"1",
     queue: QueueType, // always exclusive
     layout: ImageLayout = .unknown,
-    views: []const ImageViewCreateInfo = &.{.{}},
+    views: []const ImageViewCreateInfo = &.{},
 };
 
 pub const ImageViewCreateInfo = struct {
@@ -1199,11 +1221,38 @@ pub const ImageViewCreateInfo = struct {
     } = null,
     format: ?Format = null,
     swizzle: struct {
-        const Component = enum { zero, one, r, g, b, a };
+        const Component = enum {
+            zero,
+            one,
+            r,
+            g,
+            b,
+            a,
+
+            fn vulkan(component: Component) vk.ComponentSwizzle {
+                return switch (component) {
+                    .zero => .zero,
+                    .one => .one,
+                    .r => .r,
+                    .g => .g,
+                    .b => .b,
+                    .a => .a,
+                };
+            }
+        };
         r: Component = .r,
         g: Component = .g,
         b: Component = .b,
         a: Component = .a,
+
+        fn vulkan(swizzle: @This()) vk.ComponentMapping {
+            return .{
+                .r = if (swizzle.r == .r) .identity else swizzle.r.vulkan(),
+                .g = if (swizzle.g == .g) .identity else swizzle.g.vulkan(),
+                .b = if (swizzle.b == .b) .identity else swizzle.b.vulkan(),
+                .a = if (swizzle.a == .a) .identity else swizzle.a.vulkan(),
+            };
+        }
     } = .{},
     range: ?struct {
         base_mip_level: u32,
@@ -1526,23 +1575,23 @@ const Allocator = struct {
     ) !Texture {
         _ = allocation_create_info;
 
-        switch (texture_create_info.image_type) {
-            .image_1d => {
-                std.debug.assert(texture_create_info.size[0] > 0);
-                std.debug.assert(texture_create_info.size[1] == 1);
-                std.debug.assert(texture_create_info.size[2] > 0);
-            },
-            .image_2d => {
-                std.debug.assert(texture_create_info.size[0] > 0);
-                std.debug.assert(texture_create_info.size[1] > 0);
-                std.debug.assert(texture_create_info.size[2] > 0);
-            },
-            .image_3d => {
-                std.debug.assert(texture_create_info.size[0] > 0);
-                std.debug.assert(texture_create_info.size[1] > 0);
-                std.debug.assert(texture_create_info.size[2] > 0);
-            },
-        }
+        // switch (texture_create_info.image_type) {
+        //     .image_1d => {
+        //         std.debug.assert(texture_create_info.size[0] > 0);
+        //         std.debug.assert(texture_create_info.size[1] == 1);
+        //         std.debug.assert(texture_create_info.size[2] > 0);
+        //     },
+        //     .image_2d => {
+        //         std.debug.assert(texture_create_info.size[0] > 0);
+        //         std.debug.assert(texture_create_info.size[1] > 0);
+        //         std.debug.assert(texture_create_info.size[2] > 0);
+        //     },
+        //     .image_3d => {
+        //         std.debug.assert(texture_create_info.size[0] > 0);
+        //         std.debug.assert(texture_create_info.size[1] > 0);
+        //         std.debug.assert(texture_create_info.size[2] > 0);
+        //     },
+        // }
 
         const multiformat: bool = blk: {
             const base_format = texture_create_info.format;
@@ -1568,7 +1617,7 @@ const Allocator = struct {
                 .cube_compatible_bit = texture_create_info.cubemap,
                 .@"2d_array_compatible_bit" = arrayview,
             },
-            .image_type = texture_create_info.image_type.vulkan(),
+            .image_type = texture_create_info.image_type.vulkanImageType(),
             .format = texture_create_info.format.vulkan(),
             .extent = .{
                 .width = texture_create_info.size[0],
@@ -1601,9 +1650,37 @@ const Allocator = struct {
             .initial_layout = texture_create_info.layout.vulkan(),
         };
         const image = try allocator.ctx.device.createImage(&image_info, null);
-        errdefer allocator.ctx.device.destroyImage(image);
+        errdefer allocator.ctx.device.destroyImage(image, null);
 
-        return undefined;
+        const default_view_info: vk.ImageViewCreateInfo = .{
+            .image = image,
+            .view_type = texture_create_info.image_type.vulkanImageViewType(),
+            .format = texture_create_info.format.vulkan(),
+            .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
+            .subresource_range = .{
+                .base_mip_level = 0,
+                .level_count = texture_create_info.mip_levels,
+                .base_array_layer = 0,
+                .layer_count = texture_create_info.size[2],
+                .aspect_mask = switch (texture_create_info.format) {
+                    .s8_uint => .{ .stencil_bit = true },
+                    .d16_unorm,
+                    .d16_unorm_s8_uint,
+                    .d24_unorm_s8_uint,
+                    .d32_sfloat,
+                    .d32_sfloat_s8_uint,
+                    => .{ .depth_bit = true },
+                    else => .{ .color_bit = true },
+                },
+            },
+        };
+        const default_view = try allocator.ctx.device.createImageView(&default_view_info, null);
+        errdefer allocator.ctx.device.destroyImageView(default_view, null);
+
+        return .{
+            .image = image,
+            .default_view = default_view,
+        };
     }
 };
 
@@ -2837,7 +2914,10 @@ const TransferBuffer = struct {
     }
 };
 
-const Texture = struct {};
+const Texture = struct {
+    image: vk.Image,
+    default_view: vk.ImageView,
+};
 
 fn FixedSet(comptime capacity: comptime_int, comptime T: type) type {
     return struct {
