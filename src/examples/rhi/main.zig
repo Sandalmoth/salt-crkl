@@ -55,9 +55,6 @@ pub fn main() !void {
     );
     defer ctx.destroyShader(&fragment_shader);
 
-    // const color_target_views: [1]rhi.ImageViewCreateInfo = .{
-    //     .{},
-    // };
     var color_target = try ctx.createTexture(.{ .dedicated = .if_preferred }, .{
         .usage = .{
             .color_attachment = true,
@@ -68,7 +65,6 @@ pub fn main() !void {
         .size = .{ 640, 480, 1 },
         .queue = .graphics,
         .format = .r8g8b8a8_srgb,
-        // .views = &color_target_views,
     });
     defer ctx.destroyTexture(&color_target);
     std.debug.print("{}\n", .{color_target});
@@ -94,29 +90,27 @@ pub fn main() !void {
     });
     defer ctx.destroyGraphicsPipeline(&pipeline);
 
-    // create an off-screen texture to render to
-
-    // {
-    //     const command_buffer = ctx.acquireCommandBuffer(.graphics);
-    //     try command_buffer.uploadToBuffer(
-    //         std.mem.sliceAsBytes(&[4][3]f32{
-    //             .{ -1, -1, 0.5 },
-    //             .{ 1, -1, 0.5 },
-    //             .{ -1, 1, 0.5 },
-    //             .{ 1, 1, 0.5 },
-    //         }),
-    //         &upload_buffer,
-    //         &vertex_buffer,
-    //         0,
-    //     );
-    //     try command_buffer.uploadToBuffer(
-    //         std.mem.sliceAsBytes(&[6]u32{ 0, 2, 1, 2, 3, 1 }),
-    //         &upload_buffer,
-    //         &index_buffer,
-    //         0,
-    //     );
-    //     try ctx.submitCommandBuffer(command_buffer);
-    // }
+    {
+        const command_buffer = ctx.acquireCommandBuffer(.graphics);
+        try command_buffer.uploadToBuffer(
+            std.mem.sliceAsBytes(&[4][3]f32{
+                .{ -1, -1, 0.5 },
+                .{ 1, -1, 0.5 },
+                .{ -1, 1, 0.5 },
+                .{ 1, 1, 0.5 },
+            }),
+            &upload_buffer,
+            &vertex_buffer,
+            0,
+        );
+        try command_buffer.uploadToBuffer(
+            std.mem.sliceAsBytes(&[6]u32{ 0, 2, 1, 2, 3, 1 }),
+            &upload_buffer,
+            &index_buffer,
+            0,
+        );
+        try ctx.submitCommandBuffer(command_buffer);
+    }
 
     var frame_in_flight: u32 = 0;
 
