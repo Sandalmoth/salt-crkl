@@ -190,15 +190,17 @@ pub const Context = struct {
     pub fn acquireCommandBuffer(ctx: *Context, queue_type: QueueType) *CommandBuffer {
         std.debug.assert(ctx.active_command_buffer == null);
         ctx.active_command_buffer = queue_type;
-        return ctx.command_buffers.getPtr(queue_type);
+        const cmdbuf = ctx.command_buffers.getPtr(queue_type);
+        _ = cmdbuf.arena_impl.reset(.retain_capacity);
+        return cmdbuf;
     }
 
     pub fn submitCommandBuffer(ctx: *Context, command_buffer: *CommandBuffer) !void {
         std.debug.assert(ctx.active_command_buffer == command_buffer.queue_type);
         ctx.active_command_buffer = null;
 
-        const cmd = try command_buffer.getVulkanCommandBuffer();
-        try ctx.device.beginCommandBuffer(cmd, &.{
+        const cmdbuf = try command_buffer.getVulkanCommandBuffer();
+        try ctx.device.beginCommandBuffer(cmdbuf, &.{
             .flags = .{ .one_time_submit_bit = true },
         });
 
@@ -213,8 +215,24 @@ pub const Context = struct {
 
         for (command_buffer.buffer.items) |command| {
             switch (command) {
-                .begin_render_pass => {},
-                .end_render_pass => {},
+                .begin_render_pass => |cmd| {
+                    // command.begin_render_pass.pipeline
+                    ctx.device.cmdBeginRendering(cmdbuf, &.{
+                        .color_attachment_count = @intCast(cmd.color_attachments.len),
+                        .p_color_attachments = cmd.color_attachments.ptr,
+                        .p_depth_attachment = cmd.depth_attachment,
+                        .p_stencil_attachment = cmd.depth_attachment,
+                        .layer_count = 1,
+                        .view_mask = 0,
+                        .render_area = .{
+                            .offset = .{ .x = 0, .y = 0 },
+                            .extent = cmd.render_area_extent,
+                        },
+                    });
+                },
+                .end_render_pass => {
+                    ctx.device.cmdEndRendering(cmdbuf);
+                },
                 .upload_to_buffer => {
                     // NOTE we could accumulate regions per buffer combination and batch
                     const region: vk.BufferCopy = .{
@@ -223,7 +241,7 @@ pub const Context = struct {
                         .size = command.upload_to_buffer.size,
                     };
                     ctx.device.cmdCopyBuffer(
-                        cmd,
+                        cmdbuf,
                         command.upload_to_buffer.src_buffer,
                         command.upload_to_buffer.dst_buffer,
                         1,
@@ -233,7 +251,7 @@ pub const Context = struct {
             }
         }
         command_buffer.buffer.clearRetainingCapacity();
-        try ctx.device.endCommandBuffer(cmd);
+        try ctx.device.endCommandBuffer(cmdbuf);
 
         const semval = ctx.queue_semaphore_values.get(.graphics);
         ctx.queue_semaphore_values.set(.graphics, semval + 1);
@@ -246,7 +264,7 @@ pub const Context = struct {
         const wait_dst_stage_mask: vk.PipelineStageFlags = .{ .top_of_pipe_bit = true };
         const submit_info: vk.SubmitInfo = .{
             .command_buffer_count = 1,
-            .p_command_buffers = @ptrCast(&cmd),
+            .p_command_buffers = @ptrCast(&cmdbuf),
             .wait_semaphore_count = 1,
             .p_wait_semaphores = @ptrCast(ctx.queue_semaphores.getPtr(command_buffer.queue_type)),
             .p_wait_dst_stage_mask = @ptrCast(&wait_dst_stage_mask),
@@ -1778,13 +1796,21 @@ const Allocator = struct {
         errdefer allocator.ctx.device.destroyImageView(default_view, null);
 
         texture.default_view = default_view;
+        texture.size = texture_create_info.size;
+        texture.layout = texture_create_info.layout.vulkan();
 
         return texture;
     }
 };
 
 const Command = union(enum) {
-    begin_render_pass: struct {},
+    begin_render_pass: struct {
+        pipeline: *GraphicsPipeline,
+        color_attachments: []const vk.RenderingAttachmentInfo,
+        depth_attachment: ?*const vk.RenderingAttachmentInfo,
+        stencil_attachment: ?*const vk.RenderingAttachmentInfo,
+        render_area_extent: vk.Extent2D,
+    },
     end_render_pass: struct {},
     upload_to_buffer: struct {
         size: u32,
@@ -1802,6 +1828,66 @@ const Command = union(enum) {
 // and then you submit the pool for execution
 // the data should be packed instead of stored as an array of unions
 
+const RenderingAttachment = struct {
+    const LoadOp = enum {
+        load,
+        clear,
+        dont_care,
+
+        fn vulkan(load_op: LoadOp) vk.AttachmentLoadOp {
+            return switch (load_op) {
+                .load => .load,
+                .clear => .clear,
+                .dont_care => .dont_care,
+            };
+        }
+    };
+    const StoreOp = enum {
+        store,
+        dont_care,
+        none,
+
+        fn vulkan(store_op: StoreOp) vk.AttachmentStoreOp {
+            return switch (store_op) {
+                .store => .store,
+                .dont_care => .dont_care,
+                .none => .none,
+            };
+        }
+    };
+    const ClearValue = union(enum) {
+        // probably more elegant to just let all these be optional, and assert that only one is set
+        color: union(enum) {
+            float: [4]f32,
+            int: [4]i32,
+            uint: [4]u32,
+        },
+        depth_stencil: struct {
+            depth: f32,
+            stencil: u32,
+        },
+
+        fn vulkan(clear_value: ClearValue) vk.ClearValue {
+            return switch (clear_value) {
+                .color => |color| switch (color) {
+                    .float => .{ .color = .{ .float_32 = color.float } },
+                    .int => .{ .color = .{ .int_32 = color.int } },
+                    .uint => .{ .color = .{ .uint_32 = color.uint } },
+                },
+                .depth_stencil => |depth_stencil| .{ .depth_stencil = .{
+                    .depth = depth_stencil.depth,
+                    .stencil = depth_stencil.stencil,
+                } },
+            };
+        }
+    };
+
+    texture: *Texture,
+    load_op: LoadOp,
+    store_op: StoreOp,
+    clear_value: ClearValue,
+};
+
 pub const CommandBuffer = struct {
     ctx: *Context,
     queue_type: QueueType,
@@ -1811,6 +1897,7 @@ pub const CommandBuffer = struct {
     current_pool_index: u32,
     pool_free_command_buffers: [2]std.ArrayList(vk.CommandBuffer),
     pool_used_command_buffers: [2]std.ArrayList(vk.CommandBuffer),
+    arena_impl: std.heap.ArenaAllocator,
 
     fn init(ctx: *Context, queue_type: QueueType) !CommandBuffer {
         var result: CommandBuffer = .{
@@ -1822,6 +1909,7 @@ pub const CommandBuffer = struct {
             .current_pool_index = 0,
             .pool_free_command_buffers = .{ .empty, .empty },
             .pool_used_command_buffers = .{ .empty, .empty },
+            .arena_impl = .init(ctx.gpa),
         };
         result.command_pools[0] = try ctx.device.createCommandPool(&.{
             .flags = .{},
@@ -1859,6 +1947,7 @@ pub const CommandBuffer = struct {
             buffer.ctx.device.destroyCommandPool(buffer.command_pools[i], null);
         }
         buffer.buffer.deinit(buffer.ctx.gpa);
+        buffer.arena_impl.deinit();
     }
 
     fn getVulkanCommandBuffer(buffer: *CommandBuffer) !vk.CommandBuffer {
@@ -1905,30 +1994,85 @@ pub const CommandBuffer = struct {
         }
     }
 
-    pub fn beginRenderPass(buffer: *CommandBuffer) !void {
-        try buffer.buffer.append(buffer.ctx.gpa, .{ .begin_render_pass = .{} });
+    pub fn beginRenderPass(
+        buffer: *CommandBuffer,
+        pipeline: *GraphicsPipeline,
+        color_attachments: []const RenderingAttachment,
+        depth_attachment: ?RenderingAttachment,
+        stencil_attachment: ?RenderingAttachment,
+    ) !void {
+        const arena = buffer.arena_impl.allocator();
+        const color_attachment_infos: []vk.RenderingAttachmentInfo = if (color_attachments.len > 0)
+            try arena.alloc(vk.RenderingAttachmentInfo, color_attachments.len)
+        else
+            &.{};
+
+        const depth_attachment_info: ?*vk.RenderingAttachmentInfo = if (depth_attachment != null)
+            try arena.create(vk.RenderingAttachmentInfo)
+        else
+            null;
+        const stencil_attachment_info: ?*vk.RenderingAttachmentInfo = if (stencil_attachment != null)
+            try arena.create(vk.RenderingAttachmentInfo)
+        else
+            null;
+
+        for (color_attachments, 0..) |attachment, i| {
+            color_attachment_infos[i] = .{
+                .image_view = attachment.texture.default_view,
+                .image_layout = attachment.texture.layout,
+                .resolve_mode = .{},
+                .resolve_image_layout = .undefined,
+                .load_op = attachment.load_op.vulkan(),
+                .store_op = attachment.store_op.vulkan(),
+                .clear_value = attachment.clear_value.vulkan(),
+            };
+        }
+        if (depth_attachment) |attachment| {
+            _ = attachment;
+        }
+        if (stencil_attachment) |attachment| {
+            _ = attachment;
+        }
+
+        const size = if (depth_attachment) |info|
+            info.texture.size
+        else if (stencil_attachment) |info|
+            info.texture.size
+        else
+            color_attachments[0].texture.size;
+
+        try buffer.buffer.append(buffer.ctx.gpa, .{
+            .begin_render_pass = .{
+                .pipeline = pipeline,
+                .color_attachments = color_attachment_infos,
+                .depth_attachment = depth_attachment_info,
+                .stencil_attachment = stencil_attachment_info,
+                .render_area_extent = .{ .width = size[0], .height = size[0] },
+            },
+        });
     }
 
     pub fn endRenderPass(buffer: *CommandBuffer) !void {
         try buffer.buffer.append(buffer.ctx.gpa, .{ .end_render_pass = .{} });
     }
 
-    // pub fn uploadtobuffer(
-    //     buffer: *commandbuffer,
-    //     src: []const u8,
-    //     staging: *uploadbuffer,
-    //     dst: *buffer,
-    //     dst_offset: u32,
-    // ) !void {
-    //     const staged = try staging.allocator.allocator().dupe(u8, src);
-    //     try buffer.buffer.append(buffer.ctx.gpa, .{ .upload_to_buffer = .{
-    //         .size = @intcast(src.len),
-    //         .src_offset = @intcast(@intfromptr(staged.ptr) - @intfromptr(staging.slab.buffer_ptr)),
-    //         .src_buffer = staging.slab.buffer,
-    //         .dst_offset = dst_offset,
-    //         .dst_buffer = dst.slab.buffer,
-    //     } });
-    // }
+    pub fn uploadToBuffer(
+        buffer: *CommandBuffer,
+        src: []const u8,
+        staging: *TransferBuffer,
+        dst: *Buffer,
+        dst_offset: u32,
+    ) !void {
+        const bytes = try staging.alloc(src.len, buffer.queue_type);
+        @memcpy(bytes, src);
+        try buffer.buffer.append(buffer.ctx.gpa, .{ .upload_to_buffer = .{
+            .size = @intCast(src.len),
+            .src_offset = @intCast(@intFromPtr(bytes.ptr) - @intFromPtr(staging.mapped_memory.ptr)),
+            .src_buffer = staging.buffer,
+            .dst_offset = dst_offset,
+            .dst_buffer = dst.buffer,
+        } });
+    }
 };
 
 const Shader = struct {
@@ -2565,6 +2709,7 @@ const TransferBuffer = struct {
     }
 
     pub fn deinit(buffer: *TransferBuffer) void {
+        buffer.queue.deinit(buffer.ctx.gpa);
         buffer.ctx.device.destroyBuffer(buffer.buffer, null);
         buffer.ctx.device.freeMemory(buffer.memory, null);
         buffer.* = undefined;
@@ -2573,12 +2718,12 @@ const TransferBuffer = struct {
     fn alloc(buffer: *TransferBuffer, size: usize, queue: QueueType) ![]u8 {
         if (size > buffer.mapped_memory.len) return error.TransferBufferOutOfMemory;
         while (buffer.queue.items.len > 0) {
-            const semaphore_value = buffer.ctx.device.getSemaphoreCounterValue(
+            const semaphore_value = try buffer.ctx.device.getSemaphoreCounterValue(
                 buffer.queue.items[0].semaphore,
             );
             if (semaphore_value < buffer.queue.items[0].semaphore_value) break;
             buffer.tail = buffer.queue.items[0].tail;
-            buffer.queue.orderedRemove(0);
+            _ = buffer.queue.orderedRemove(0);
         }
 
         if (size > buffer.tail - buffer.head) return error.TransferBufferOutOfMemory;
@@ -2651,6 +2796,8 @@ const Texture = struct {
     },
     image: vk.Image,
     default_view: vk.ImageView,
+    size: [3]u32,
+    layout: vk.ImageLayout,
 };
 
 fn FixedSet(comptime capacity: comptime_int, comptime T: type) type {

@@ -99,20 +99,18 @@ pub fn main() !void {
                 .{ -1, 1, 0.5 },
                 .{ 1, 1, 0.5 },
             }),
-            &upload_buffer,
+            &transfer_buffer,
             &vertex_buffer,
             0,
         );
         try command_buffer.uploadToBuffer(
             std.mem.sliceAsBytes(&[6]u32{ 0, 2, 1, 2, 3, 1 }),
-            &upload_buffer,
+            &transfer_buffer,
             &index_buffer,
             0,
         );
         try ctx.submitCommandBuffer(command_buffer);
     }
-
-    var frame_in_flight: u32 = 0;
 
     main_loop: while (true) {
         var event: sdl.Event = undefined;
@@ -130,8 +128,12 @@ pub fn main() !void {
 
         // lets just aim for a hello triangle as step one
         // just to see what needs to be abstracted
-        frame_in_flight = (frame_in_flight + 1) % 2;
         const command_buffer = ctx.acquireCommandBuffer(.graphics);
+
+        try command_buffer.beginRenderPass(&pipeline, &.{
+            .{ .texture = &color_target, .load_op = .clear, .store_op = .store, .clear_value = .{ .color = .{ .float = .{ 0.2, 0.2, 0.2, 1.0 } } } },
+        }, null, null);
+        try command_buffer.endRenderPass();
 
         // bind our pipeline
         // bind the off-screen texture as the render target
