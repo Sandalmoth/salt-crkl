@@ -248,6 +248,10 @@ pub const Context = struct {
                         @ptrCast(&region),
                     );
                 },
+                .transition => |cmd| {
+                    std.debug.assert(cmd.texture.queue == cmd.dst_queue); // TODO
+
+                },
             }
         }
         command_buffer.buffer.clearRetainingCapacity();
@@ -1798,12 +1802,71 @@ const Allocator = struct {
         texture.default_view = default_view;
         texture.size = texture_create_info.size;
         texture.layout = texture_create_info.layout.vulkan();
+        texture.queue = texture_create_info.queue;
 
         return texture;
     }
 };
 
+// enum STAGE { STAGE_TRANSFER, STAGE_COMPUTE,
+// STAGE_RASTER_COLOR_OUT, STAGE_PIXEL_SHADER,
+// STAGE_VERTEX_SHADER, ... };
+// enum HAZARD_FLAGS { HAZARD_DRAW_ARGUMENTS = 0x1,
+// HAZARD_DESCRIPTORS = 0x2, , HAZARD_DEPTH_STENCIL = 0x4 };
+
+top_of_pipe_bit: bool = false,
+draw_indirect_bit: bool = false,
+vertex_input_bit: bool = false,
+vertex_shader_bit: bool = false,
+fragment_shader_bit: bool = false,
+early_fragment_tests_bit: bool = false,
+late_fragment_tests_bit: bool = false,
+color_attachment_output_bit: bool = false,
+compute_shader_bit: bool = false,
+all_transfer_bit: bool = false,
+bottom_of_pipe_bit: bool = false,
+host_bit: bool = false,
+all_graphics_bit: bool = false,
+all_commands_bit: bool = false,
+copy_bit: bool = false,
+resolve_bit: bool = false,
+blit_bit: bool = false,
+clear_bit: bool = false,
+index_input_bit: bool = false,
+vertex_attribute_input_bit: bool = false,
+pre_rasterization_shaders_bit: bool = false,
+
+indirect_command_read_bit: bool = false,
+index_read_bit: bool = false,
+vertex_attribute_read_bit: bool = false,
+shader_read_bit: bool = false,
+shader_write_bit: bool = false,
+color_attachment_read_bit: bool = false,
+color_attachment_write_bit: bool = false,
+depth_stencil_attachment_read_bit: bool = false,
+depth_stencil_attachment_write_bit: bool = false,
+transfer_read_bit: bool = false,
+transfer_write_bit: bool = false,
+host_read_bit: bool = false,
+host_write_bit: bool = false,
+memory_read_bit: bool = false,
+memory_write_bit: bool = false,
+shader_sampled_read_bit: bool = false,
+shader_storage_read_bit: bool = false,
+shader_storage_write_bit: bool = false,
+
 const Command = union(enum) {
+    const Stage = enum {
+        compute,
+        vertex_shader,
+        fragment_shader,
+    };
+    const Hazard = struct {
+        indirect: bool,
+        color_attachment: bool,
+        depth_stencil_attachment: bool,
+    };
+
     begin_render_pass: struct {
         pipeline: *GraphicsPipeline,
         color_attachments: []const vk.RenderingAttachmentInfo,
@@ -1818,6 +1881,16 @@ const Command = union(enum) {
         src_buffer: vk.Buffer,
         dst_buffer: vk.Buffer,
         dst_offset: u32,
+    },
+    transition: struct {
+        texture: *Texture,
+        dst_queue: QueueType,
+        new_layout: ImageLayout,
+    },
+    barrier: struct {
+        src_stages: Stage,
+        dst_stages: Stage,
+        hazards: Hazard,
     },
 };
 
@@ -1898,6 +1971,10 @@ pub const CommandBuffer = struct {
     pool_free_command_buffers: [2]std.ArrayList(vk.CommandBuffer),
     pool_used_command_buffers: [2]std.ArrayList(vk.CommandBuffer),
     arena_impl: std.heap.ArenaAllocator,
+
+    pending_transitions: std.ArrayList(struct {
+        image: vk.Image,
+    }),
 
     fn init(ctx: *Context, queue_type: QueueType) !CommandBuffer {
         var result: CommandBuffer = .{
@@ -2072,6 +2149,19 @@ pub const CommandBuffer = struct {
             .dst_offset = dst_offset,
             .dst_buffer = dst.buffer,
         } });
+    }
+
+    pub fn transition(
+        buffer: *CommandBuffer,
+        texture: *Texture,
+        dst_queue: QueueType,
+        new_layout: ImageLayout,
+    ) !void {
+        try buffer.buffer.append(buffer.ctx.gpa, .{
+            .texture = texture,
+            .dst_queue = dst_queue,
+            .new_layout = new_layout,
+        });
     }
 };
 
@@ -2798,6 +2888,7 @@ const Texture = struct {
     default_view: vk.ImageView,
     size: [3]u32,
     layout: vk.ImageLayout,
+    queue: QueueType,
 };
 
 fn FixedSet(comptime capacity: comptime_int, comptime T: type) type {

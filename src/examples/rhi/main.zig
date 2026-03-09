@@ -130,8 +130,14 @@ pub fn main() !void {
         // just to see what needs to be abstracted
         const command_buffer = ctx.acquireCommandBuffer(.graphics);
 
+        try command_buffer.transition(&color_target, .graphics, .attachment);
         try command_buffer.beginRenderPass(&pipeline, &.{
-            .{ .texture = &color_target, .load_op = .clear, .store_op = .store, .clear_value = .{ .color = .{ .float = .{ 0.2, 0.2, 0.2, 1.0 } } } },
+            .{
+                .texture = &color_target,
+                .load_op = .clear,
+                .store_op = .store,
+                .clear_value = .{ .color = .{ .float = .{ 0.2, 0.2, 0.2, 1.0 } } }, // FIXME UGLY!
+            },
         }, null, null);
         try command_buffer.endRenderPass();
 
