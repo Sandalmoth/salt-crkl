@@ -252,6 +252,9 @@ pub const Context = struct {
                     std.debug.assert(cmd.texture.queue == cmd.dst_queue); // TODO
 
                 },
+                .barrier => |cmd| {
+                    _ = cmd;
+                },
             }
         }
         command_buffer.buffer.clearRetainingCapacity();
@@ -1814,59 +1817,81 @@ const Allocator = struct {
 // enum HAZARD_FLAGS { HAZARD_DRAW_ARGUMENTS = 0x1,
 // HAZARD_DESCRIPTORS = 0x2, , HAZARD_DEPTH_STENCIL = 0x4 };
 
-top_of_pipe_bit: bool = false,
-draw_indirect_bit: bool = false,
-vertex_input_bit: bool = false,
-vertex_shader_bit: bool = false,
-fragment_shader_bit: bool = false,
-early_fragment_tests_bit: bool = false,
-late_fragment_tests_bit: bool = false,
-color_attachment_output_bit: bool = false,
-compute_shader_bit: bool = false,
-all_transfer_bit: bool = false,
-bottom_of_pipe_bit: bool = false,
-host_bit: bool = false,
-all_graphics_bit: bool = false,
-all_commands_bit: bool = false,
-copy_bit: bool = false,
-resolve_bit: bool = false,
-blit_bit: bool = false,
-clear_bit: bool = false,
-index_input_bit: bool = false,
-vertex_attribute_input_bit: bool = false,
-pre_rasterization_shaders_bit: bool = false,
+// relevant pipeline stages
+// top_of_pipe_bit: bool = false,
+// draw_indirect_bit: bool = false,
+// vertex_input_bit: bool = false, // same as index_input | vertex_attribute_input
+// vertex_shader_bit: bool = false,
+// fragment_shader_bit: bool = false,
+// early_fragment_tests_bit: bool = false,
+// late_fragment_tests_bit: bool = false,
+// color_attachment_output_bit: bool = false,
+// compute_shader_bit: bool = false,
+// all_transfer_bit: bool = false, // same as copy | blit | resolve | clear
+// bottom_of_pipe_bit: bool = false,
+// host_bit: bool = false,
+// all_graphics_bit: bool = false, // same as draw_indirect | vertex_input | vertex_shader |
+// //                                         fragment_shader | early/late_fragment_test |
+// //                                         color_attachment_output
+// all_commands_bit: bool = false, // same as all valid commands on the queue
+// copy_bit: bool = false,
+// resolve_bit: bool = false,
+// blit_bit: bool = false,
+// clear_bit: bool = false,
+// index_input_bit: bool = false,
+// vertex_attribute_input_bit: bool = false,
+// pre_rasterization_shaders_bit: bool = false, // same as vertex_shader
 
-indirect_command_read_bit: bool = false,
-index_read_bit: bool = false,
-vertex_attribute_read_bit: bool = false,
-shader_read_bit: bool = false,
-shader_write_bit: bool = false,
-color_attachment_read_bit: bool = false,
-color_attachment_write_bit: bool = false,
-depth_stencil_attachment_read_bit: bool = false,
-depth_stencil_attachment_write_bit: bool = false,
-transfer_read_bit: bool = false,
-transfer_write_bit: bool = false,
-host_read_bit: bool = false,
-host_write_bit: bool = false,
-memory_read_bit: bool = false,
-memory_write_bit: bool = false,
-shader_sampled_read_bit: bool = false,
-shader_storage_read_bit: bool = false,
-shader_storage_write_bit: bool = false,
+// // relevant access flags
+// indirect_command_read_bit: bool = false, // in draw_indirect
+// index_read_bit: bool = false, // in index_input
+// shader_read_bit: bool = false, // same as sampled_read | storage_read
+// shader_write_bit: bool = false, // same as storage_write
+// color_attachment_read_bit: bool = false, // in color_attachment_output
+// color_attachment_write_bit: bool = false, // in color_attachment_output
+// depth_stencil_attachment_read_bit: bool = false, // in early/late_fragment_test
+// depth_stencil_attachment_write_bit: bool = false, // in early/late_fragment_test
+// transfer_read_bit: bool = false, // in copy, blit, resolve
+// transfer_write_bit: bool = false, // in copy, blit, clear, resolve
+// host_read_bit: bool = false, // in host
+// host_write_bit: bool = false, // in host
+// memory_read_bit: bool = false, // same as all valid read bits
+// memory_write_bit: bool = false, // same as all valid write bits
+// shader_sampled_read_bit: bool = false,
+// shader_storage_read_bit: bool = false,
+// shader_storage_write_bit: bool = false,
+
+// // simplified pipeline stages
+// vertex_bit: bool = false, // vertex_shader | index_input
+// fragment_bit: bool = false, // fragment_shader | early/late_fragment | color_attachment_output
+// compute_bit: bool = false,
+// transfer_bit: bool = false, // same as copy | blit | resolve | clear
+// // skip host which is instead synchronized by the start/end of command buffers
+
+// // simplified access flags
+// indirect_read_bit: bool = false,
+// read_bit: bool = false,
+// write_bit: bool = false,
+// // read/write_bit will be some combination of shader/transfer/index_read/write_bit
+// // depending on the stages that are set at the same time
+// attachment_read_bit: bool = false, // color_attachment | depth_stencil_attachment
+// attachment_write_bit: bool = false,
+
+const StageFlags = struct {
+    compute: bool = false,
+    graphics: bool = false,
+    transfer: bool = false,
+};
+
+const AccessFlags = struct {
+    indirect_read: bool = false,
+    generic_read: bool = false,
+    generic_write: bool = false,
+    attachment_read: bool = false,
+    attachment_write: bool = false,
+};
 
 const Command = union(enum) {
-    const Stage = enum {
-        compute,
-        vertex_shader,
-        fragment_shader,
-    };
-    const Hazard = struct {
-        indirect: bool,
-        color_attachment: bool,
-        depth_stencil_attachment: bool,
-    };
-
     begin_render_pass: struct {
         pipeline: *GraphicsPipeline,
         color_attachments: []const vk.RenderingAttachmentInfo,
@@ -1888,9 +1913,8 @@ const Command = union(enum) {
         new_layout: ImageLayout,
     },
     barrier: struct {
-        src_stages: Stage,
-        dst_stages: Stage,
-        hazards: Hazard,
+        stage_flags: StageFlags,
+        access_flags: AccessFlags,
     },
 };
 
@@ -1974,6 +1998,8 @@ pub const CommandBuffer = struct {
 
     pending_transitions: std.ArrayList(struct {
         image: vk.Image,
+        new_layout: ImageLayout,
+        // TODO queue
     }),
 
     fn init(ctx: *Context, queue_type: QueueType) !CommandBuffer {
@@ -1987,6 +2013,7 @@ pub const CommandBuffer = struct {
             .pool_free_command_buffers = .{ .empty, .empty },
             .pool_used_command_buffers = .{ .empty, .empty },
             .arena_impl = .init(ctx.gpa),
+            .pending_transitions = .empty,
         };
         result.command_pools[0] = try ctx.device.createCommandPool(&.{
             .flags = .{},
@@ -2157,11 +2184,22 @@ pub const CommandBuffer = struct {
         dst_queue: QueueType,
         new_layout: ImageLayout,
     ) !void {
-        try buffer.buffer.append(buffer.ctx.gpa, .{
+        try buffer.buffer.append(buffer.ctx.gpa, .{ .transition = .{
             .texture = texture,
             .dst_queue = dst_queue,
             .new_layout = new_layout,
-        });
+        } });
+    }
+
+    pub fn barrier(
+        buffer: *CommandBuffer,
+        stage_flags: StageFlags,
+        access_flags: AccessFlags,
+    ) !void {
+        try buffer.buffer.append(buffer.ctx.gpa, .{ .barrier = .{
+            .stage_flags = stage_flags,
+            .access_flags = access_flags,
+        } });
     }
 };
 
