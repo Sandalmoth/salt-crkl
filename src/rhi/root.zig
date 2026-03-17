@@ -62,32 +62,234 @@ const Platform = struct {
     window: *anyopaque,
 };
 
-/// settings may be updated dynamically and will be automatically applied
-const Settings = struct {
-    swapchain_surface_formats: []const vk.SurfaceFormatKHR = &.{
+pub const SwapchainComposition = enum {
+    sdr,
+
+    fn getSwapchainSurfaceFormats(
+        swapchain_composition: SwapchainComposition,
+    ) []const vk.SurfaceFormatKHR {
         // ranking of preferred formats for the swapchain surfaces
         // if none are present, the first format from getPhysicalDeviceSurfaceFormats is used
-        .{ .format = .b8g8r8a8_srgb, .color_space = .srgb_nonlinear_khr },
-        .{ .format = .r8g8b8a8_srgb, .color_space = .srgb_nonlinear_khr },
-        .{ .format = .a8b8g8r8_srgb_pack32, .color_space = .srgb_nonlinear_khr },
-    },
-    swapchain_present_modes: []const vk.PresentModeKHR = &.{
-        // ranking of preferred formats for the swapchain surfaces
-        // if none are present, .fifo_khr is used
-    },
+        return switch (swapchain_composition) {
+            .sdr => &.{
+                .{ .format = .b8g8r8a8_srgb, .color_space = .srgb_nonlinear_khr },
+                .{ .format = .r8g8b8a8_srgb, .color_space = .srgb_nonlinear_khr },
+                .{ .format = .a8b8g8r8_srgb_pack32, .color_space = .srgb_nonlinear_khr },
+            },
+        };
+    }
 };
 
-pub const QueueType = enum {
-    graphics,
-    async_compute,
-    transfer,
-    present,
+pub const PresentMode = enum {
+    fifo,
+
+    fn vulkan(present_mode: PresentMode) vk.PresentModeKHR {
+        return switch (present_mode) {
+            .fifo => .fifo_khr,
+        };
+    }
+};
+
+pub const Format = enum {
+    r8g8b8a8_unorm,
+    r8g8b8a8_srgb,
+    b8g8r8a8_unorm,
+    b8g8r8a8_srgb,
+    r16g16b16a16_sfloat,
+    r32_uint,
+    s8_uint,
+    d16_unorm,
+    d16_unorm_s8_uint,
+    d24_unorm_s8_uint,
+    d32_sfloat,
+    d32_sfloat_s8_uint,
+
+    fn vulkan(format: Format) vk.Format {
+        return switch (format) {
+            .r8g8b8a8_unorm => .r8g8b8a8_unorm,
+            .r8g8b8a8_srgb => .r8g8b8a8_srgb,
+            .b8g8r8a8_unorm => .b8g8r8a8_unorm,
+            .b8g8r8a8_srgb => .b8g8r8a8_srgb,
+            .r16g16b16a16_sfloat => .r16g16b16a16_sfloat,
+            .r32_uint => .r32_uint,
+            .s8_uint => .s8_uint,
+            .d16_unorm => .d16_unorm,
+            .d16_unorm_s8_uint => .d16_unorm_s8_uint,
+            .d24_unorm_s8_uint => .d24_unorm_s8_uint,
+            .d32_sfloat => .d32_sfloat,
+            .d32_sfloat_s8_uint => .d32_sfloat_s8_uint,
+        };
+    }
+};
+
+pub const ImageLayout = enum {
+    unknown,
+    general,
+    read_only,
+    attachment,
+    transfer_src,
+    transfer_dst,
+    depth_attachment_stencil_read_only,
+    depth_read_only_stencil_attachment,
+
+    fn vulkan(layout: ImageLayout) vk.ImageLayout {
+        return switch (layout) {
+            .unknown => .undefined,
+            .general => .general,
+            .read_only => .read_only_optimal,
+            .attachment => .attachment_optimal,
+            .transfer_src => .transfer_src_optimal,
+            .transfer_dst => .transfer_dst_optimal,
+            .depth_attachment_stencil_read_only => .depth_attachment_stencil_read_only_optimal,
+            .depth_read_only_stencil_attachment => .depth_read_only_stencil_attachment_optimal,
+        };
+    }
+};
+
+const SampleCount = enum {
+    @"1",
+    @"2",
+    @"4",
+    @"8",
+    @"16",
+    @"32",
+    @"64",
+
+    fn vulkan(sample_count: SampleCount) vk.SampleCountFlags {
+        return .{
+            .@"1_bit" = sample_count == .@"1",
+            .@"2_bit" = sample_count == .@"2",
+            .@"4_bit" = sample_count == .@"4",
+            .@"8_bit" = sample_count == .@"8",
+            .@"16_bit" = sample_count == .@"16",
+            .@"32_bit" = sample_count == .@"32",
+            .@"64_bit" = sample_count == .@"64",
+        };
+    }
+};
+
+const AllocationCreateInfo = struct {
+    dedicated: enum { if_required, if_preferred, always } = .if_required,
+};
+
+pub const BufferCreateInfo = struct {
+    size: usize,
+};
+
+pub const TextureCreateInfo = struct {
+    usage: packed struct(u32) {
+        storage: bool = false,
+        sampled: bool = false,
+        transfer_src: bool = false,
+        transfer_dst: bool = false,
+        color_attachment: bool = false,
+        depth_stencil_attachment: bool = false,
+        _padding: u26 = 0,
+    },
+    format: Format,
+    cubemap: bool = false,
+    image_type: enum {
+        // more distinct than the vulkan image type
+        // to allow us to make a useful default view
+        image_1d,
+        image_2d,
+        image_3d,
+        image_cube,
+        image_2d_array,
+        image_cube_array,
+
+        fn vulkanImageType(image_type: @This()) vk.ImageType {
+            return switch (image_type) {
+                .image_1d => .@"1d",
+                .image_2d => .@"2d",
+                .image_3d => .@"3d",
+                .image_cube => .@"2d",
+                .image_2d_array => .@"2d",
+                .image_cube_array => .@"2d",
+            };
+        }
+
+        fn vulkanImageViewType(image_type: @This()) vk.ImageViewType {
+            return switch (image_type) {
+                .image_1d => .@"1d",
+                .image_2d => .@"2d",
+                .image_3d => .@"3d",
+                .image_cube => .cube,
+                .image_2d_array => .@"2d_array",
+                .image_cube_array => .cube_array,
+            };
+        }
+    },
+    mip_levels: u32,
+    size: [3]u32, // x, y, z or depth
+    samples: SampleCount = .@"1",
+    layout: ImageLayout = .unknown,
+    views: []const ImageViewCreateInfo = &.{},
+};
+
+pub const ImageViewCreateInfo = struct {
+    view_type: ?enum {
+        view_1d,
+        view_2d,
+        view_3d,
+        view_cube,
+        view_1d_array,
+        view_2d_array,
+        view_cube_array,
+    } = null,
+    format: ?Format = null,
+    swizzle: struct {
+        const Component = enum {
+            zero,
+            one,
+            r,
+            g,
+            b,
+            a,
+
+            fn vulkan(component: Component) vk.ComponentSwizzle {
+                return switch (component) {
+                    .zero => .zero,
+                    .one => .one,
+                    .r => .r,
+                    .g => .g,
+                    .b => .b,
+                    .a => .a,
+                };
+            }
+        };
+        r: Component = .r,
+        g: Component = .g,
+        b: Component = .b,
+        a: Component = .a,
+
+        fn vulkan(swizzle: @This()) vk.ComponentMapping {
+            return .{
+                .r = if (swizzle.r == .r) .identity else swizzle.r.vulkan(),
+                .g = if (swizzle.g == .g) .identity else swizzle.g.vulkan(),
+                .b = if (swizzle.b == .b) .identity else swizzle.b.vulkan(),
+                .a = if (swizzle.a == .a) .identity else swizzle.a.vulkan(),
+            };
+        }
+    } = .{},
+    range: ?struct {
+        base_mip_level: u32,
+        level_count: u32,
+        base_array_layer: u32,
+        layer_count: u32,
+        mask: ?enum { depth, stencil },
+    } = null,
+};
+
+const Shader = struct {
+    const ShaderType = enum { vertex, fragment, compute };
+    stage: vk.ShaderStageFlags,
+    module: vk.ShaderModule,
 };
 
 pub const Context = struct {
     gpa: std.mem.Allocator,
     platform: Platform,
-    settings: Settings,
 
     base: vk.BaseWrapper,
     instance: vk.InstanceProxy,
@@ -98,27 +300,28 @@ pub const Context = struct {
     physical_device_properties: vk.PhysicalDeviceProperties,
     physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
 
-    queues: std.EnumArray(QueueType, vk.QueueProxy),
-    queue_families: std.EnumArray(QueueType, u32),
-    queue_semaphores: std.EnumArray(QueueType, vk.Semaphore),
-    queue_semaphore_values: std.EnumArray(QueueType, u64),
-
-    command_buffers: std.EnumArray(QueueType, CommandBuffer),
-    active_command_buffer: ?QueueType,
+    queue: vk.QueueProxy,
+    queue_family: u32,
+    queue_semaphore: vk.Semaphore,
+    queue_semaphore_value: u64,
 
     swapchain: Swapchain,
     old_swapchains: std.ArrayList(Swapchain),
 
-    samplers: [1]vk.Sampler,
     descriptor_set_layout: vk.DescriptorSetLayout,
     pipeline_layout: vk.PipelineLayout,
 
+    swapchain_composition: SwapchainComposition,
+    present_mode: PresentMode = .fifo,
+
     allocator: Allocator,
+
+    shader_pool: std.heap.MemoryPool(Shader),
+    graphics_pipeline_pool: std.heap.MemoryPool(GraphicsPipeline),
 
     pub fn create(
         gpa: std.mem.Allocator,
         platform: Platform,
-        settings: Settings,
         app_name: [:0]const u8,
     ) !*Context {
         const ctx = try gpa.create(Context);
@@ -129,7 +332,6 @@ pub const Context = struct {
 
         ctx.gpa = gpa;
         ctx.platform = platform;
-        ctx.settings = settings;
         ctx.base = .load(platform.getInstanceProcAddress);
 
         try ctx.initInstance(arena, platform, app_name);
@@ -137,7 +339,7 @@ pub const Context = struct {
         try ctx.createSurface(platform);
         errdefer ctx.destroySurface();
         const physical_device_candidate = try ctx.pickPhysicalDevice(arena);
-        try ctx.initDevice(arena, physical_device_candidate);
+        try ctx.initDevice(physical_device_candidate);
         errdefer ctx.deinitDevice();
         ctx.old_swapchains = .empty;
         // QUESTION what if the window starts out minimized?
@@ -150,15 +352,8 @@ pub const Context = struct {
         ctx.allocator = try .init(ctx);
         errdefer ctx.allocator.deinit();
 
-        ctx.command_buffers.set(.graphics, try .init(ctx, .graphics));
-        errdefer ctx.command_buffers.getPtr(.graphics).deinit();
-        ctx.command_buffers.set(.async_compute, try .init(ctx, .async_compute));
-        errdefer ctx.command_buffers.getPtr(.async_compute).deinit();
-        ctx.command_buffers.set(.transfer, try .init(ctx, .transfer));
-        errdefer ctx.command_buffers.getPtr(.transfer).deinit();
-        ctx.command_buffers.set(.present, try .init(ctx, .present));
-        errdefer ctx.command_buffers.getPtr(.present).deinit();
-        ctx.active_command_buffer = null;
+        ctx.shader_pool = .init(std.heap.page_allocator);
+        ctx.graphics_pipeline_pool = .init(std.heap.page_allocator);
 
         return ctx;
     }
@@ -168,10 +363,8 @@ pub const Context = struct {
             log.warn("Failed deviceWaitIdle in vulkan_context deinit: {}", .{e});
         };
 
-        ctx.command_buffers.getPtr(.graphics).deinit();
-        ctx.command_buffers.getPtr(.async_compute).deinit();
-        ctx.command_buffers.getPtr(.transfer).deinit();
-        ctx.command_buffers.getPtr(.present).deinit();
+        ctx.shader_pool.deinit();
+        ctx.graphics_pipeline_pool.deinit();
 
         ctx.allocator.deinit();
 
@@ -187,185 +380,258 @@ pub const Context = struct {
         ctx.gpa.destroy(ctx);
     }
 
-    pub fn acquireCommandBuffer(ctx: *Context, queue_type: QueueType) *CommandBuffer {
-        std.debug.assert(ctx.active_command_buffer == null);
-        ctx.active_command_buffer = queue_type;
-        const cmdbuf = ctx.command_buffers.getPtr(queue_type);
-        _ = cmdbuf.arena_impl.reset(.retain_capacity);
-        return cmdbuf;
-    }
+    // pub fn acquireCommandBuffer(ctx: *Context, queue_type: QueueType) *CommandBuffer {
+    //     std.debug.assert(ctx.active_command_buffer == null);
+    //     ctx.active_command_buffer = queue_type;
+    //     const cmdbuf = ctx.command_buffers.getPtr(queue_type);
+    //     _ = cmdbuf.arena_impl.reset(.retain_capacity);
+    //     return cmdbuf;
+    // }
 
-    pub fn submitCommandBuffer(ctx: *Context, command_buffer: *CommandBuffer) !void {
-        std.debug.assert(ctx.active_command_buffer == command_buffer.queue_type);
-        ctx.active_command_buffer = null;
+    // pub fn submitCommandBuffer(ctx: *Context, command_buffer: *CommandBuffer) !void {
+    //     std.debug.assert(ctx.active_command_buffer == command_buffer.queue_type);
+    //     ctx.active_command_buffer = null;
 
-        const cmdbuf = try command_buffer.getVulkanCommandBuffer();
-        try ctx.device.beginCommandBuffer(cmdbuf, &.{
-            .flags = .{ .one_time_submit_bit = true },
-        });
+    //     const cmdbuf = try command_buffer.getVulkanCommandBuffer();
+    //     try ctx.device.beginCommandBuffer(cmdbuf, &.{
+    //         .flags = .{ .one_time_submit_bit = true },
+    //     });
 
-        std.debug.print("{} ", .{command_buffer.pool_free_command_buffers[0].items.len});
-        std.debug.print("{} ", .{command_buffer.pool_used_command_buffers[0].items.len});
-        std.debug.print("{} ", .{command_buffer.pool_free_command_buffers[1].items.len});
-        std.debug.print("{}\n", .{command_buffer.pool_used_command_buffers[1].items.len});
+    //     std.debug.print("{} ", .{command_buffer.pool_free_command_buffers[0].items.len});
+    //     std.debug.print("{} ", .{command_buffer.pool_used_command_buffers[0].items.len});
+    //     std.debug.print("{} ", .{command_buffer.pool_free_command_buffers[1].items.len});
+    //     std.debug.print("{}\n", .{command_buffer.pool_used_command_buffers[1].items.len});
 
-        // this is basically like a vm parsing bytecode
-        // meaning we could apply compiler theory to simplify it i think
-        // hell yeah
+    //     // this is basically like a vm parsing bytecode
+    //     // meaning we could apply compiler theory to simplify it i think
+    //     // hell yeah
 
-        for (command_buffer.buffer.items) |command| {
-            switch (command) {
-                .begin_render_pass => |cmd| {
-                    // command.begin_render_pass.pipeline
-                    ctx.device.cmdBeginRendering(cmdbuf, &.{
-                        .color_attachment_count = @intCast(cmd.color_attachments.len),
-                        .p_color_attachments = cmd.color_attachments.ptr,
-                        .p_depth_attachment = cmd.depth_attachment,
-                        .p_stencil_attachment = cmd.depth_attachment,
-                        .layer_count = 1,
-                        .view_mask = 0,
-                        .render_area = .{
-                            .offset = .{ .x = 0, .y = 0 },
-                            .extent = cmd.render_area_extent,
-                        },
-                    });
-                },
-                .end_render_pass => {
-                    ctx.device.cmdEndRendering(cmdbuf);
-                },
-                .upload_to_buffer => {
-                    // NOTE we could accumulate regions per buffer combination and batch
-                    const region: vk.BufferCopy = .{
-                        .src_offset = command.upload_to_buffer.src_offset,
-                        .dst_offset = command.upload_to_buffer.dst_offset,
-                        .size = command.upload_to_buffer.size,
-                    };
-                    ctx.device.cmdCopyBuffer(
-                        cmdbuf,
-                        command.upload_to_buffer.src_buffer,
-                        command.upload_to_buffer.dst_buffer,
-                        1,
-                        @ptrCast(&region),
-                    );
-                },
-                .transition => |cmd| {
-                    std.debug.assert(cmd.texture.queue == cmd.dst_queue); // TODO
+    //     const hazards = ctx.queue_hazards.getPtr(command_buffer.queue_type);
 
-                },
-                .barrier => |cmd| {
-                    _ = cmd;
-                },
-            }
-        }
-        command_buffer.buffer.clearRetainingCapacity();
-        try ctx.device.endCommandBuffer(cmdbuf);
+    //     for (command_buffer.buffer.items) |command| {
+    //         switch (command) {
+    //             .begin_render_pass => |cmd| {
+    //                 // command.begin_render_pass.pipeline
+    //                 ctx.device.cmdBeginRendering(cmdbuf, &.{
+    //                     .color_attachment_count = @intCast(cmd.color_attachments.len),
+    //                     .p_color_attachments = cmd.color_attachments.ptr,
+    //                     .p_depth_attachment = cmd.depth_attachment,
+    //                     .p_stencil_attachment = cmd.depth_attachment,
+    //                     .layer_count = 1,
+    //                     .view_mask = 0,
+    //                     .render_area = .{
+    //                         .offset = .{ .x = 0, .y = 0 },
+    //                         .extent = cmd.render_area_extent,
+    //                     },
+    //                 });
+    //             },
+    //             .end_render_pass => {
+    //                 ctx.device.cmdEndRendering(cmdbuf);
+    //             },
+    //             .upload_to_buffer => {
+    //                 // touches memory so needs to potentially flush all pending barriers
 
-        const semval = ctx.queue_semaphore_values.get(.graphics);
-        ctx.queue_semaphore_values.set(.graphics, semval + 1);
-        const timeline_semaphore_info: vk.TimelineSemaphoreSubmitInfo = .{
-            .p_wait_semaphore_values = @ptrCast(&semval),
-            .p_signal_semaphore_values = @ptrCast(&(semval + 1)),
-            .signal_semaphore_value_count = 1,
-            .wait_semaphore_value_count = 1,
-        };
-        const wait_dst_stage_mask: vk.PipelineStageFlags = .{ .top_of_pipe_bit = true };
-        const submit_info: vk.SubmitInfo = .{
-            .command_buffer_count = 1,
-            .p_command_buffers = @ptrCast(&cmdbuf),
-            .wait_semaphore_count = 1,
-            .p_wait_semaphores = @ptrCast(ctx.queue_semaphores.getPtr(command_buffer.queue_type)),
-            .p_wait_dst_stage_mask = @ptrCast(&wait_dst_stage_mask),
-            .signal_semaphore_count = 1,
-            .p_signal_semaphores = @ptrCast(ctx.queue_semaphores.getPtr(command_buffer.queue_type)),
-            .p_next = &timeline_semaphore_info,
-        };
-        try ctx.queues.get(command_buffer.queue_type).submit(
-            1,
-            @ptrCast(&submit_info),
-            .null_handle,
-        );
-    }
+    //                 // NOTE we could accumulate regions per buffer combination and batch
+    //                 const region: vk.BufferCopy = .{
+    //                     .src_offset = command.upload_to_buffer.src_offset,
+    //                     .dst_offset = command.upload_to_buffer.dst_offset,
+    //                     .size = command.upload_to_buffer.size,
+    //                 };
+    //                 ctx.device.cmdCopyBuffer(
+    //                     cmdbuf,
+    //                     command.upload_to_buffer.src_buffer,
+    //                     command.upload_to_buffer.dst_buffer,
+    //                     1,
+    //                     @ptrCast(&region),
+    //                 );
+    //             },
+    //             .transition => |cmd| {
+    //                 std.debug.assert(cmd.texture.queue == cmd.dst_queue); // TODO
 
-    pub fn createBuffer(
-        ctx: *Context,
-        allocation_create_info: AllocationCreateInfo,
-        buffer_create_info: BufferCreateInfo,
-    ) !Buffer {
-        return ctx.allocator.createBuffer(allocation_create_info, buffer_create_info);
-    }
+    //             },
+    //             .barrier => |cmd| {
+    //                 hazards
+    //                     ._ = cmd;
+    //             },
+    //         }
+    //     }
 
-    pub fn destroyBuffer(ctx: *Context, buffer: *Buffer) void {
-        switch (buffer.memory) {
-            .slab => |memory| {
-                ctx.device.destroyBuffer(buffer.buffer, null);
-                memory.slab.allocator.free(memory.allocation);
-            },
-            .dedicated => |memory| {
-                ctx.device.destroyBuffer(buffer.buffer, null);
-                ctx.device.freeMemory(memory, null);
-            },
-        }
-        buffer.* = undefined;
-    }
+    //     // def generate_barrier(currentState, requiredStages, requiredAccesses):
+    //     //     # 1. Determine if we are doing a Write
+    //     //     isWrite = (requiredAccesses & VK_ACCESS_2_WRITE_BIT_MASK) != 0
 
-    pub fn createTexture(
-        ctx: *Context,
-        allocation_create_info: AllocationCreateInfo,
-        texture_create_info: TextureCreateInfo,
-    ) !Texture {
-        return ctx.allocator.createTexture(allocation_create_info, texture_create_info);
-    }
+    //     //     # 2. Check for hazards
+    //     //     # We need a barrier if:
+    //     //     # - There are pending writes (RAW or WAW)
+    //     //     # - We are writing and there were previous reads (WAR)
+    //     //     hasHazard = (currentState.pendingWriteAccesses != 0) or \
+    //     //                 (isWrite and currentState.lastUsedStages != 0)
 
-    pub fn destroyTexture(ctx: *Context, texture: *Texture) void {
-        switch (texture.memory) {
-            .slab => |memory| {
-                ctx.device.destroyImageView(texture.default_view, null);
-                ctx.device.destroyImage(texture.image, null);
-                memory.slab.allocator.free(memory.allocation);
-            },
-            .dedicated => |memory| {
-                ctx.device.destroyImageView(texture.default_view, null);
-                ctx.device.destroyImage(texture.image, null);
-                ctx.device.freeMemory(memory, null);
-            },
-        }
-        texture.* = undefined;
-    }
+    //     //     if hasHazard:
+    //     //         barrier = VkDependencyInfo(
+    //     //             VkMemoryBarrier2(
+    //     //                 srcStageMask  = currentState.lastUsedStages | currentState.pendingWriteStages,
+    //     //                 srcAccessMask = currentState.pendingWriteAccesses,
+    //     //                 dstStageMask  = requiredStages,
+    //     //                 dstAccessMask = requiredAccesses
+    //     //             )
+    //     //         )
 
-    pub fn createTransferBuffer(
-        ctx: *Context,
-        usage: TransferBuffer.Usage,
-        size: usize,
-    ) !TransferBuffer {
-        return try .init(ctx, usage, size);
-    }
+    //     //         # 3. Update State after a Barrier
+    //     //         # Once a barrier is placed, the "pending" writes are now visible.
+    //     //         currentState.pendingWriteStages = requiredStages if isWrite else 0
+    //     //         currentState.pendingWriteAccesses = requiredAccesses if isWrite else 0
+    //     //         currentState.lastUsedStages = requiredStages
+    //     //         return barrier
+
+    //     //     else:
+    //     //         # No barrier needed, but update state for future WAR hazards
+    //     //         currentState.lastUsedStages |= requiredStages
+    //     //         if isWrite:
+    //     //             currentState.pendingWriteAccesses |= requiredAccesses
+    //     //             currentState.pendingWriteStages |= requiredStages
+    //     //         return None
+
+    //     command_buffer.buffer.clearRetainingCapacity();
+
+    //     // always synchronize host at the end, s.t. when the semaphore is hit we can copy data out
+    //     // i guess we could remove this if there were no operations downloading data
+    //     const host_memory_barrier: vk.MemoryBarrier2 = .{
+    //         .src_stage_mask = hazards.active_write_stages,
+    //         .src_access_mask = hazards.active_write_accesses,
+    //         .dst_stage_mask = .{ .host_bit = true },
+    //         .dst_access_mask = .{ .host_read_bit = true },
+    //     };
+    //     ctx.device.cmdPipelineBarrier2(cmdbuf, &.{
+    //         .p_memory_barriers = @ptrCast(&host_memory_barrier),
+    //         .memory_barrier_count = 1,
+    //     });
+
+    //     try ctx.device.endCommandBuffer(cmdbuf);
+
+    //     const semval = ctx.queue_semaphore_values.get(.graphics);
+    //     ctx.queue_semaphore_values.set(.graphics, semval + 1);
+    //     const timeline_semaphore_info: vk.TimelineSemaphoreSubmitInfo = .{
+    //         .p_wait_semaphore_values = @ptrCast(&semval),
+    //         .p_signal_semaphore_values = @ptrCast(&(semval + 1)),
+    //         .signal_semaphore_value_count = 1,
+    //         .wait_semaphore_value_count = 1,
+    //     };
+    //     const wait_dst_stage_mask: vk.PipelineStageFlags = .{ .top_of_pipe_bit = true };
+    //     const submit_info: vk.SubmitInfo = .{
+    //         .command_buffer_count = 1,
+    //         .p_command_buffers = @ptrCast(&cmdbuf),
+    //         .wait_semaphore_count = 1,
+    //         .p_wait_semaphores = @ptrCast(ctx.queue_semaphores.getPtr(command_buffer.queue_type)),
+    //         .p_wait_dst_stage_mask = @ptrCast(&wait_dst_stage_mask),
+    //         .signal_semaphore_count = 1,
+    //         .p_signal_semaphores = @ptrCast(ctx.queue_semaphores.getPtr(command_buffer.queue_type)),
+    //         .p_next = &timeline_semaphore_info,
+    //     };
+    //     try ctx.queues.get(command_buffer.queue_type).submit(
+    //         1,
+    //         @ptrCast(&submit_info),
+    //         .null_handle,
+    //     );
+    // }
+
+    // pub fn createBuffer(
+    //     ctx: *Context,
+    //     allocation_create_info: AllocationCreateInfo,
+    //     buffer_create_info: BufferCreateInfo,
+    // ) !Buffer {
+    //     return ctx.allocator.createBuffer(allocation_create_info, buffer_create_info);
+    // }
+
+    // pub fn destroyBuffer(ctx: *Context, buffer: *Buffer) void {
+    //     switch (buffer.memory) {
+    //         .slab => |memory| {
+    //             ctx.device.destroyBuffer(buffer.buffer, null);
+    //             memory.slab.allocator.free(memory.allocation);
+    //         },
+    //         .dedicated => |memory| {
+    //             ctx.device.destroyBuffer(buffer.buffer, null);
+    //             ctx.device.freeMemory(memory, null);
+    //         },
+    //     }
+    //     buffer.* = undefined;
+    // }
+
+    // pub fn createTexture(
+    //     ctx: *Context,
+    //     allocation_create_info: AllocationCreateInfo,
+    //     texture_create_info: TextureCreateInfo,
+    // ) !Texture {
+    //     return ctx.allocator.createTexture(allocation_create_info, texture_create_info);
+    // }
+
+    // pub fn destroyTexture(ctx: *Context, texture: *Texture) void {
+    //     switch (texture.memory) {
+    //         .slab => |memory| {
+    //             ctx.device.destroyImageView(texture.default_view, null);
+    //             ctx.device.destroyImage(texture.image, null);
+    //             memory.slab.allocator.free(memory.allocation);
+    //         },
+    //         .dedicated => |memory| {
+    //             ctx.device.destroyImageView(texture.default_view, null);
+    //             ctx.device.destroyImage(texture.image, null);
+    //             ctx.device.freeMemory(memory, null);
+    //         },
+    //     }
+    //     texture.* = undefined;
+    // }
+
+    // pub fn createTransferBuffer(
+    //     ctx: *Context,
+    //     usage: TransferBuffer.Usage,
+    //     size: usize,
+    // ) !TransferBuffer {
+    //     return try .init(ctx, usage, size);
+    // }
 
     pub fn createGraphicsPipeline(
         ctx: *Context,
         static_state: GraphicsPipeline.StaticState,
         dynamic_state: GraphicsPipeline.DynamicState,
-    ) !GraphicsPipeline {
-        return try .init(ctx, static_state, dynamic_state);
+    ) !*GraphicsPipeline {
+        const pipeline = try ctx.graphics_pipeline_pool.create();
+        errdefer ctx.graphics_pipeline_pool.destroy(pipeline);
+        pipeline.* = try .init(ctx, static_state, dynamic_state);
+        return pipeline;
     }
 
     pub fn destroyGraphicsPipeline(ctx: *Context, pipeline: *GraphicsPipeline) void {
-        _ = ctx;
         pipeline.deinit();
+        ctx.graphics_pipeline_pool.destroy(pipeline);
     }
 
     pub fn createShader(
         ctx: *Context,
         shader_type: Shader.ShaderType,
         spv: []const u32,
-    ) !Shader {
-        return try .init(ctx, shader_type, spv);
+    ) !*Shader {
+        const shader = try ctx.shader_pool.create();
+        errdefer ctx.shader_pool.destroy(shader);
+        shader.* = .{
+            .module = try ctx.device.createShaderModule(&.{
+                .code_size = spv.len * 4,
+                .p_code = @ptrCast(&spv[0]),
+            }, null),
+            .stage = switch (shader_type) {
+                .vertex => .{ .vertex_bit = true },
+                .fragment => .{ .fragment_bit = true },
+                .compute => .{ .compute_bit = true },
+            },
+        };
+        return shader;
     }
 
     pub fn destroyShader(
         ctx: *Context,
         shader: *Shader,
     ) void {
-        shader.deinit(ctx);
+        ctx.device.destroyShaderModule(shader.module, null);
+        ctx.shader_pool.destroy(shader);
     }
 
     fn initInstance(
@@ -482,17 +748,10 @@ pub const Context = struct {
                 continue;
             }
 
-            if (candidate.graphics_queue_family == null) {
-                log.info("Did not pick {s}: No graphics queue", .{name});
+            if (candidate.queue_family == null) {
+                log.info("Did not pick {s}: No viable queue", .{name});
                 continue;
             }
-            if (candidate.present_queue_family == null) {
-                log.info("Did not pick {s}: No present queue", .{name});
-                continue;
-            }
-
-            std.debug.assert(candidate.async_compute_queue_family != null);
-            std.debug.assert(candidate.transfer_queue_family != null);
 
             candidates.appendAssumeCapacity(candidate);
         }
@@ -512,51 +771,26 @@ pub const Context = struct {
             .{std.mem.sliceTo(&candidates.items[0].properties.device_name, 0)},
         );
         log.debug(
-            "- Graphics queue family: {}",
-            .{candidates.items[0].graphics_queue_family.?},
+            "- queue family: {}",
+            .{candidates.items[0].queue_family.?},
         );
-        log.debug(
-            "- Async compute queue family: {}",
-            .{candidates.items[0].async_compute_queue_family.?},
-        );
-        log.debug("- Transfer queue family: {}", .{candidates.items[0].transfer_queue_family.?});
-        log.debug("- Present queue family: {}", .{candidates.items[0].present_queue_family.?});
         return candidates.items[0];
     }
 
     fn initDevice(
         ctx: *Context,
-        arena: std.mem.Allocator,
         candidate: PhysicalDeviceCandidate,
     ) !void {
-        var queue_create_infos: std.AutoArrayHashMapUnmanaged(u32, vk.DeviceQueueCreateInfo) =
-            .empty;
-        try queue_create_infos.ensureTotalCapacity(arena, 4);
-        const priority: f32 = 1.0;
-        queue_create_infos.putAssumeCapacity(candidate.graphics_queue_family.?, .{
-            .queue_family_index = candidate.graphics_queue_family.?,
+        const queue_priority: f32 = 1.0;
+        var queue_create_info: vk.DeviceQueueCreateInfo = .{
+            .queue_family_index = candidate.queue_family.?,
             .queue_count = 1,
-            .p_queue_priorities = @ptrCast(&priority),
-        });
-        queue_create_infos.putAssumeCapacity(candidate.async_compute_queue_family.?, .{
-            .queue_family_index = candidate.async_compute_queue_family.?,
-            .queue_count = 1,
-            .p_queue_priorities = @ptrCast(&priority),
-        });
-        queue_create_infos.putAssumeCapacity(candidate.transfer_queue_family.?, .{
-            .queue_family_index = candidate.transfer_queue_family.?,
-            .queue_count = 1,
-            .p_queue_priorities = @ptrCast(&priority),
-        });
-        queue_create_infos.putAssumeCapacity(candidate.present_queue_family.?, .{
-            .queue_family_index = candidate.present_queue_family.?,
-            .queue_count = 1,
-            .p_queue_priorities = @ptrCast(&priority),
-        });
+            .p_queue_priorities = @ptrCast(&queue_priority),
+        };
 
         const create_info = vk.DeviceCreateInfo{
-            .queue_create_info_count = @intCast(queue_create_infos.count()),
-            .p_queue_create_infos = queue_create_infos.values().ptr,
+            .queue_create_info_count = 1,
+            .p_queue_create_infos = @ptrCast(&queue_create_info),
             .p_enabled_features = &device_features,
             .enabled_extension_count = @intCast(device_extensions.len),
             .pp_enabled_extension_names = @ptrCast(&device_extensions),
@@ -569,50 +803,20 @@ pub const Context = struct {
         vkd.* = .load(device_handle, ctx.instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
         ctx.device = .init(device_handle, vkd);
 
-        ctx.queue_families.set(.graphics, candidate.graphics_queue_family.?);
-        ctx.queues.set(.graphics, .init(
-            ctx.device.getDeviceQueue(candidate.graphics_queue_family.?, 0),
+        ctx.queue_family = candidate.queue_family.?;
+        ctx.queue = .init(
+            ctx.device.getDeviceQueue(candidate.queue_family.?, 0),
             ctx.device.wrapper,
-        ));
-        ctx.queue_families.set(.async_compute, candidate.async_compute_queue_family.?);
-        ctx.queues.set(.async_compute, .init(
-            ctx.device.getDeviceQueue(candidate.async_compute_queue_family.?, 0),
-            ctx.device.wrapper,
-        ));
-        ctx.queue_families.set(.transfer, candidate.transfer_queue_family.?);
-        ctx.queues.set(.transfer, .init(
-            ctx.device.getDeviceQueue(candidate.transfer_queue_family.?, 0),
-            ctx.device.wrapper,
-        ));
-        ctx.queue_families.set(.present, candidate.present_queue_family.?);
-        ctx.queues.set(.present, .init(
-            ctx.device.getDeviceQueue(candidate.graphics_queue_family.?, 0),
-            ctx.device.wrapper,
-        ));
+        );
 
-        ctx.queue_semaphore_values = .initFill(0);
-        ctx.queue_semaphores.set(.graphics, try ctx.device.createSemaphore(&.{
+        ctx.queue_semaphore_value = 0;
+        ctx.queue_semaphore = try ctx.device.createSemaphore(&.{
             .p_next = &vk.SemaphoreTypeCreateInfo{
                 .semaphore_type = .timeline,
                 .initial_value = 0,
             },
-        }, null));
-        errdefer ctx.device.destroySemaphore(ctx.queue_semaphores.get(.graphics), null);
-        ctx.queue_semaphores.set(.async_compute, try ctx.device.createSemaphore(&.{
-            .p_next = &vk.SemaphoreTypeCreateInfo{
-                .semaphore_type = .timeline,
-                .initial_value = 0,
-            },
-        }, null));
-        errdefer ctx.device.destroySemaphore(ctx.queue_semaphores.get(.async_compute), null);
-        ctx.queue_semaphores.set(.transfer, try ctx.device.createSemaphore(&.{
-            .p_next = &vk.SemaphoreTypeCreateInfo{
-                .semaphore_type = .timeline,
-                .initial_value = 0,
-            },
-        }, null));
-        errdefer ctx.device.destroySemaphore(ctx.queue_semaphores.get(.transfer), null);
-        ctx.queue_semaphores.set(.present, .null_handle);
+        }, null);
+        errdefer ctx.device.destroySemaphore(ctx.queue_semaphore, null);
 
         ctx.physical_device = candidate.device;
         ctx.physical_device_properties = candidate.properties;
@@ -620,50 +824,28 @@ pub const Context = struct {
     }
 
     fn deinitDevice(ctx: *Context) void {
-        ctx.device.destroySemaphore(ctx.queue_semaphores.get(.graphics), null);
-        ctx.device.destroySemaphore(ctx.queue_semaphores.get(.async_compute), null);
-        ctx.device.destroySemaphore(ctx.queue_semaphores.get(.transfer), null);
+        ctx.device.destroySemaphore(ctx.queue_semaphore, null);
         ctx.device.destroyDevice(null);
         ctx.gpa.destroy(ctx.device.wrapper);
         ctx.physical_device = .null_handle;
     }
 
     fn initPipelineLayout(ctx: *Context) !void {
-        ctx.samplers[0] = try ctx.device.createSampler(&.{
-            .mag_filter = .nearest,
-            .min_filter = .nearest,
-            .mipmap_mode = .nearest,
-            .address_mode_u = .repeat,
-            .address_mode_v = .repeat,
-            .address_mode_w = .repeat,
-            .mip_lod_bias = 0.0,
-            .anisotropy_enable = .false,
-            .max_anisotropy = 0.0,
-            .compare_enable = .false,
-            .compare_op = .never,
-            .min_lod = 0.0,
-            .max_lod = vk.LOD_CLAMP_NONE,
-            .border_color = .float_transparent_black,
-            .unnormalized_coordinates = .false,
-        }, null);
-        errdefer ctx.device.destroySampler(ctx.samplers[0], null);
-
         const bindings: [3]vk.DescriptorSetLayoutBinding = .{ .{
             .binding = 0,
             .descriptor_type = .sampled_image,
-            .descriptor_count = 65536,
+            .descriptor_count = 1048576,
             .stage_flags = .{ .vertex_bit = true, .fragment_bit = true, .compute_bit = true },
         }, .{
             .binding = 1,
             .descriptor_type = .storage_image,
-            .descriptor_count = 65536,
+            .descriptor_count = 1048576,
             .stage_flags = .{ .vertex_bit = true, .fragment_bit = true, .compute_bit = true },
         }, .{
             .binding = 2,
             .descriptor_type = .sampler,
-            .descriptor_count = ctx.samplers.len,
+            .descriptor_count = 1048576,
             .stage_flags = .{ .vertex_bit = true, .fragment_bit = true, .compute_bit = true },
-            .p_immutable_samplers = @ptrCast(&ctx.samplers[0]),
         } };
         const binding_flags: [3]vk.DescriptorBindingFlags = .{ .{
             .update_after_bind_bit = true,
@@ -701,7 +883,6 @@ pub const Context = struct {
     fn deinitPipelineLayout(ctx: *Context) void {
         ctx.device.destroyPipelineLayout(ctx.pipeline_layout, null);
         ctx.device.destroyDescriptorSetLayout(ctx.descriptor_set_layout, null);
-        for (ctx.samplers) |sampler| ctx.device.destroySampler(sampler, null);
     }
 };
 
@@ -715,10 +896,7 @@ const PhysicalDeviceCandidate = struct {
     features_1_2: vk.PhysicalDeviceVulkan12Features,
     features_1_3: vk.PhysicalDeviceVulkan13Features,
 
-    graphics_queue_family: ?u32,
-    async_compute_queue_family: ?u32,
-    transfer_queue_family: ?u32,
-    present_queue_family: ?u32,
+    queue_family: ?u32,
 
     fn init(
         arena: std.mem.Allocator,
@@ -734,10 +912,7 @@ const PhysicalDeviceCandidate = struct {
             .features_1_1 = .{},
             .features_1_2 = .{},
             .features_1_3 = .{},
-            .graphics_queue_family = null,
-            .async_compute_queue_family = null,
-            .transfer_queue_family = null,
-            .present_queue_family = null,
+            .queue_family = null,
         };
 
         var properties2: vk.PhysicalDeviceProperties2 = .{ .properties = undefined };
@@ -756,27 +931,9 @@ const PhysicalDeviceCandidate = struct {
         candidate.features_1_2.p_next = null;
         candidate.features_1_3.p_next = null;
 
-        // graphics queue must support graphics (and compute and transfer)
-        // async compute should preferably be compute-only queue (and transfer)
-        //   otherwise same as graphics
-        // transfer should preferably be transfer-only queue,
-        //   otherwise same as graphics
-        // present queue should preferably be same as graphics
+        // identify an everything queue (graphics supports compute and transfer implicitly)
         const queue_families =
             try instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(dev, arena);
-        for (queue_families, 0..) |family, i| {
-            if (family.queue_flags.graphics_bit) continue;
-            if (family.queue_flags.compute_bit) continue;
-            if (!family.queue_flags.transfer_bit) continue;
-            candidate.transfer_queue_family = @intCast(i);
-            break;
-        }
-        for (queue_families, 0..) |family, i| {
-            if (family.queue_flags.graphics_bit) continue;
-            if (!family.queue_flags.compute_bit) continue;
-            candidate.async_compute_queue_family = @intCast(i);
-            break;
-        }
         for (queue_families, 0..) |family, i| {
             if (!family.queue_flags.graphics_bit) continue;
             if (try instance.getPhysicalDeviceSurfaceSupportKHR(
@@ -784,30 +941,8 @@ const PhysicalDeviceCandidate = struct {
                 @intCast(i),
                 surface,
             ) != .true) continue;
-            candidate.graphics_queue_family = @intCast(i);
-            candidate.present_queue_family = @intCast(i);
-        }
-        if (candidate.graphics_queue_family == null) {
-            for (queue_families, 0..) |family, i| {
-                if (!family.queue_flags.graphics_bit) continue;
-                candidate.graphics_queue_family = @intCast(i);
-            }
-        }
-        if (candidate.present_queue_family == null) {
-            for (queue_families, 0..) |_, i| {
-                if (try instance.getPhysicalDeviceSurfaceSupportKHR(
-                    candidate.device,
-                    @intCast(i),
-                    surface,
-                ) != .true) continue;
-                candidate.present_queue_family = @intCast(i);
-            }
-        }
-        if (candidate.async_compute_queue_family == null) {
-            candidate.async_compute_queue_family = candidate.graphics_queue_family;
-        }
-        if (candidate.transfer_queue_family == null) {
-            candidate.transfer_queue_family = candidate.graphics_queue_family;
+            candidate.queue_family = @intCast(i);
+            break;
         }
 
         return candidate;
@@ -942,9 +1077,12 @@ const Swapchain = struct {
         );
 
         log.debug("Creating swapchain", .{});
-        const format = pickSwapchainFormat(ctx.settings, formats);
+        const format = pickSwapchainFormat(
+            ctx.swapchain_composition.getSwapchainSurfaceFormats(),
+            formats,
+        );
         log.debug("- format:       {} {}", .{ format.format, format.color_space });
-        const present_mode = pickSwapchainPresentMode(ctx.settings, present_modes);
+        const present_mode = pickSwapchainPresentMode(&.{ctx.present_mode.vulkan()}, present_modes);
         log.debug("- present_mode: {}", .{present_mode});
         const extent = try getSwapchainExtent(ctx.platform, capabilities);
         log.debug("- extent:       {}", .{extent});
@@ -971,15 +1109,6 @@ const Swapchain = struct {
             .clipped = .true,
             .old_swapchain = old_swapchain,
         };
-        var queue_families: std.AutoArrayHashMapUnmanaged(u32, void) = .empty;
-        try queue_families.ensureTotalCapacity(arena, 2);
-        queue_families.putAssumeCapacity(ctx.queue_families.get(.graphics), {});
-        queue_families.putAssumeCapacity(ctx.queue_families.get(.present), {});
-        if (queue_families.count() > 1) {
-            create_info.image_sharing_mode = .concurrent;
-            create_info.queue_family_index_count = @intCast(queue_families.count());
-            create_info.p_queue_family_indices = queue_families.keys().ptr;
-        }
         const swapchain = try ctx.device.createSwapchainKHR(&create_info, null);
         errdefer ctx.device.destroySwapchainKHR(swapchain, null);
         const swapchain_format = format;
@@ -1071,27 +1200,27 @@ const Swapchain = struct {
     }
 
     fn pickSwapchainFormat(
-        settings: Settings,
-        formats: []vk.SurfaceFormatKHR,
+        requested_formats: []const vk.SurfaceFormatKHR,
+        available_formats: []vk.SurfaceFormatKHR,
     ) vk.SurfaceFormatKHR {
-        std.debug.assert(formats.len > 0);
+        std.debug.assert(available_formats.len > 0);
 
-        for (settings.swapchain_surface_formats) |req| {
-            for (formats) |ava| {
+        for (requested_formats) |req| {
+            for (available_formats) |ava| {
                 if (std.meta.eql(req, ava)) return req;
             }
         }
 
         log.warn("None of the requested swapchain surface formats were found", .{});
-        return formats[0];
+        return available_formats[0];
     }
 
     fn pickSwapchainPresentMode(
-        settings: Settings,
-        modes: []vk.PresentModeKHR,
+        requested_modes: []const vk.PresentModeKHR,
+        available_modes: []vk.PresentModeKHR,
     ) vk.PresentModeKHR {
-        for (settings.swapchain_present_modes) |req| {
-            for (modes) |ava| {
+        for (requested_modes) |req| {
+            for (available_modes) |ava| {
                 if (req == ava) return req;
             }
         }
@@ -1121,188 +1250,6 @@ const Swapchain = struct {
         if (capabilities.max_image_count > 0) count = @min(count, capabilities.max_image_count);
         return count;
     }
-};
-
-// i think we can scrap bufferusage completely and always allow everything
-// const BufferUsage = packed struct(u32) {
-//     transfer_src: bool = false,
-//     transfer_dst: bool = false,
-//     storage_buffer: bool = false,
-//     index_buffer: bool = false,
-//     indirect_buffer: bool = false,
-//     // note the
-//     // _padding
-// };
-
-// what should be features of the allocator
-// and what should we actually expose in the rhi?
-
-// rhi needs
-// createBuffer(
-// - usage is always everything so not relevant
-// - queue family ownership is always concurrent so not relevant
-// - mapped_and_write or mapped_and_read or gpu_only
-//   maybe a gpu_only_but_mapped_and_read_if_available?
-// - size
-// - maybe dedicated flag, checks if dedicated is desirable and uses it if so
-// - since we don't support uniform buffers, 256 byte alignment is fine for everything
-// ) -> buffer
-// createImage(
-// - storage, sampled, transfer_src/dst, color/depth/stencil_attahcment,
-// - queue family ownership (always exclusive)
-// - memory is always gpu_only
-// - size, samplecount, etc
-// - since we do gpu only and no host_image_transfer, i think tiling can always be optimal
-// - maybe dedicated flag, checks if dedicated is desirable and uses it if so
-// ) -> image
-// createUnion(
-// - array of image create info
-// - array of buffer create info
-// ) -> union of aliased resources
-
-// but we could opt to make the allocator more general than that?
-// but why though?
-
-pub const BufferCreateInfo = struct {
-    size: usize,
-    host_access_mode: ?enum { host_write, host_read } = null, // not guaranteed
-};
-
-pub const ImageLayout = enum {
-    unknown,
-    general,
-    read_only,
-    attachment,
-    transfer_src,
-    transfer_dst,
-    depth_attachment_stencil_read_only,
-    depth_read_only_stencil_attachment,
-
-    fn vulkan(layout: ImageLayout) vk.ImageLayout {
-        return switch (layout) {
-            .unknown => .undefined,
-            .general => .general,
-            .read_only => .read_only_optimal,
-            .attachment => .attachment_optimal,
-            .transfer_src => .transfer_src_optimal,
-            .transfer_dst => .transfer_dst_optimal,
-            .depth_attachment_stencil_read_only => .depth_attachment_stencil_read_only_optimal,
-            .depth_read_only_stencil_attachment => .depth_read_only_stencil_attachment_optimal,
-        };
-    }
-};
-
-pub const TextureCreateInfo = struct {
-    usage: packed struct(u32) {
-        storage: bool = false,
-        sampled: bool = false,
-        transfer_src: bool = false,
-        transfer_dst: bool = false,
-        color_attachment: bool = false,
-        depth_stencil_attachment: bool = false,
-        _padding: u26 = 0,
-    },
-    format: Format,
-    cubemap: bool = false,
-    image_type: enum {
-        // more distinct than the vulkan image type
-        // to allow us to make a useful default view
-        image_1d,
-        image_2d,
-        image_3d,
-        image_cube,
-        image_1d_array,
-        image_2d_array,
-        image_cube_array,
-
-        fn vulkanImageType(image_type: @This()) vk.ImageType {
-            return switch (image_type) {
-                .image_1d => .@"1d",
-                .image_2d => .@"2d",
-                .image_3d => .@"3d",
-                .image_cube => .@"2d",
-                .image_1d_array => .@"1d",
-                .image_2d_array => .@"2d",
-                .image_cube_array => .@"2d",
-            };
-        }
-
-        fn vulkanImageViewType(image_type: @This()) vk.ImageViewType {
-            return switch (image_type) {
-                .image_1d => .@"1d",
-                .image_2d => .@"2d",
-                .image_3d => .@"3d",
-                .image_cube => .cube,
-                .image_1d_array => .@"1d_array",
-                .image_2d_array => .@"2d_array",
-                .image_cube_array => .cube_array,
-            };
-        }
-    },
-    mip_levels: u32,
-    size: [3]u32, // x, y, z or depth
-    samples: SampleCount = .@"1",
-    queue: QueueType, // always exclusive
-    layout: ImageLayout = .unknown,
-    views: []const ImageViewCreateInfo = &.{},
-};
-
-pub const ImageViewCreateInfo = struct {
-    view_type: ?enum {
-        view_1d,
-        view_2d,
-        view_3d,
-        view_cube,
-        view_1d_array,
-        view_2d_array,
-        view_cube_array,
-    } = null,
-    format: ?Format = null,
-    swizzle: struct {
-        const Component = enum {
-            zero,
-            one,
-            r,
-            g,
-            b,
-            a,
-
-            fn vulkan(component: Component) vk.ComponentSwizzle {
-                return switch (component) {
-                    .zero => .zero,
-                    .one => .one,
-                    .r => .r,
-                    .g => .g,
-                    .b => .b,
-                    .a => .a,
-                };
-            }
-        };
-        r: Component = .r,
-        g: Component = .g,
-        b: Component = .b,
-        a: Component = .a,
-
-        fn vulkan(swizzle: @This()) vk.ComponentMapping {
-            return .{
-                .r = if (swizzle.r == .r) .identity else swizzle.r.vulkan(),
-                .g = if (swizzle.g == .g) .identity else swizzle.g.vulkan(),
-                .b = if (swizzle.b == .b) .identity else swizzle.b.vulkan(),
-                .a = if (swizzle.a == .a) .identity else swizzle.a.vulkan(),
-            };
-        }
-    } = .{},
-    range: ?struct {
-        base_mip_level: u32,
-        level_count: u32,
-        base_array_layer: u32,
-        layer_count: u32,
-        mask: ?enum { depth, stencil },
-    } = null,
-};
-
-const AllocationCreateInfo = struct {
-    dedicated: enum { if_required, if_preferred, always } = .if_required,
 };
 
 const Allocator = struct {
@@ -1337,160 +1284,160 @@ const Allocator = struct {
         allocator.* = undefined;
     }
 
-    fn createBuffer(
-        allocator: *Allocator,
-        allocation_create_info: AllocationCreateInfo,
-        buffer_create_info: BufferCreateInfo,
-    ) !Buffer {
-        const queue_family_indices: FixedSet(3, u32) = .init(&.{
-            allocator.ctx.queue_families.get(.graphics),
-            allocator.ctx.queue_families.get(.async_compute),
-            allocator.ctx.queue_families.get(.transfer),
-        });
-        const buffer_info = vk.BufferCreateInfo{
-            .size = buffer_create_info.size,
-            .usage = .{
-                .transfer_src_bit = true,
-                .transfer_dst_bit = true,
-                .storage_buffer_bit = true,
-                .index_buffer_bit = true,
-                .indirect_buffer_bit = true,
-                .shader_device_address_bit = true,
-            },
-            .sharing_mode = .concurrent,
-            .p_queue_family_indices = @ptrCast(queue_family_indices.items().ptr),
-            .queue_family_index_count = @intCast(queue_family_indices.items().len),
-        };
-        const buffer = try allocator.ctx.device.createBuffer(&buffer_info, null);
-        errdefer allocator.ctx.device.destroyBuffer(buffer, null);
+    // fn createBuffer(
+    //     allocator: *Allocator,
+    //     allocation_create_info: AllocationCreateInfo,
+    //     buffer_create_info: BufferCreateInfo,
+    // ) !Buffer {
+    //     const queue_family_indices: FixedSet(3, u32) = .init(&.{
+    //         allocator.ctx.queue_families.get(.graphics),
+    //         allocator.ctx.queue_families.get(.async_compute),
+    //         allocator.ctx.queue_families.get(.transfer),
+    //     });
+    //     const buffer_info = vk.BufferCreateInfo{
+    //         .size = buffer_create_info.size,
+    //         .usage = .{
+    //             .transfer_src_bit = true,
+    //             .transfer_dst_bit = true,
+    //             .storage_buffer_bit = true,
+    //             .index_buffer_bit = true,
+    //             .indirect_buffer_bit = true,
+    //             .shader_device_address_bit = true,
+    //         },
+    //         .sharing_mode = .concurrent,
+    //         .p_queue_family_indices = @ptrCast(queue_family_indices.items().ptr),
+    //         .queue_family_index_count = @intCast(queue_family_indices.items().len),
+    //     };
+    //     const buffer = try allocator.ctx.device.createBuffer(&buffer_info, null);
+    //     errdefer allocator.ctx.device.destroyBuffer(buffer, null);
 
-        var dedicated_memreq: vk.MemoryDedicatedRequirements = .{
-            .prefers_dedicated_allocation = .false,
-            .requires_dedicated_allocation = .false,
-        };
-        var buffer_memreq: vk.MemoryRequirements2 = .{
-            .p_next = &dedicated_memreq,
-            .memory_requirements = undefined,
-        };
-        allocator.ctx.device.getBufferMemoryRequirements2(&.{
-            .buffer = buffer,
-        }, &buffer_memreq);
+    //     var dedicated_memreq: vk.MemoryDedicatedRequirements = .{
+    //         .prefers_dedicated_allocation = .false,
+    //         .requires_dedicated_allocation = .false,
+    //     };
+    //     var buffer_memreq: vk.MemoryRequirements2 = .{
+    //         .p_next = &dedicated_memreq,
+    //         .memory_requirements = undefined,
+    //     };
+    //     allocator.ctx.device.getBufferMemoryRequirements2(&.{
+    //         .buffer = buffer,
+    //     }, &buffer_memreq);
 
-        std.debug.print("{}\n", .{buffer_memreq});
-        std.debug.print("{}\n", .{dedicated_memreq});
+    //     std.debug.print("{}\n", .{buffer_memreq});
+    //     std.debug.print("{}\n", .{dedicated_memreq});
 
-        var memory_type_index: u32 = undefined;
-        var best_score: i32 = -999;
+    //     var memory_type_index: u32 = undefined;
+    //     var best_score: i32 = -999;
 
-        const memory_types = allocator.ctx.physical_device_memory_properties.memory_types;
-        const memory_type_count = allocator.ctx.physical_device_memory_properties.memory_type_count;
-        for (memory_types[0..memory_type_count], 0..) |memory_type, i| {
-            // hard requirements
-            if (buffer_memreq.memory_requirements.memory_type_bits &
-                (@as(u32, 1) << @intCast(i)) == 0) continue;
-            // soft requirements
-            var score: i32 = 0;
-            if (memory_type.property_flags.device_local_bit) score += 2;
-            if (buffer_create_info.host_access_mode == .host_write and
-                memory_type.property_flags.host_visible_bit and
-                memory_type.property_flags.host_coherent_bit) score += 1;
-            if (buffer_create_info.host_access_mode == .host_read and
-                memory_type.property_flags.host_visible_bit and
-                memory_type.property_flags.host_coherent_bit and
-                memory_type.property_flags.host_cached_bit) score += 1;
-            if (score > best_score) {
-                best_score = score;
-                memory_type_index = @intCast(i);
-            }
-        }
+    //     const memory_types = allocator.ctx.physical_device_memory_properties.memory_types;
+    //     const memory_type_count = allocator.ctx.physical_device_memory_properties.memory_type_count;
+    //     for (memory_types[0..memory_type_count], 0..) |memory_type, i| {
+    //         // hard requirements
+    //         if (buffer_memreq.memory_requirements.memory_type_bits &
+    //             (@as(u32, 1) << @intCast(i)) == 0) continue;
+    //         // soft requirements
+    //         var score: i32 = 0;
+    //         if (memory_type.property_flags.device_local_bit) score += 2;
+    //         if (buffer_create_info.host_access_mode == .host_write and
+    //             memory_type.property_flags.host_visible_bit and
+    //             memory_type.property_flags.host_coherent_bit) score += 1;
+    //         if (buffer_create_info.host_access_mode == .host_read and
+    //             memory_type.property_flags.host_visible_bit and
+    //             memory_type.property_flags.host_coherent_bit and
+    //             memory_type.property_flags.host_cached_bit) score += 1;
+    //         if (score > best_score) {
+    //             best_score = score;
+    //             memory_type_index = @intCast(i);
+    //         }
+    //     }
 
-        if (allocation_create_info.dedicated == .always or
-            dedicated_memreq.requires_dedicated_allocation == .true or
-            (dedicated_memreq.prefers_dedicated_allocation == .true and
-                allocation_create_info.dedicated == .if_preferred) or
-            buffer_memreq.memory_requirements.size > Slab.slab_size / 2)
-        {
-            // dedicated allocation
-            const dedicated_info: vk.MemoryDedicatedAllocateInfo = .{
-                .buffer = buffer,
-            };
-            const alloc_flags: vk.MemoryAllocateFlagsInfo = .{
-                .flags = .{ .device_address_bit = true },
-                .device_mask = 0,
-                .p_next = &dedicated_info,
-            };
-            const memory = try allocator.ctx.device.allocateMemory(&.{
-                .allocation_size = buffer_memreq.memory_requirements.size,
-                .memory_type_index = memory_type_index,
-                .p_next = &alloc_flags,
-            }, null);
-            errdefer allocator.ctx.device.freeMemory(memory, null);
-            try allocator.ctx.device.bindBufferMemory(buffer, memory, 0);
+    //     if (allocation_create_info.dedicated == .always or
+    //         dedicated_memreq.requires_dedicated_allocation == .true or
+    //         (dedicated_memreq.prefers_dedicated_allocation == .true and
+    //             allocation_create_info.dedicated == .if_preferred) or
+    //         buffer_memreq.memory_requirements.size > Slab.slab_size / 2)
+    //     {
+    //         // dedicated allocation
+    //         const dedicated_info: vk.MemoryDedicatedAllocateInfo = .{
+    //             .buffer = buffer,
+    //         };
+    //         const alloc_flags: vk.MemoryAllocateFlagsInfo = .{
+    //             .flags = .{ .device_address_bit = true },
+    //             .device_mask = 0,
+    //             .p_next = &dedicated_info,
+    //         };
+    //         const memory = try allocator.ctx.device.allocateMemory(&.{
+    //             .allocation_size = buffer_memreq.memory_requirements.size,
+    //             .memory_type_index = memory_type_index,
+    //             .p_next = &alloc_flags,
+    //         }, null);
+    //         errdefer allocator.ctx.device.freeMemory(memory, null);
+    //         try allocator.ctx.device.bindBufferMemory(buffer, memory, 0);
 
-            const address = allocator.ctx.device.getBufferDeviceAddress(&.{
-                .buffer = buffer,
-            });
+    //         const address = allocator.ctx.device.getBufferDeviceAddress(&.{
+    //             .buffer = buffer,
+    //         });
 
-            // NOTE if mapping fails, since it's not guaranteed just dont' do it
-            var mapped: ?[]u8 = null;
-            if (memory_types[memory_type_index].property_flags.host_visible_bit and
-                memory_types[memory_type_index].property_flags.host_coherent_bit)
-                mapped = blk: {
-                    const ptr: [*]u8 = @ptrCast(allocator.ctx.device.mapMemory(
-                        memory,
-                        0,
-                        buffer_create_info.size,
-                        .{},
-                    ) catch break :blk null);
-                    break :blk ptr[0..buffer_create_info.size];
-                };
+    //         // NOTE if mapping fails, since it's not guaranteed just dont' do it
+    //         var mapped: ?[]u8 = null;
+    //         if (memory_types[memory_type_index].property_flags.host_visible_bit and
+    //             memory_types[memory_type_index].property_flags.host_coherent_bit)
+    //             mapped = blk: {
+    //                 const ptr: [*]u8 = @ptrCast(allocator.ctx.device.mapMemory(
+    //                     memory,
+    //                     0,
+    //                     buffer_create_info.size,
+    //                     .{},
+    //                 ) catch break :blk null);
+    //                 break :blk ptr[0..buffer_create_info.size];
+    //             };
 
-            return .{
-                .memory = .{ .dedicated = memory },
-                .buffer = buffer,
-                .size = buffer_create_info.size,
-                .buffer_device_address = address,
-                .mapped_memory = mapped,
-            };
-        }
+    //         return .{
+    //             .memory = .{ .dedicated = memory },
+    //             .buffer = buffer,
+    //             .size = buffer_create_info.size,
+    //             .buffer_device_address = address,
+    //             .mapped_memory = mapped,
+    //         };
+    //     }
 
-        // suballocate
-        std.debug.assert(buffer_memreq.memory_requirements.alignment <= Slab.granularity);
-        const suballoc = try allocator.alloc(
-            memory_type_index,
-            memory_types[memory_type_index].property_flags,
-            .{ .device_address_bit = true },
-            // buffer_create_info.size,
-            buffer_memreq.memory_requirements.size,
-        );
+    //     // suballocate
+    //     std.debug.assert(buffer_memreq.memory_requirements.alignment <= Slab.granularity);
+    //     const suballoc = try allocator.alloc(
+    //         memory_type_index,
+    //         memory_types[memory_type_index].property_flags,
+    //         .{ .device_address_bit = true },
+    //         // buffer_create_info.size,
+    //         buffer_memreq.memory_requirements.size,
+    //     );
 
-        try allocator.ctx.device.bindBufferMemory(
-            buffer,
-            suballoc.slab.memory,
-            suballoc.allocation.offset,
-        );
+    //     try allocator.ctx.device.bindBufferMemory(
+    //         buffer,
+    //         suballoc.slab.memory,
+    //         suballoc.allocation.offset,
+    //     );
 
-        const address = allocator.ctx.device.getBufferDeviceAddress(&.{
-            .buffer = buffer,
-        });
+    //     const address = allocator.ctx.device.getBufferDeviceAddress(&.{
+    //         .buffer = buffer,
+    //     });
 
-        const offset = suballoc.allocation.offset * Slab.granularity;
-        const mapped: ?[]u8 = if (suballoc.slab.mapped_memory) |mm|
-            mm[offset .. offset + buffer_create_info.size]
-        else
-            null;
+    //     const offset = suballoc.allocation.offset * Slab.granularity;
+    //     const mapped: ?[]u8 = if (suballoc.slab.mapped_memory) |mm|
+    //         mm[offset .. offset + buffer_create_info.size]
+    //     else
+    //         null;
 
-        return .{
-            .memory = .{ .slab = .{
-                .allocation = suballoc.allocation,
-                .slab = suballoc.slab,
-            } },
-            .buffer = buffer,
-            .size = buffer_create_info.size,
-            .buffer_device_address = address,
-            .mapped_memory = mapped,
-        };
-    }
+    //     return .{
+    //         .memory = .{ .slab = .{
+    //             .allocation = suballoc.allocation,
+    //             .slab = suballoc.slab,
+    //         } },
+    //         .buffer = buffer,
+    //         .size = buffer_create_info.size,
+    //         .buffer_device_address = address,
+    //         .mapped_memory = mapped,
+    //     };
+    // }
 
     fn alloc(
         allocator: *Allocator,
@@ -1563,728 +1510,190 @@ const Allocator = struct {
         };
     }
 
-    // const memory_type_index = findMemoryType(
-    //     buffer_memreq.memory_type_bits,
-    //     ctx.physical_device_memory_properties,
-    // );
-    // const alloc_flags = vk.MemoryAllocateFlagsInfo{
-    //     .flags = .{ .device_address_bit = true },
-    //     .device_mask = undefined, // note, not used
-    // };
-    // const alloc_info = vk.MemoryAllocateInfo{
-    //     .allocation_size = buffer_memreq.size,
-    //     .memory_type_index = memory_type_index,
-    //     .p_next = &alloc_flags,
-    // };
-    // const memory = try ctx.device.allocateMemory(&alloc_info, null);
-    // errdefer ctx.device.freeMemory(memory, null);
+    // fn createTexture(
+    //     allocator: *Allocator,
+    //     allocation_create_info: AllocationCreateInfo,
+    //     texture_create_info: TextureCreateInfo,
+    // ) !Texture {
+    //     const multiformat: bool = blk: {
+    //         const base_format = texture_create_info.format;
+    //         for (texture_create_info.views) |view| {
+    //             if (view.format) |format| {
+    //                 if (format != base_format) break :blk true;
+    //             }
+    //         }
+    //         break :blk false;
+    //     };
 
-    // try ctx.device.bindBufferMemory(buffer, memory, 0);
-    // const buffer_device_address = ctx.device.getBufferDeviceAddress(&.{
-    //     .buffer = buffer,
-    // });
+    //     const arrayview: bool = blk: {
+    //         if (texture_create_info.image_type != .image_3d) break :blk false;
+    //         for (texture_create_info.views) |view| {
+    //             if (view.view_type == .view_2d_array) break :blk true;
+    //         }
+    //         break :blk false;
+    //     };
 
-    // var allocator: OffsetAllocator = try .init(ctx.gpa, slab_size / 256, slab_size / 4096);
-    // errdefer allocator.deinit(ctx.gpa);
+    //     const image_info: vk.ImageCreateInfo = .{
+    //         .flags = .{
+    //             .mutable_format_bit = multiformat,
+    //             .cube_compatible_bit = texture_create_info.cubemap,
+    //             .@"2d_array_compatible_bit" = arrayview,
+    //         },
+    //         .image_type = texture_create_info.image_type.vulkanImageType(),
+    //         .format = texture_create_info.format.vulkan(),
+    //         .extent = .{
+    //             .width = texture_create_info.size[0],
+    //             .height = texture_create_info.size[1],
+    //             .depth = if (texture_create_info.image_type == .image_3d)
+    //                 texture_create_info.size[2]
+    //             else
+    //                 1,
+    //         },
+    //         .mip_levels = texture_create_info.mip_levels,
+    //         .array_layers = if (texture_create_info.image_type == .image_3d)
+    //             1
+    //         else
+    //             texture_create_info.size[2],
+    //         .samples = texture_create_info.samples.vulkan(),
+    //         .tiling = .optimal,
+    //         .usage = .{
+    //             .storage_bit = texture_create_info.usage.storage,
+    //             .sampled_bit = texture_create_info.usage.sampled,
+    //             .transfer_src_bit = texture_create_info.usage.transfer_src,
+    //             .transfer_dst_bit = texture_create_info.usage.transfer_dst,
+    //             .color_attachment_bit = texture_create_info.usage.color_attachment,
+    //             .depth_stencil_attachment_bit = texture_create_info.usage.depth_stencil_attachment,
+    //         },
+    //         .sharing_mode = .exclusive,
+    //         .queue_family_index_count = 1,
+    //         .p_queue_family_indices = @ptrCast(allocator.ctx.queue_families.getPtrConst(
+    //             texture_create_info.queue,
+    //         )),
+    //         .initial_layout = texture_create_info.layout.vulkan(),
+    //     };
+    //     const image = try allocator.ctx.device.createImage(&image_info, null);
+    //     errdefer allocator.ctx.device.destroyImage(image, null);
 
-    // const property_flags = ctx.physical_device_memory_properties
-    //     .memory_types[memory_type_index].property_flags;
+    //     var dedicated_memreq: vk.MemoryDedicatedRequirements = .{
+    //         .prefers_dedicated_allocation = .false,
+    //         .requires_dedicated_allocation = .false,
+    //     };
+    //     var image_memreq: vk.MemoryRequirements2 = .{
+    //         .p_next = &dedicated_memreq,
+    //         .memory_requirements = undefined,
+    //     };
+    //     allocator.ctx.device.getImageMemoryRequirements2(&.{
+    //         .image = image,
+    //     }, &image_memreq);
 
-    // var buffer_ptr: ?*anyopaque = null;
-    // if (property_flags.host_visible_bit) {
-    //     // UMA system, map it so we can transfer directly
-    //     buffer_ptr = try ctx.device.mapMemory(memory, 0, slab_size, .{});
+    //     std.debug.print("{}\n", .{image_memreq});
+    //     std.debug.print("{}\n", .{dedicated_memreq});
+
+    //     var memory_type_index: u32 = undefined;
+    //     var best_score: i32 = -999;
+
+    //     const memory_types = allocator.ctx.physical_device_memory_properties.memory_types;
+    //     const memory_type_count = allocator.ctx.physical_device_memory_properties.memory_type_count;
+    //     for (memory_types[0..memory_type_count], 0..) |memory_type, i| {
+    //         // hard requirements
+    //         if (image_memreq.memory_requirements.memory_type_bits &
+    //             (@as(u32, 1) << @intCast(i)) == 0) continue;
+    //         // soft requirements
+    //         var score: i32 = 0;
+    //         if (memory_type.property_flags.device_local_bit) score += 1;
+    //         if (score > best_score) {
+    //             best_score = score;
+    //             memory_type_index = @intCast(i);
+    //         }
+    //     }
+
+    //     var texture: Texture = undefined;
+    //     texture.image = image;
+
+    //     if (allocation_create_info.dedicated == .always or
+    //         dedicated_memreq.requires_dedicated_allocation == .true or
+    //         (dedicated_memreq.prefers_dedicated_allocation == .true and
+    //             allocation_create_info.dedicated == .if_preferred) or
+    //         image_memreq.memory_requirements.size > Slab.slab_size / 2)
+    //     {
+    //         // dedicated allocation
+    //         const dedicated_info: vk.MemoryDedicatedAllocateInfo = .{
+    //             .image = image,
+    //         };
+    //         const alloc_flags: vk.MemoryAllocateFlagsInfo = .{
+    //             .device_mask = 0,
+    //             .p_next = &dedicated_info,
+    //         };
+    //         const memory = try allocator.ctx.device.allocateMemory(&.{
+    //             .allocation_size = image_memreq.memory_requirements.size,
+    //             .memory_type_index = memory_type_index,
+    //             .p_next = &alloc_flags,
+    //         }, null);
+    //         errdefer allocator.ctx.device.freeMemory(memory, null);
+    //         try allocator.ctx.device.bindImageMemory(image, memory, 0);
+
+    //         texture.memory = .{ .dedicated = memory };
+    //     } else {
+    //         // suballocate
+    //         const suballoc = try allocator.alloc(
+    //             memory_type_index,
+    //             memory_types[memory_type_index].property_flags,
+    //             .{ .device_address_bit = true },
+    //             if (image_memreq.memory_requirements.alignment <= Slab.granularity)
+    //                 image_memreq.memory_requirements.size
+    //             else
+    //                 image_memreq.memory_requirements.size + image_memreq.memory_requirements.alignment,
+    //         );
+
+    //         try allocator.ctx.device.bindImageMemory(
+    //             image,
+    //             suballoc.slab.memory,
+    //             std.mem.alignForward(
+    //                 u32,
+    //                 suballoc.allocation.offset,
+    //                 @intCast(image_memreq.memory_requirements.alignment),
+    //             ),
+    //         );
+
+    //         texture.memory = .{ .slab = .{
+    //             .allocation = suballoc.allocation,
+    //             .slab = suballoc.slab,
+    //         } };
+    //     }
+
+    //     const default_view_info: vk.ImageViewCreateInfo = .{
+    //         .image = image,
+    //         .view_type = texture_create_info.image_type.vulkanImageViewType(),
+    //         .format = texture_create_info.format.vulkan(),
+    //         .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
+    //         .subresource_range = .{
+    //             .base_mip_level = 0,
+    //             .level_count = texture_create_info.mip_levels,
+    //             .base_array_layer = 0,
+    //             .layer_count = texture_create_info.size[2],
+    //             .aspect_mask = switch (texture_create_info.format) {
+    //                 .s8_uint => .{ .stencil_bit = true },
+    //                 .d16_unorm,
+    //                 .d16_unorm_s8_uint,
+    //                 .d24_unorm_s8_uint,
+    //                 .d32_sfloat,
+    //                 .d32_sfloat_s8_uint,
+    //                 => .{ .depth_bit = true },
+    //                 else => .{ .color_bit = true },
+    //             },
+    //         },
+    //     };
+    //     const default_view = try allocator.ctx.device.createImageView(&default_view_info, null);
+    //     errdefer allocator.ctx.device.destroyImageView(default_view, null);
+
+    //     texture.default_view = default_view;
+    //     texture.size = texture_create_info.size;
+    //     texture.layout = texture_create_info.layout.vulkan();
+    //     texture.queue = texture_create_info.queue;
+
+    //     return texture;
     // }
-
-    // return .{
-    //     .ctx = ctx,
-    //     .buffer = buffer,
-    //     .buffer_device_address = buffer_device_address,
-    //     .buffer_ptr = buffer_ptr,
-    //     .memory = memory,
-    //     .host_visible = !property_flags.host_visible_bit,
-    //     .host_coherent = !property_flags.host_coherent_bit,
-    //     .allocator = allocator,
-    // };
-    // }
-
-    fn createTexture(
-        allocator: *Allocator,
-        allocation_create_info: AllocationCreateInfo,
-        texture_create_info: TextureCreateInfo,
-    ) !Texture {
-        // switch (texture_create_info.image_type) {
-        //     .image_1d => {
-        //         std.debug.assert(texture_create_info.size[0] > 0);
-        //         std.debug.assert(texture_create_info.size[1] == 1);
-        //         std.debug.assert(texture_create_info.size[2] > 0);
-        //     },
-        //     .image_2d => {
-        //         std.debug.assert(texture_create_info.size[0] > 0);
-        //         std.debug.assert(texture_create_info.size[1] > 0);
-        //         std.debug.assert(texture_create_info.size[2] > 0);
-        //     },
-        //     .image_3d => {
-        //         std.debug.assert(texture_create_info.size[0] > 0);
-        //         std.debug.assert(texture_create_info.size[1] > 0);
-        //         std.debug.assert(texture_create_info.size[2] > 0);
-        //     },
-        // }
-
-        const multiformat: bool = blk: {
-            const base_format = texture_create_info.format;
-            for (texture_create_info.views) |view| {
-                if (view.format) |format| {
-                    if (format != base_format) break :blk true;
-                }
-            }
-            break :blk false;
-        };
-
-        const arrayview: bool = blk: {
-            if (texture_create_info.image_type != .image_3d) break :blk false;
-            for (texture_create_info.views) |view| {
-                if (view.view_type == .view_2d_array) break :blk true;
-            }
-            break :blk false;
-        };
-
-        const image_info: vk.ImageCreateInfo = .{
-            .flags = .{
-                .mutable_format_bit = multiformat,
-                .cube_compatible_bit = texture_create_info.cubemap,
-                .@"2d_array_compatible_bit" = arrayview,
-            },
-            .image_type = texture_create_info.image_type.vulkanImageType(),
-            .format = texture_create_info.format.vulkan(),
-            .extent = .{
-                .width = texture_create_info.size[0],
-                .height = texture_create_info.size[1],
-                .depth = if (texture_create_info.image_type == .image_3d)
-                    texture_create_info.size[2]
-                else
-                    1,
-            },
-            .mip_levels = texture_create_info.mip_levels,
-            .array_layers = if (texture_create_info.image_type == .image_3d)
-                1
-            else
-                texture_create_info.size[2],
-            .samples = texture_create_info.samples.vulkan(),
-            .tiling = .optimal,
-            .usage = .{
-                .storage_bit = texture_create_info.usage.storage,
-                .sampled_bit = texture_create_info.usage.sampled,
-                .transfer_src_bit = texture_create_info.usage.transfer_src,
-                .transfer_dst_bit = texture_create_info.usage.transfer_dst,
-                .color_attachment_bit = texture_create_info.usage.color_attachment,
-                .depth_stencil_attachment_bit = texture_create_info.usage.depth_stencil_attachment,
-            },
-            .sharing_mode = .exclusive,
-            .queue_family_index_count = 1,
-            .p_queue_family_indices = @ptrCast(allocator.ctx.queue_families.getPtrConst(
-                texture_create_info.queue,
-            )),
-            .initial_layout = texture_create_info.layout.vulkan(),
-        };
-        const image = try allocator.ctx.device.createImage(&image_info, null);
-        errdefer allocator.ctx.device.destroyImage(image, null);
-
-        var dedicated_memreq: vk.MemoryDedicatedRequirements = .{
-            .prefers_dedicated_allocation = .false,
-            .requires_dedicated_allocation = .false,
-        };
-        var image_memreq: vk.MemoryRequirements2 = .{
-            .p_next = &dedicated_memreq,
-            .memory_requirements = undefined,
-        };
-        allocator.ctx.device.getImageMemoryRequirements2(&.{
-            .image = image,
-        }, &image_memreq);
-
-        std.debug.print("{}\n", .{image_memreq});
-        std.debug.print("{}\n", .{dedicated_memreq});
-
-        var memory_type_index: u32 = undefined;
-        var best_score: i32 = -999;
-
-        const memory_types = allocator.ctx.physical_device_memory_properties.memory_types;
-        const memory_type_count = allocator.ctx.physical_device_memory_properties.memory_type_count;
-        for (memory_types[0..memory_type_count], 0..) |memory_type, i| {
-            // hard requirements
-            if (image_memreq.memory_requirements.memory_type_bits &
-                (@as(u32, 1) << @intCast(i)) == 0) continue;
-            // soft requirements
-            var score: i32 = 0;
-            if (memory_type.property_flags.device_local_bit) score += 1;
-            if (score > best_score) {
-                best_score = score;
-                memory_type_index = @intCast(i);
-            }
-        }
-
-        var texture: Texture = undefined;
-        texture.image = image;
-
-        if (allocation_create_info.dedicated == .always or
-            dedicated_memreq.requires_dedicated_allocation == .true or
-            (dedicated_memreq.prefers_dedicated_allocation == .true and
-                allocation_create_info.dedicated == .if_preferred) or
-            image_memreq.memory_requirements.size > Slab.slab_size / 2)
-        {
-            // dedicated allocation
-            const dedicated_info: vk.MemoryDedicatedAllocateInfo = .{
-                .image = image,
-            };
-            const alloc_flags: vk.MemoryAllocateFlagsInfo = .{
-                .device_mask = 0,
-                .p_next = &dedicated_info,
-            };
-            const memory = try allocator.ctx.device.allocateMemory(&.{
-                .allocation_size = image_memreq.memory_requirements.size,
-                .memory_type_index = memory_type_index,
-                .p_next = &alloc_flags,
-            }, null);
-            errdefer allocator.ctx.device.freeMemory(memory, null);
-            try allocator.ctx.device.bindImageMemory(image, memory, 0);
-
-            texture.memory = .{ .dedicated = memory };
-        } else {
-            // suballocate
-            const suballoc = try allocator.alloc(
-                memory_type_index,
-                memory_types[memory_type_index].property_flags,
-                .{ .device_address_bit = true },
-                if (image_memreq.memory_requirements.alignment <= Slab.granularity)
-                    image_memreq.memory_requirements.size
-                else
-                    image_memreq.memory_requirements.size + image_memreq.memory_requirements.alignment,
-            );
-
-            try allocator.ctx.device.bindImageMemory(
-                image,
-                suballoc.slab.memory,
-                std.mem.alignForward(
-                    u32,
-                    suballoc.allocation.offset,
-                    @intCast(image_memreq.memory_requirements.alignment),
-                ),
-            );
-
-            texture.memory = .{ .slab = .{
-                .allocation = suballoc.allocation,
-                .slab = suballoc.slab,
-            } };
-        }
-
-        const default_view_info: vk.ImageViewCreateInfo = .{
-            .image = image,
-            .view_type = texture_create_info.image_type.vulkanImageViewType(),
-            .format = texture_create_info.format.vulkan(),
-            .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
-            .subresource_range = .{
-                .base_mip_level = 0,
-                .level_count = texture_create_info.mip_levels,
-                .base_array_layer = 0,
-                .layer_count = texture_create_info.size[2],
-                .aspect_mask = switch (texture_create_info.format) {
-                    .s8_uint => .{ .stencil_bit = true },
-                    .d16_unorm,
-                    .d16_unorm_s8_uint,
-                    .d24_unorm_s8_uint,
-                    .d32_sfloat,
-                    .d32_sfloat_s8_uint,
-                    => .{ .depth_bit = true },
-                    else => .{ .color_bit = true },
-                },
-            },
-        };
-        const default_view = try allocator.ctx.device.createImageView(&default_view_info, null);
-        errdefer allocator.ctx.device.destroyImageView(default_view, null);
-
-        texture.default_view = default_view;
-        texture.size = texture_create_info.size;
-        texture.layout = texture_create_info.layout.vulkan();
-        texture.queue = texture_create_info.queue;
-
-        return texture;
-    }
 };
-
-// enum STAGE { STAGE_TRANSFER, STAGE_COMPUTE,
-// STAGE_RASTER_COLOR_OUT, STAGE_PIXEL_SHADER,
-// STAGE_VERTEX_SHADER, ... };
-// enum HAZARD_FLAGS { HAZARD_DRAW_ARGUMENTS = 0x1,
-// HAZARD_DESCRIPTORS = 0x2, , HAZARD_DEPTH_STENCIL = 0x4 };
-
-// relevant pipeline stages
-// top_of_pipe_bit: bool = false,
-// draw_indirect_bit: bool = false,
-// vertex_input_bit: bool = false, // same as index_input | vertex_attribute_input
-// vertex_shader_bit: bool = false,
-// fragment_shader_bit: bool = false,
-// early_fragment_tests_bit: bool = false,
-// late_fragment_tests_bit: bool = false,
-// color_attachment_output_bit: bool = false,
-// compute_shader_bit: bool = false,
-// all_transfer_bit: bool = false, // same as copy | blit | resolve | clear
-// bottom_of_pipe_bit: bool = false,
-// host_bit: bool = false,
-// all_graphics_bit: bool = false, // same as draw_indirect | vertex_input | vertex_shader |
-// //                                         fragment_shader | early/late_fragment_test |
-// //                                         color_attachment_output
-// all_commands_bit: bool = false, // same as all valid commands on the queue
-// copy_bit: bool = false,
-// resolve_bit: bool = false,
-// blit_bit: bool = false,
-// clear_bit: bool = false,
-// index_input_bit: bool = false,
-// vertex_attribute_input_bit: bool = false,
-// pre_rasterization_shaders_bit: bool = false, // same as vertex_shader
-
-// // relevant access flags
-// indirect_command_read_bit: bool = false, // in draw_indirect
-// index_read_bit: bool = false, // in index_input
-// shader_read_bit: bool = false, // same as sampled_read | storage_read
-// shader_write_bit: bool = false, // same as storage_write
-// color_attachment_read_bit: bool = false, // in color_attachment_output
-// color_attachment_write_bit: bool = false, // in color_attachment_output
-// depth_stencil_attachment_read_bit: bool = false, // in early/late_fragment_test
-// depth_stencil_attachment_write_bit: bool = false, // in early/late_fragment_test
-// transfer_read_bit: bool = false, // in copy, blit, resolve
-// transfer_write_bit: bool = false, // in copy, blit, clear, resolve
-// host_read_bit: bool = false, // in host
-// host_write_bit: bool = false, // in host
-// memory_read_bit: bool = false, // same as all valid read bits
-// memory_write_bit: bool = false, // same as all valid write bits
-// shader_sampled_read_bit: bool = false,
-// shader_storage_read_bit: bool = false,
-// shader_storage_write_bit: bool = false,
-
-// // simplified pipeline stages
-// vertex_bit: bool = false, // vertex_shader | index_input
-// fragment_bit: bool = false, // fragment_shader | early/late_fragment | color_attachment_output
-// compute_bit: bool = false,
-// transfer_bit: bool = false, // same as copy | blit | resolve | clear
-// // skip host which is instead synchronized by the start/end of command buffers
-
-// // simplified access flags
-// indirect_read_bit: bool = false,
-// read_bit: bool = false,
-// write_bit: bool = false,
-// // read/write_bit will be some combination of shader/transfer/index_read/write_bit
-// // depending on the stages that are set at the same time
-// attachment_read_bit: bool = false, // color_attachment | depth_stencil_attachment
-// attachment_write_bit: bool = false,
-
-const StageFlags = struct {
-    compute: bool = false,
-    graphics: bool = false,
-    transfer: bool = false,
-};
-
-const AccessFlags = struct {
-    indirect_read: bool = false,
-    generic_read: bool = false,
-    generic_write: bool = false,
-    attachment_read: bool = false,
-    attachment_write: bool = false,
-};
-
-const Command = union(enum) {
-    begin_render_pass: struct {
-        pipeline: *GraphicsPipeline,
-        color_attachments: []const vk.RenderingAttachmentInfo,
-        depth_attachment: ?*const vk.RenderingAttachmentInfo,
-        stencil_attachment: ?*const vk.RenderingAttachmentInfo,
-        render_area_extent: vk.Extent2D,
-    },
-    end_render_pass: struct {},
-    upload_to_buffer: struct {
-        size: u32,
-        src_offset: u32,
-        src_buffer: vk.Buffer,
-        dst_buffer: vk.Buffer,
-        dst_offset: u32,
-    },
-    transition: struct {
-        texture: *Texture,
-        dst_queue: QueueType,
-        new_layout: ImageLayout,
-    },
-    barrier: struct {
-        stage_flags: StageFlags,
-        access_flags: AccessFlags,
-    },
-};
-
-// TODO
-// a nicer structure would be where you acquire a pool
-// then you can fetch buffers from that which can be used on separate threads
-// then you submit the buffers to the pool
-// and then you submit the pool for execution
-// the data should be packed instead of stored as an array of unions
-
-const RenderingAttachment = struct {
-    const LoadOp = enum {
-        load,
-        clear,
-        dont_care,
-
-        fn vulkan(load_op: LoadOp) vk.AttachmentLoadOp {
-            return switch (load_op) {
-                .load => .load,
-                .clear => .clear,
-                .dont_care => .dont_care,
-            };
-        }
-    };
-    const StoreOp = enum {
-        store,
-        dont_care,
-        none,
-
-        fn vulkan(store_op: StoreOp) vk.AttachmentStoreOp {
-            return switch (store_op) {
-                .store => .store,
-                .dont_care => .dont_care,
-                .none => .none,
-            };
-        }
-    };
-    const ClearValue = union(enum) {
-        // probably more elegant to just let all these be optional, and assert that only one is set
-        color: union(enum) {
-            float: [4]f32,
-            int: [4]i32,
-            uint: [4]u32,
-        },
-        depth_stencil: struct {
-            depth: f32,
-            stencil: u32,
-        },
-
-        fn vulkan(clear_value: ClearValue) vk.ClearValue {
-            return switch (clear_value) {
-                .color => |color| switch (color) {
-                    .float => .{ .color = .{ .float_32 = color.float } },
-                    .int => .{ .color = .{ .int_32 = color.int } },
-                    .uint => .{ .color = .{ .uint_32 = color.uint } },
-                },
-                .depth_stencil => |depth_stencil| .{ .depth_stencil = .{
-                    .depth = depth_stencil.depth,
-                    .stencil = depth_stencil.stencil,
-                } },
-            };
-        }
-    };
-
-    texture: *Texture,
-    load_op: LoadOp,
-    store_op: StoreOp,
-    clear_value: ClearValue,
-};
-
-pub const CommandBuffer = struct {
-    ctx: *Context,
-    queue_type: QueueType,
-    buffer: std.ArrayList(Command),
-    command_pools: [2]vk.CommandPool,
-    pool_last_semaphore: [2]u64,
-    current_pool_index: u32,
-    pool_free_command_buffers: [2]std.ArrayList(vk.CommandBuffer),
-    pool_used_command_buffers: [2]std.ArrayList(vk.CommandBuffer),
-    arena_impl: std.heap.ArenaAllocator,
-
-    pending_transitions: std.ArrayList(struct {
-        image: vk.Image,
-        new_layout: ImageLayout,
-        // TODO queue
-    }),
-
-    fn init(ctx: *Context, queue_type: QueueType) !CommandBuffer {
-        var result: CommandBuffer = .{
-            .ctx = ctx,
-            .queue_type = queue_type,
-            .buffer = .empty,
-            .command_pools = .{ .null_handle, .null_handle },
-            .pool_last_semaphore = .{ 0, 0 },
-            .current_pool_index = 0,
-            .pool_free_command_buffers = .{ .empty, .empty },
-            .pool_used_command_buffers = .{ .empty, .empty },
-            .arena_impl = .init(ctx.gpa),
-            .pending_transitions = .empty,
-        };
-        result.command_pools[0] = try ctx.device.createCommandPool(&.{
-            .flags = .{},
-            .queue_family_index = ctx.queue_families.get(queue_type),
-        }, null);
-        errdefer ctx.device.destroyCommandPool(result.command_pools[0], null);
-        result.command_pools[1] = try ctx.device.createCommandPool(&.{
-            .flags = .{},
-            .queue_family_index = ctx.queue_families.get(queue_type),
-        }, null);
-        errdefer ctx.device.destroyCommandPool(result.command_pools[1], null);
-        return result;
-    }
-
-    fn deinit(buffer: *CommandBuffer) void {
-        // should we wait for the semaphores here for safety?
-        // although ctx.deinit should have called deviceWaitIdle already anyway...
-        for (0..2) |i| {
-            if (buffer.pool_free_command_buffers[i].items.len > 0) {
-                buffer.ctx.device.freeCommandBuffers(
-                    buffer.command_pools[i],
-                    @intCast(buffer.pool_free_command_buffers[i].items.len),
-                    buffer.pool_free_command_buffers[i].items.ptr,
-                );
-            }
-            buffer.pool_free_command_buffers[i].deinit(buffer.ctx.gpa);
-            if (buffer.pool_used_command_buffers[i].items.len > 0) {
-                buffer.ctx.device.freeCommandBuffers(
-                    buffer.command_pools[i],
-                    @intCast(buffer.pool_used_command_buffers[i].items.len),
-                    buffer.pool_used_command_buffers[i].items.ptr,
-                );
-            }
-            buffer.pool_used_command_buffers[i].deinit(buffer.ctx.gpa);
-            buffer.ctx.device.destroyCommandPool(buffer.command_pools[i], null);
-        }
-        buffer.buffer.deinit(buffer.ctx.gpa);
-        buffer.arena_impl.deinit();
-    }
-
-    fn getVulkanCommandBuffer(buffer: *CommandBuffer) !vk.CommandBuffer {
-        // first check if the other command pool is done
-        // in that reset the pool and switch to using it
-        if ((try buffer.ctx.device.getSemaphoreCounterValue(
-            buffer.ctx.queue_semaphores.get(buffer.queue_type),
-        )) >= buffer.pool_last_semaphore[(buffer.current_pool_index + 1) % 2]) {
-            try buffer.ctx.device.resetCommandPool(
-                buffer.command_pools[(buffer.current_pool_index + 1) % 2],
-                .{},
-            );
-            buffer.current_pool_index = (buffer.current_pool_index + 1) % 2;
-            for (buffer.pool_used_command_buffers[buffer.current_pool_index].items) |cmd| {
-                try buffer.pool_free_command_buffers[buffer.current_pool_index].append(
-                    buffer.ctx.gpa,
-                    cmd,
-                );
-            }
-            buffer.pool_used_command_buffers[buffer.current_pool_index].clearRetainingCapacity();
-        }
-
-        // if there are free command buffers for this pool use one
-        // otherwise create a new one and use that
-        if (buffer.pool_free_command_buffers[buffer.current_pool_index].items.len > 0) {
-            const cmd = buffer.pool_free_command_buffers[buffer.current_pool_index].pop().?;
-            try buffer.pool_used_command_buffers[buffer.current_pool_index].append(
-                buffer.ctx.gpa,
-                cmd,
-            );
-            return cmd;
-        } else {
-            var cmd: vk.CommandBuffer = .null_handle;
-            try buffer.ctx.device.allocateCommandBuffers(&.{
-                .command_pool = buffer.command_pools[buffer.current_pool_index],
-                .level = .primary,
-                .command_buffer_count = 1,
-            }, @ptrCast(&cmd));
-            try buffer.pool_used_command_buffers[buffer.current_pool_index].append(
-                buffer.ctx.gpa,
-                cmd,
-            );
-            return cmd;
-        }
-    }
-
-    pub fn beginRenderPass(
-        buffer: *CommandBuffer,
-        pipeline: *GraphicsPipeline,
-        color_attachments: []const RenderingAttachment,
-        depth_attachment: ?RenderingAttachment,
-        stencil_attachment: ?RenderingAttachment,
-    ) !void {
-        const arena = buffer.arena_impl.allocator();
-        const color_attachment_infos: []vk.RenderingAttachmentInfo = if (color_attachments.len > 0)
-            try arena.alloc(vk.RenderingAttachmentInfo, color_attachments.len)
-        else
-            &.{};
-
-        const depth_attachment_info: ?*vk.RenderingAttachmentInfo = if (depth_attachment != null)
-            try arena.create(vk.RenderingAttachmentInfo)
-        else
-            null;
-        const stencil_attachment_info: ?*vk.RenderingAttachmentInfo = if (stencil_attachment != null)
-            try arena.create(vk.RenderingAttachmentInfo)
-        else
-            null;
-
-        for (color_attachments, 0..) |attachment, i| {
-            color_attachment_infos[i] = .{
-                .image_view = attachment.texture.default_view,
-                .image_layout = attachment.texture.layout,
-                .resolve_mode = .{},
-                .resolve_image_layout = .undefined,
-                .load_op = attachment.load_op.vulkan(),
-                .store_op = attachment.store_op.vulkan(),
-                .clear_value = attachment.clear_value.vulkan(),
-            };
-        }
-        if (depth_attachment) |attachment| {
-            _ = attachment;
-        }
-        if (stencil_attachment) |attachment| {
-            _ = attachment;
-        }
-
-        const size = if (depth_attachment) |info|
-            info.texture.size
-        else if (stencil_attachment) |info|
-            info.texture.size
-        else
-            color_attachments[0].texture.size;
-
-        try buffer.buffer.append(buffer.ctx.gpa, .{
-            .begin_render_pass = .{
-                .pipeline = pipeline,
-                .color_attachments = color_attachment_infos,
-                .depth_attachment = depth_attachment_info,
-                .stencil_attachment = stencil_attachment_info,
-                .render_area_extent = .{ .width = size[0], .height = size[0] },
-            },
-        });
-    }
-
-    pub fn endRenderPass(buffer: *CommandBuffer) !void {
-        try buffer.buffer.append(buffer.ctx.gpa, .{ .end_render_pass = .{} });
-    }
-
-    pub fn uploadToBuffer(
-        buffer: *CommandBuffer,
-        src: []const u8,
-        staging: *TransferBuffer,
-        dst: *Buffer,
-        dst_offset: u32,
-    ) !void {
-        const bytes = try staging.alloc(src.len, buffer.queue_type);
-        @memcpy(bytes, src);
-        try buffer.buffer.append(buffer.ctx.gpa, .{ .upload_to_buffer = .{
-            .size = @intCast(src.len),
-            .src_offset = @intCast(@intFromPtr(bytes.ptr) - @intFromPtr(staging.mapped_memory.ptr)),
-            .src_buffer = staging.buffer,
-            .dst_offset = dst_offset,
-            .dst_buffer = dst.buffer,
-        } });
-    }
-
-    pub fn transition(
-        buffer: *CommandBuffer,
-        texture: *Texture,
-        dst_queue: QueueType,
-        new_layout: ImageLayout,
-    ) !void {
-        try buffer.buffer.append(buffer.ctx.gpa, .{ .transition = .{
-            .texture = texture,
-            .dst_queue = dst_queue,
-            .new_layout = new_layout,
-        } });
-    }
-
-    pub fn barrier(
-        buffer: *CommandBuffer,
-        stage_flags: StageFlags,
-        access_flags: AccessFlags,
-    ) !void {
-        try buffer.buffer.append(buffer.ctx.gpa, .{ .barrier = .{
-            .stage_flags = stage_flags,
-            .access_flags = access_flags,
-        } });
-    }
-};
-
-const Shader = struct {
-    const ShaderType = enum { vertex, fragment, compute };
-    stage: vk.ShaderStageFlags,
-    module: vk.ShaderModule,
-
-    fn init(
-        ctx: *Context,
-        shader_type: ShaderType,
-        spv: []const u32,
-    ) !Shader {
-        return .{
-            .module = try ctx.device.createShaderModule(&.{
-                .code_size = spv.len * 4,
-                .p_code = @ptrCast(&spv[0]),
-            }, null),
-            .stage = switch (shader_type) {
-                .vertex => .{ .vertex_bit = true },
-                .fragment => .{ .fragment_bit = true },
-                .compute => .{ .compute_bit = true },
-            },
-        };
-    }
-
-    fn deinit(shader: *Shader, ctx: *Context) void {
-        ctx.device.destroyShaderModule(shader.module, null);
-    }
-};
-
-pub const Format = enum {
-    r8g8b8a8_unorm,
-    r8g8b8a8_srgb,
-    b8g8r8a8_unorm,
-    b8g8r8a8_srgb,
-    r16g16b16a16_sfloat,
-    r32_uint,
-    s8_uint,
-    d16_unorm,
-    d16_unorm_s8_uint,
-    d24_unorm_s8_uint,
-    d32_sfloat,
-    d32_sfloat_s8_uint,
-
-    fn vulkan(format: Format) vk.Format {
-        return switch (format) {
-            .r8g8b8a8_unorm => .r8g8b8a8_unorm,
-            .r8g8b8a8_srgb => .r8g8b8a8_srgb,
-            .b8g8r8a8_unorm => .b8g8r8a8_unorm,
-            .b8g8r8a8_srgb => .b8g8r8a8_srgb,
-            .r16g16b16a16_sfloat => .r16g16b16a16_sfloat,
-            .r32_uint => .r32_uint,
-            .s8_uint => .s8_uint,
-            .d16_unorm => .d16_unorm,
-            .d16_unorm_s8_uint => .d16_unorm_s8_uint,
-            .d24_unorm_s8_uint => .d24_unorm_s8_uint,
-            .d32_sfloat => .d32_sfloat,
-            .d32_sfloat_s8_uint => .d32_sfloat_s8_uint,
-        };
-    }
-};
-
-const SampleCount = enum {
-    @"1",
-    @"2",
-    @"4",
-    @"8",
-    @"16",
-    @"32",
-    @"64",
-
-    fn vulkan(sample_count: SampleCount) vk.SampleCountFlags {
-        return .{
-            .@"1_bit" = sample_count == .@"1",
-            .@"2_bit" = sample_count == .@"2",
-            .@"4_bit" = sample_count == .@"4",
-            .@"8_bit" = sample_count == .@"8",
-            .@"16_bit" = sample_count == .@"16",
-            .@"32_bit" = sample_count == .@"32",
-            .@"64_bit" = sample_count == .@"64",
-        };
-    }
-};
-
 const GraphicsPipeline = struct {
     const StaticState = struct {
         const PolygonMode = enum {
@@ -2743,212 +2152,3 @@ const GraphicsPipeline = struct {
 };
 
 const ComputePipeline = struct {};
-
-const Buffer = struct {
-    memory: union(enum) {
-        slab: struct {
-            allocation: Allocation,
-            slab: *Allocator.Slab,
-        },
-        dedicated: vk.DeviceMemory,
-    },
-    buffer: vk.Buffer,
-    size: usize,
-    buffer_device_address: u64,
-    mapped_memory: ?[]u8, // should maybe have a flag saying if it's coherent or cached?
-};
-
-const TransferBuffer = struct {
-    // upload -> HOST_VISIBLE HOST_COHERENT
-    // download -> HOST_VISIBLE HOST_CACHED if possible otherwise HOST_VISIBLE HOST_COHERENT
-    // and it should ideally not be DEVICE_LOCAL
-    // the ideal usage pattern should be a small number of large buffers
-    // so for simplicity it uses a dedicated allocation
-    const Usage = enum { upload, download };
-    ctx: *Context,
-    usage: Usage,
-    mapped_memory: []u8,
-    memory: vk.DeviceMemory,
-    buffer: vk.Buffer,
-
-    // ring buffer
-    // queue of (end, semaphore, semaphore_value) entries
-    // on allocate, see if start of queue is complete
-    queue: std.ArrayList(struct {
-        tail: u64,
-        semaphore: vk.Semaphore,
-        semaphore_value: u64,
-    }),
-    head: u64,
-    tail: u64,
-    optimal_alignment: u64,
-
-    fn init(ctx: *Context, usage: Usage, size: usize) !TransferBuffer {
-        const queue_family_indices: FixedSet(3, u32) = .init(&.{
-            ctx.queue_families.get(.graphics),
-            ctx.queue_families.get(.async_compute),
-            ctx.queue_families.get(.transfer),
-        });
-        const buffer_info = vk.BufferCreateInfo{
-            .size = size,
-            .usage = .{
-                .transfer_src_bit = usage == .upload,
-                .transfer_dst_bit = usage == .download,
-            },
-            .sharing_mode = .concurrent,
-            .p_queue_family_indices = @ptrCast(queue_family_indices.items().ptr),
-            .queue_family_index_count = @intCast(queue_family_indices.items().len),
-        };
-        const buffer = try ctx.device.createBuffer(&buffer_info, null);
-        errdefer ctx.device.destroyBuffer(buffer, null);
-
-        const optimal_alignment = ctx.physical_device_properties.limits
-            .optimal_buffer_copy_offset_alignment;
-        var buffer_memreq = ctx.device.getBufferMemoryRequirements(buffer);
-        buffer_memreq.alignment = @max(buffer_memreq.alignment, optimal_alignment);
-
-        const memory_type_index = findMemoryType(
-            buffer_memreq.memory_type_bits,
-            ctx.physical_device_memory_properties,
-            usage,
-        );
-        const alloc_info = vk.MemoryAllocateInfo{
-            .allocation_size = buffer_memreq.size,
-            .memory_type_index = memory_type_index,
-        };
-        const memory = try ctx.device.allocateMemory(&alloc_info, null);
-        errdefer ctx.device.freeMemory(memory, null);
-
-        try ctx.device.bindBufferMemory(buffer, memory, 0);
-        const buffer_ptr: [*]u8 = @ptrCast((try ctx.device.mapMemory(memory, 0, size, .{})).?);
-
-        return .{
-            .ctx = ctx,
-            .usage = usage,
-            .mapped_memory = buffer_ptr[0..size],
-            .memory = memory,
-            .buffer = buffer,
-            .queue = .empty,
-            .head = 0,
-            .tail = size,
-            .optimal_alignment = ctx.physical_device_properties.limits
-                .optimal_buffer_copy_offset_alignment,
-        };
-    }
-
-    pub fn deinit(buffer: *TransferBuffer) void {
-        buffer.queue.deinit(buffer.ctx.gpa);
-        buffer.ctx.device.destroyBuffer(buffer.buffer, null);
-        buffer.ctx.device.freeMemory(buffer.memory, null);
-        buffer.* = undefined;
-    }
-
-    fn alloc(buffer: *TransferBuffer, size: usize, queue: QueueType) ![]u8 {
-        if (size > buffer.mapped_memory.len) return error.TransferBufferOutOfMemory;
-        while (buffer.queue.items.len > 0) {
-            const semaphore_value = try buffer.ctx.device.getSemaphoreCounterValue(
-                buffer.queue.items[0].semaphore,
-            );
-            if (semaphore_value < buffer.queue.items[0].semaphore_value) break;
-            buffer.tail = buffer.queue.items[0].tail;
-            _ = buffer.queue.orderedRemove(0);
-        }
-
-        if (size > buffer.tail - buffer.head) return error.TransferBufferOutOfMemory;
-
-        buffer.head = std.mem.alignForward(u64, buffer.head, buffer.optimal_alignment);
-        var start = buffer.head % buffer.mapped_memory.len;
-        var end = (buffer.head + size) % buffer.mapped_memory.len;
-        if (start >= end) {
-            // advance head to next start
-            buffer.head = ((buffer.head + buffer.mapped_memory.len - 1) /
-                buffer.mapped_memory.len) * buffer.mapped_memory.len;
-            start = buffer.head % buffer.mapped_memory.len;
-            end = (buffer.head + size) % buffer.mapped_memory.len;
-        }
-
-        // recheck in case the head advance consumed the necessary memory
-        if (size > buffer.tail - buffer.head) return error.TransferBufferOutOfMemory;
-
-        try buffer.queue.append(buffer.ctx.gpa, .{
-            .tail = start + buffer.mapped_memory.len,
-            .semaphore = buffer.ctx.queue_semaphores.get(queue),
-            .semaphore_value = buffer.ctx.queue_semaphore_values.get(queue),
-        });
-        const bytes = buffer.mapped_memory[start..end];
-        return bytes;
-    }
-
-    fn findMemoryType(
-        memory_type_bits: u32,
-        physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
-        usage: Usage,
-    ) u32 {
-        var memory_type_index: ?u32 = null;
-        var best_score: i32 = -999;
-
-        for (physical_device_memory_properties.memory_types[0..physical_device_memory_properties
-            .memory_type_count], 0..) |memory_type, i|
-        {
-            // hard requirements
-            if (memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
-            if (!memory_type.property_flags.host_visible_bit) continue;
-            if (!memory_type.property_flags.host_coherent_bit) continue;
-            // soft requirements
-            var score: i32 = 0;
-            if (memory_type.property_flags.device_local_bit) score -= 1;
-            if (usage == .download and memory_type.property_flags.host_cached_bit) score += 2;
-            if (score > best_score) {
-                best_score = score;
-                memory_type_index = @intCast(i);
-            }
-        }
-
-        // vulkan spec
-        // There must be at least one memory type with both the
-        // VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT and VK_MEMORY_PROPERTY_HOST_COHERENT_BIT bits
-        // set in its propertyFlags
-        // so this should always work
-        std.debug.assert(memory_type_index != null);
-        return memory_type_index.?;
-    }
-};
-
-const Texture = struct {
-    memory: union(enum) {
-        slab: struct {
-            allocation: Allocation,
-            slab: *Allocator.Slab,
-        },
-        dedicated: vk.DeviceMemory,
-    },
-    image: vk.Image,
-    default_view: vk.ImageView,
-    size: [3]u32,
-    layout: vk.ImageLayout,
-    queue: QueueType,
-};
-
-fn FixedSet(comptime capacity: comptime_int, comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        count: usize,
-        data: [capacity]T,
-
-        fn init(_items: []const T) Self {
-            std.debug.assert(_items.len <= capacity);
-            var result: Self = .{ .count = 0, .data = undefined };
-            outer: for (_items) |new| {
-                for (result.data[0..result.count]) |old| if (new == old) continue :outer;
-                result.data[result.count] = new;
-                result.count += 1;
-            }
-            return result;
-        }
-
-        fn items(set: *const Self) []const T {
-            return set.data[0..set.count];
-        }
-    };
-}

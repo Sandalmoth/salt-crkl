@@ -30,48 +30,48 @@ pub fn main() !void {
         .createWindowSurface = &createWindowSurface,
         .getFramebufferSize = &getFramebufferSize,
         .window = window,
-    }, .{}, "example_rhi");
+    }, "example_rhi");
     defer ctx.destroy();
 
-    var transfer_buffer = try ctx.createTransferBuffer(.upload, 1024 * 1024);
-    defer transfer_buffer.deinit();
+    // var transfer_buffer = try ctx.createTransferBuffer(.upload, 1024 * 1024);
+    // defer transfer_buffer.deinit();
 
-    var vertex_buffer = try ctx.createBuffer(.{}, .{ .size = 1024 });
-    defer ctx.destroyBuffer(&vertex_buffer);
-    std.debug.print("{}\n", .{vertex_buffer});
+    // var vertex_buffer = try ctx.createBuffer(.{}, .{ .size = 1024 });
+    // defer ctx.destroyBuffer(&vertex_buffer);
+    // std.debug.print("{}\n", .{vertex_buffer});
 
-    var index_buffer = try ctx.createBuffer(.{}, .{ .size = 1024 });
-    defer ctx.destroyBuffer(&index_buffer);
-    std.debug.print("{}\n", .{index_buffer});
+    // var index_buffer = try ctx.createBuffer(.{}, .{ .size = 1024 });
+    // defer ctx.destroyBuffer(&index_buffer);
+    // std.debug.print("{}\n", .{index_buffer});
 
-    var vertex_shader = try ctx.createShader(
+    const vertex_shader = try ctx.createShader(
         .vertex,
         std.mem.bytesAsSlice(u32, &shader_vertex_spv),
     );
-    defer ctx.destroyShader(&vertex_shader);
-    var fragment_shader = try ctx.createShader(
+    defer ctx.destroyShader(vertex_shader);
+    const fragment_shader = try ctx.createShader(
         .fragment,
         std.mem.bytesAsSlice(u32, &shader_fragment_spv),
     );
-    defer ctx.destroyShader(&fragment_shader);
+    defer ctx.destroyShader(fragment_shader);
 
-    var color_target = try ctx.createTexture(.{ .dedicated = .if_preferred }, .{
-        .usage = .{
-            .color_attachment = true,
-            .sampled = true,
-        },
-        .image_type = .image_2d,
-        .mip_levels = 1,
-        .size = .{ 640, 480, 1 },
-        .queue = .graphics,
-        .format = .r8g8b8a8_srgb,
-    });
-    defer ctx.destroyTexture(&color_target);
-    std.debug.print("{}\n", .{color_target});
+    // var color_target = try ctx.createTexture(.{ .dedicated = .if_preferred }, .{
+    //     .usage = .{
+    //         .color_attachment = true,
+    //         .sampled = true,
+    //     },
+    //     .image_type = .image_2d,
+    //     .mip_levels = 1,
+    //     .size = .{ 640, 480, 1 },
+    //     .queue = .graphics,
+    //     .format = .r8g8b8a8_srgb,
+    // });
+    // defer ctx.destroyTexture(&color_target);
+    // std.debug.print("{}\n", .{color_target});
 
-    var pipeline = try ctx.createGraphicsPipeline(.{
-        .vertex_shader = &vertex_shader,
-        .fragment_shader = &fragment_shader,
+    const pipeline = try ctx.createGraphicsPipeline(.{
+        .vertex_shader = vertex_shader,
+        .fragment_shader = fragment_shader,
     }, .{
         .viewport = .{
             .x = 0,
@@ -88,69 +88,69 @@ pub fn main() !void {
             .height = 640,
         },
     });
-    defer ctx.destroyGraphicsPipeline(&pipeline);
+    defer ctx.destroyGraphicsPipeline(pipeline);
 
-    {
-        const command_buffer = ctx.acquireCommandBuffer(.graphics);
-        try command_buffer.uploadToBuffer(
-            std.mem.sliceAsBytes(&[4][3]f32{
-                .{ -1, -1, 0.5 },
-                .{ 1, -1, 0.5 },
-                .{ -1, 1, 0.5 },
-                .{ 1, 1, 0.5 },
-            }),
-            &transfer_buffer,
-            &vertex_buffer,
-            0,
-        );
-        try command_buffer.uploadToBuffer(
-            std.mem.sliceAsBytes(&[6]u32{ 0, 2, 1, 2, 3, 1 }),
-            &transfer_buffer,
-            &index_buffer,
-            0,
-        );
-        try ctx.submitCommandBuffer(command_buffer);
-    }
+    // {
+    //     const command_buffer = ctx.acquireCommandBuffer(.graphics);
+    //     try command_buffer.uploadToBuffer(
+    //         std.mem.sliceAsBytes(&[4][3]f32{
+    //             .{ -1, -1, 0.5 },
+    //             .{ 1, -1, 0.5 },
+    //             .{ -1, 1, 0.5 },
+    //             .{ 1, 1, 0.5 },
+    //         }),
+    //         &transfer_buffer,
+    //         &vertex_buffer,
+    //         0,
+    //     );
+    //     try command_buffer.uploadToBuffer(
+    //         std.mem.sliceAsBytes(&[6]u32{ 0, 2, 1, 2, 3, 1 }),
+    //         &transfer_buffer,
+    //         &index_buffer,
+    //         0,
+    //     );
+    //     try ctx.submitCommandBuffer(command_buffer);
+    // }
 
-    main_loop: while (true) {
-        var event: sdl.Event = undefined;
-        while (sdl.pollEvent(&event)) {
-            if (event.type == sdl.c.SDL_EVENT_QUIT) break :main_loop;
-            if (event.type == sdl.c.SDL_EVENT_KEY_DOWN) switch (event.key.key) {
-                sdl.c.SDLK_ESCAPE => break :main_loop,
-                else => {},
-            };
-        }
+    // main_loop: while (true) {
+    //     var event: sdl.Event = undefined;
+    //     while (sdl.pollEvent(&event)) {
+    //         if (event.type == sdl.c.SDL_EVENT_QUIT) break :main_loop;
+    //         if (event.type == sdl.c.SDL_EVENT_KEY_DOWN) switch (event.key.key) {
+    //             sdl.c.SDLK_ESCAPE => break :main_loop,
+    //             else => {},
+    //         };
+    //     }
 
-        std.debug.print("yo\n", .{});
+    //     std.debug.print("yo\n", .{});
 
-        std.Thread.sleep(100_000_000);
+    //     std.Thread.sleep(100_000_000);
 
-        // lets just aim for a hello triangle as step one
-        // just to see what needs to be abstracted
-        const command_buffer = ctx.acquireCommandBuffer(.graphics);
+    //     // lets just aim for a hello triangle as step one
+    //     // just to see what needs to be abstracted
+    //     const command_buffer = ctx.acquireCommandBuffer(.graphics);
 
-        try command_buffer.transition(&color_target, .graphics, .attachment);
-        try command_buffer.beginRenderPass(&pipeline, &.{
-            .{
-                .texture = &color_target,
-                .load_op = .clear,
-                .store_op = .store,
-                .clear_value = .{ .color = .{ .float = .{ 0.2, 0.2, 0.2, 1.0 } } }, // FIXME UGLY!
-            },
-        }, null, null);
-        try command_buffer.endRenderPass();
+    //     try command_buffer.transition(&color_target, .graphics, .attachment);
+    //     try command_buffer.beginRenderPass(&pipeline, &.{
+    //         .{
+    //             .texture = &color_target,
+    //             .load_op = .clear,
+    //             .store_op = .store,
+    //             .clear_value = .{ .color = .{ .float = .{ 0.2, 0.2, 0.2, 1.0 } } }, // FIXME UGLY!
+    //         },
+    //     }, null, null);
+    //     try command_buffer.endRenderPass();
 
-        // bind our pipeline
-        // bind the off-screen texture as the render target
-        // bind the index buffer
-        // push constant upload with the vertex buffer address
-        // draw
-        // present
-        //   - queue ownership transfer of off-screen buffer
+    //     // [x] bind our pipeline
+    //     // [x] bind the off-screen texture as the render target
+    //     // [ ] bind the index buffer
+    //     // [ ] push constant upload with the vertex buffer address
+    //     // [ ] draw
+    //     // [ ] present
+    //     //   - queue ownership transfer of off-screen buffer?
 
-        try ctx.submitCommandBuffer(command_buffer);
-    }
+    //     try ctx.submitCommandBuffer(command_buffer);
+    // }
 }
 
 fn getInstanceProcAddress(
