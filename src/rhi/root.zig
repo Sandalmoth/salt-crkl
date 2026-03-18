@@ -319,6 +319,8 @@ pub const Context = struct {
     shader_pool: std.heap.MemoryPool(Shader),
     graphics_pipeline_pool: std.heap.MemoryPool(GraphicsPipeline),
 
+    staging_allocs: std.EnumArray(StagingAllocator.Usage, StagingAllocator),
+
     pub fn create(
         gpa: std.mem.Allocator,
         platform: Platform,
@@ -355,6 +357,9 @@ pub const Context = struct {
         ctx.shader_pool = .init(std.heap.page_allocator);
         ctx.graphics_pipeline_pool = .init(std.heap.page_allocator);
 
+        ctx.staging_allocs.getPtr(.upload).* = try .init(ctx, .upload);
+        ctx.staging_allocs.getPtr(.download).* = try .init(ctx, .download);
+
         return ctx;
     }
 
@@ -362,6 +367,9 @@ pub const Context = struct {
         ctx.device.deviceWaitIdle() catch |e| {
             log.warn("Failed deviceWaitIdle in vulkan_context deinit: {}", .{e});
         };
+
+        ctx.staging_allocs.getPtr(.upload).deinit();
+        ctx.staging_allocs.getPtr(.download).deinit();
 
         ctx.shader_pool.deinit();
         ctx.graphics_pipeline_pool.deinit();
@@ -2152,3 +2160,187 @@ const GraphicsPipeline = struct {
 };
 
 const ComputePipeline = struct {};
+
+const StagingAllocator = struct {
+    const Usage = enum { upload, download };
+
+    const Slab = struct {
+        const Metadata = struct {
+            semaphore_value: ?u64,
+            slots: u64,
+        };
+
+        next: ?*Slab,
+
+        memory: vk.DeviceMemory,
+        buffer: vk.Buffer,
+        mapped_memory: []u8,
+        granularity: u64,
+        metadata: []Metadata,
+        head: u64,
+        tail: u64,
+
+        fn init(ctx: *Context, size: u64, usage: Usage) !Slab {
+            const buffer_info = vk.BufferCreateInfo{
+                .size = size,
+                .usage = .{
+                    .transfer_src_bit = usage == .upload,
+                    .transfer_dst_bit = usage == .download,
+                },
+                .sharing_mode = .exclusive,
+                .p_queue_family_indices = @ptrCast(&ctx.queue_family),
+                .queue_family_index_count = 1,
+            };
+            const buffer = try ctx.device.createBuffer(&buffer_info, null);
+            errdefer ctx.device.destroyBuffer(buffer, null);
+
+            const optimal_alignment = ctx.physical_device_properties.limits
+                .optimal_buffer_copy_offset_alignment;
+            var buffer_memreq = ctx.device.getBufferMemoryRequirements(buffer);
+            buffer_memreq.alignment = @max(buffer_memreq.alignment, optimal_alignment);
+
+            var memory_type_index: ?u32 = null;
+            var best_score: i32 = -999;
+
+            for (ctx.physical_device_memory_properties.memory_types[0..ctx.physical_device_memory_properties
+                .memory_type_count], 0..) |memory_type, i|
+            {
+                // hard requirements
+                if (buffer_memreq.memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
+                if (!memory_type.property_flags.host_visible_bit) continue;
+                if (!memory_type.property_flags.host_coherent_bit) continue;
+                // soft requirements
+                var score: i32 = 0;
+                if (memory_type.property_flags.device_local_bit) score -= 1;
+                if (usage == .download and memory_type.property_flags.host_cached_bit) score += 2;
+                if (score > best_score) {
+                    best_score = score;
+                    memory_type_index = @intCast(i);
+                }
+            }
+
+            // vulkan spec
+            // There must be at least one memory type with both the
+            // VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT and VK_MEMORY_PROPERTY_HOST_COHERENT_BIT bits
+            // set in its propertyFlags
+            // so this should always work
+            std.debug.assert(memory_type_index != null);
+
+            const alloc_info = vk.MemoryAllocateInfo{
+                .allocation_size = buffer_memreq.size,
+                .memory_type_index = memory_type_index.?,
+            };
+            const memory = try ctx.device.allocateMemory(&alloc_info, null);
+            errdefer ctx.device.freeMemory(memory, null);
+
+            try ctx.device.bindBufferMemory(buffer, memory, 0);
+            const buffer_ptr: [*]u8 = @ptrCast((try ctx.device.mapMemory(memory, 0, size, .{})).?);
+
+            const granularity = @max(optimal_alignment, 4096);
+            std.debug.assert(size % granularity == 0);
+            const metadata = try ctx.gpa.alloc(Metadata, size / granularity);
+
+            return .{
+                .next = null,
+                .memory = memory,
+                .buffer = buffer,
+                .mapped_memory = buffer_ptr[0..size],
+                .granularity = granularity,
+                .metadata = metadata,
+                .head = 0,
+                .tail = 0,
+            };
+        }
+
+        fn deinit(slab: *Slab, ctx: *Context) void {
+            ctx.device.destroyBuffer(slab.buffer, null);
+            ctx.device.freeMemory(slab.memory, null);
+            ctx.gpa.free(slab.metadata);
+        }
+
+        fn getMetadata(slab: *Slab, ptr: anytype) *Metadata {
+            const info = @typeInfo(@TypeOf(ptr));
+            if (info != .pointer) @compileError("not a pointer or slice");
+            const addr = switch (info.pointer.size) {
+                .slice => @intFromPtr(ptr.ptr),
+                else => @intFromPtr(ptr),
+            };
+            return &slab.metadata[(addr - @intFromPtr(slab.mapped_memory)) / slab.granularity];
+        }
+
+        fn alloc(slab: *Slab, size: u64) ?[]u8 {
+            const slots = (size + slab.granularity - 1) / slab.granularity;
+            if (slab.tail + slots > slab.metadata.len) return null;
+            slab.metadata[slab.head] = .{
+                .semaphore_value = null,
+                .slots = slots,
+            };
+            const offset = slab.tail * slab.granularity;
+            slab.tail += slots;
+            return slab.mapped_memory[offset .. offset + size];
+        }
+
+        fn testFree(slab: *Slab, ctx: *Context) bool {
+            if (slab.head == slab.tail) return true;
+            const semaphore_value = ctx.device.getSemaphoreCounterValue(ctx.queue_semaphore);
+            if (semaphore_value < slab.metadata[slab.head]) return false;
+            slab.head += slab.metadata[slab.head].slots;
+            return slab.testFree(ctx);
+        }
+    };
+
+    ctx: *Context,
+
+    usage: Usage,
+    min_slab_count: u32, // maximum number of slabs in free_slabs list
+    max_slab_count: u32, // maximum number of slabs in total
+    slab_size: u64,
+
+    slab_pool: std.heap.MemoryPoolExtra(Slab, .{ .growable = false }), // unused (no gpu allocation)
+
+    free_slabs: ?*Slab,
+    free_slab_count: u32,
+    total_slab_count: u32,
+
+    fn init(ctx: *Context, usage: Usage) !StagingAllocator {
+        var staging_alloc: StagingAllocator = .{
+            .ctx = ctx,
+            .usage = usage,
+            .min_slab_count = 2,
+            .max_slab_count = 8,
+            .slab_size = 256 * 1024 * 1024,
+            .free_slabs = null,
+            .slab_pool = try .initPreheated(ctx.gpa, 3),
+            .free_slab_count = 0,
+            .total_slab_count = 0,
+        };
+        errdefer staging_alloc.slab_pool.deinit();
+
+        // FIXME proper cleanup on fail
+        for (0..2) |_| {
+            const slab = staging_alloc.slab_pool.create() catch unreachable;
+            slab.* = try .init(ctx, staging_alloc.slab_size, usage);
+            slab.next = staging_alloc.free_slabs;
+            staging_alloc.free_slabs = slab;
+            staging_alloc.free_slab_count += 1;
+            staging_alloc.total_slab_count += 1;
+        }
+
+        return staging_alloc;
+    }
+
+    fn deinit(staging_alloc: *StagingAllocator) void {
+        var walk: ?*Slab = staging_alloc.free_slabs;
+        while (walk) |slab| {
+            walk = slab.next;
+            slab.deinit(staging_alloc.ctx);
+            staging_alloc.free_slab_count -= 1;
+            staging_alloc.total_slab_count -= 1;
+        }
+
+        std.debug.assert(staging_alloc.free_slab_count == 0);
+        std.debug.assert(staging_alloc.total_slab_count == 0);
+
+        staging_alloc.slab_pool.deinit();
+    }
+};
