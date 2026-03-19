@@ -388,6 +388,10 @@ pub const Context = struct {
         ctx.gpa.destroy(ctx);
     }
 
+    pub fn stagingAllocator(ctx: *Context, usage: StagingAllocator.Usage) std.mem.Allocator {
+        return ctx.staging_allocs.getPtr(usage).allocator();
+    }
+
     // pub fn acquireCommandBuffer(ctx: *Context, queue_type: QueueType) *CommandBuffer {
     //     std.debug.assert(ctx.active_command_buffer == null);
     //     ctx.active_command_buffer = queue_type;
@@ -2165,20 +2169,16 @@ const StagingAllocator = struct {
     const Usage = enum { upload, download };
 
     const Slab = struct {
-        const Metadata = struct {
-            semaphore_value: ?u64,
-            slots: u64,
-        };
-
         next: ?*Slab,
 
         memory: vk.DeviceMemory,
         buffer: vk.Buffer,
         mapped_memory: []u8,
         granularity: u64,
-        metadata: []Metadata,
         head: u64,
         tail: u64,
+        semaphore_value: u64,
+        open_allocations: u64,
 
         fn init(ctx: *Context, size: u64, usage: Usage) !Slab {
             const buffer_info = vk.BufferCreateInfo{
@@ -2238,7 +2238,6 @@ const StagingAllocator = struct {
 
             const granularity = @max(optimal_alignment, 4096);
             std.debug.assert(size % granularity == 0);
-            const metadata = try ctx.gpa.alloc(Metadata, size / granularity);
 
             return .{
                 .next = null,
@@ -2246,51 +2245,41 @@ const StagingAllocator = struct {
                 .buffer = buffer,
                 .mapped_memory = buffer_ptr[0..size],
                 .granularity = granularity,
-                .metadata = metadata,
                 .head = 0,
                 .tail = 0,
+                .semaphore_value = 0,
+                .open_allocations = 0,
             };
         }
 
         fn deinit(slab: *Slab, ctx: *Context) void {
             ctx.device.destroyBuffer(slab.buffer, null);
             ctx.device.freeMemory(slab.memory, null);
-            ctx.gpa.free(slab.metadata);
-        }
-
-        fn getMetadata(slab: *Slab, ptr: anytype) *Metadata {
-            const info = @typeInfo(@TypeOf(ptr));
-            if (info != .pointer) @compileError("not a pointer or slice");
-            const addr = switch (info.pointer.size) {
-                .slice => @intFromPtr(ptr.ptr),
-                else => @intFromPtr(ptr),
-            };
-            return &slab.metadata[(addr - @intFromPtr(slab.mapped_memory)) / slab.granularity];
         }
 
         fn alloc(slab: *Slab, size: u64) ?[]u8 {
             const slots = (size + slab.granularity - 1) / slab.granularity;
-            if (slab.tail + slots > slab.metadata.len) return null;
-            slab.metadata[slab.head] = .{
-                .semaphore_value = null,
-                .slots = slots,
-            };
+            if ((slab.tail + slots) * slab.granularity > slab.mapped_memory.len) return null;
             const offset = slab.tail * slab.granularity;
             slab.tail += slots;
+            slab.open_allocations += 1;
             return slab.mapped_memory[offset .. offset + size];
         }
 
         fn testFree(slab: *Slab, ctx: *Context) bool {
-            if (slab.head == slab.tail) return true;
+            if (slab.open_allocations > 0) return false;
             const semaphore_value = ctx.device.getSemaphoreCounterValue(ctx.queue_semaphore);
-            if (semaphore_value < slab.metadata[slab.head]) return false;
-            slab.head += slab.metadata[slab.head].slots;
-            return slab.testFree(ctx);
+            return (semaphore_value >= slab.semaphore_value);
         }
 
         fn canFit(slab: *Slab, size: u64) bool {
             const slots = (size + slab.granularity - 1) / slab.granularity;
-            return slab.tail + slots <= slab.metadata.len;
+            return (slab.tail + slots) * slab.granularity <= slab.mapped_memory.len;
+        }
+
+        fn contains(slab: *Slab, addr: usize) bool {
+            const slab_addr = @intFromPtr(slab.mapped_memory.ptr);
+            return addr >= slab_addr and addr < slab_addr + slab.mapped_memory.len;
         }
     };
 
@@ -2323,6 +2312,7 @@ const StagingAllocator = struct {
             .free_slab_count = 0,
             .total_slab_count = 0,
             .active_slab = null,
+            .used_slabs = null,
         };
         errdefer staging_alloc.slab_pool.deinit();
 
@@ -2347,6 +2337,16 @@ const StagingAllocator = struct {
             staging_alloc.free_slab_count -= 1;
             staging_alloc.total_slab_count -= 1;
         }
+        walk = staging_alloc.used_slabs;
+        while (walk) |slab| {
+            walk = slab.next;
+            slab.deinit(staging_alloc.ctx);
+            staging_alloc.total_slab_count -= 1;
+        }
+        if (staging_alloc.active_slab) |slab| {
+            slab.deinit(staging_alloc.ctx);
+            staging_alloc.total_slab_count -= 1;
+        }
 
         std.debug.assert(staging_alloc.free_slab_count == 0);
         std.debug.assert(staging_alloc.total_slab_count == 0);
@@ -2369,6 +2369,7 @@ const StagingAllocator = struct {
             staging_alloc.active_slab = slab;
             staging_alloc.free_slabs = slab.next;
             slab.next = null;
+            staging_alloc.free_slab_count -= 1;
             return slab;
         }
 
@@ -2385,9 +2386,35 @@ const StagingAllocator = struct {
         return slab;
     }
 
+    fn getSlabOf(staging_alloc: *StagingAllocator, addr: usize) *Slab {
+        if (staging_alloc.active_slab) |slab| {
+            if (slab.contains(addr)) return slab;
+        }
+        var walk: ?*Slab = staging_alloc.used_slabs;
+        while (walk) |slab| {
+            walk = slab.next;
+            if (slab.contains(addr)) return slab;
+        }
+
+        unreachable; // pointer was not allocated by this allocator or has already been freed
+    }
+
+    // fn tryRelease(staging_alloc: *StagingAllocator) void {
+    //     var walk: ?*Slab = staging_alloc.used_slabs;
+    //     while (walk) |slab| {
+    //         walk = slab.next;
+    //         if (slab.testFree(staging_alloc.ctx)) {
+    //             slab.next = staging_alloc.free_slabs.?;
+    //             staging_alloc.fr
+    //         }
+    //     }
+    // }
+
     fn allocator(staging_alloc: *StagingAllocator) std.mem.Allocator {
-        _ = staging_alloc;
-        return undefined;
+        return .{
+            .ptr = staging_alloc,
+            .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free },
+        };
     }
 
     /// Return a pointer to `len` bytes with specified `alignment`, or return
@@ -2397,12 +2424,12 @@ const StagingAllocator = struct {
     /// allocation call stack. If the value is `0` it means no return address
     /// has been provided.
     fn alloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
-        const staging_alloc: *StagingAllocator = @ptrCast(ptr);
-
-        _ = staging_alloc;
-        _ = len;
         _ = alignment;
         _ = ret_addr;
+        const staging_alloc: *StagingAllocator = @ptrCast(@alignCast(ptr));
+        const slab = staging_alloc.getSlab(len) catch return null;
+        const bytes = slab.alloc(len).?;
+        return bytes.ptr;
     }
 
     /// Attempt to expand or shrink memory in place.
@@ -2429,13 +2456,14 @@ const StagingAllocator = struct {
         new_len: usize,
         ret_addr: usize,
     ) bool {
-        const staging_alloc: *StagingAllocator = @ptrCast(ptr);
+        const staging_alloc: *StagingAllocator = @ptrCast(@alignCast(ptr));
         _ = staging_alloc;
         _ = memory;
         _ = alignment;
         _ = new_len;
         _ = ret_addr;
-        return false;
+        @panic("resize is not implemented");
+        // return false;
     }
 
     /// Attempt to expand or shrink memory, allowing relocation.
@@ -2464,13 +2492,14 @@ const StagingAllocator = struct {
         new_len: usize,
         ret_addr: usize,
     ) ?[*]u8 {
-        const staging_alloc: *StagingAllocator = @ptrCast(ptr);
+        const staging_alloc: *StagingAllocator = @ptrCast(@alignCast(ptr));
         _ = staging_alloc;
         _ = memory;
         _ = alignment;
         _ = new_len;
         _ = ret_addr;
-        return null;
+        @panic("remap is not implemented");
+        // return null;
     }
 
     /// Free and invalidate a region of memory.
@@ -2484,10 +2513,10 @@ const StagingAllocator = struct {
     /// allocation call stack. If the value is `0` it means no return address
     /// has been provided.
     fn free(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
-        const staging_alloc: *StagingAllocator = @ptrCast(ptr);
-        _ = staging_alloc;
-        _ = memory;
         _ = alignment;
         _ = ret_addr;
+        const staging_alloc: *StagingAllocator = @ptrCast(@alignCast(ptr));
+        const slab = staging_alloc.getSlabOf(@intFromPtr(memory.ptr));
+        slab.open_allocations -= 1;
     }
 };

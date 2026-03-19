@@ -90,6 +90,10 @@ pub fn main() !void {
     });
     defer ctx.destroyGraphicsPipeline(pipeline);
 
+    const upload_allocator = ctx.stagingAllocator(.upload);
+    const vertex_staging = try upload_allocator.alloc([3]f32, 4);
+    _ = vertex_staging;
+
     // {
     //     const command_buffer = ctx.acquireCommandBuffer(.graphics);
     //     try command_buffer.uploadToBuffer(
