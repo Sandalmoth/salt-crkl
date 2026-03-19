@@ -2287,6 +2287,11 @@ const StagingAllocator = struct {
             slab.head += slab.metadata[slab.head].slots;
             return slab.testFree(ctx);
         }
+
+        fn canFit(slab: *Slab, size: u64) bool {
+            const slots = (size + slab.granularity - 1) / slab.granularity;
+            return slab.tail + slots <= slab.metadata.len;
+        }
     };
 
     ctx: *Context,
@@ -2302,6 +2307,10 @@ const StagingAllocator = struct {
     free_slab_count: u32,
     total_slab_count: u32,
 
+    active_slab: ?*Slab,
+
+    used_slabs: ?*Slab,
+
     fn init(ctx: *Context, usage: Usage) !StagingAllocator {
         var staging_alloc: StagingAllocator = .{
             .ctx = ctx,
@@ -2313,6 +2322,7 @@ const StagingAllocator = struct {
             .slab_pool = try .initPreheated(ctx.gpa, 3),
             .free_slab_count = 0,
             .total_slab_count = 0,
+            .active_slab = null,
         };
         errdefer staging_alloc.slab_pool.deinit();
 
@@ -2342,5 +2352,142 @@ const StagingAllocator = struct {
         std.debug.assert(staging_alloc.total_slab_count == 0);
 
         staging_alloc.slab_pool.deinit();
+    }
+
+    fn getSlab(staging_alloc: *StagingAllocator, size: u64) !*Slab {
+        if (staging_alloc.active_slab) |slab| {
+            if (slab.canFit(size)) {
+                return slab;
+            } else {
+                slab.next = staging_alloc.used_slabs;
+                staging_alloc.used_slabs = slab.next;
+                staging_alloc.active_slab = null;
+            }
+        }
+
+        if (staging_alloc.free_slabs) |slab| {
+            staging_alloc.active_slab = slab;
+            staging_alloc.free_slabs = slab.next;
+            slab.next = null;
+            return slab;
+        }
+
+        if (staging_alloc.total_slab_count >= staging_alloc.max_slab_count) {
+            return error.OutOfMemory;
+        }
+
+        const slab = staging_alloc.slab_pool.create() catch unreachable;
+        slab.* = try .init(staging_alloc.ctx, staging_alloc.slab_size, staging_alloc.usage);
+        slab.next = staging_alloc.free_slabs;
+        staging_alloc.free_slabs = slab;
+        staging_alloc.free_slab_count += 1;
+        staging_alloc.total_slab_count += 1;
+        return slab;
+    }
+
+    fn allocator(staging_alloc: *StagingAllocator) std.mem.Allocator {
+        _ = staging_alloc;
+        return undefined;
+    }
+
+    /// Return a pointer to `len` bytes with specified `alignment`, or return
+    /// `null` indicating the allocation failed.
+    ///
+    /// `ret_addr` is optionally provided as the first return address of the
+    /// allocation call stack. If the value is `0` it means no return address
+    /// has been provided.
+    fn alloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const staging_alloc: *StagingAllocator = @ptrCast(ptr);
+
+        _ = staging_alloc;
+        _ = len;
+        _ = alignment;
+        _ = ret_addr;
+    }
+
+    /// Attempt to expand or shrink memory in place.
+    ///
+    /// `memory.len` must equal the length requested from the most recent
+    /// successful call to `alloc`, `resize`, or `remap`. `alignment` must
+    /// equal the same value that was passed as the `alignment` parameter to
+    /// the original `alloc` call.
+    ///
+    /// A result of `true` indicates the resize was successful and the
+    /// allocation now has the same address but a size of `new_len`. `false`
+    /// indicates the resize could not be completed without moving the
+    /// allocation to a different address.
+    ///
+    /// `new_len` must be greater than zero.
+    ///
+    /// `ret_addr` is optionally provided as the first return address of the
+    /// allocation call stack. If the value is `0` it means no return address
+    /// has been provided.
+    fn resize(
+        ptr: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) bool {
+        const staging_alloc: *StagingAllocator = @ptrCast(ptr);
+        _ = staging_alloc;
+        _ = memory;
+        _ = alignment;
+        _ = new_len;
+        _ = ret_addr;
+        return false;
+    }
+
+    /// Attempt to expand or shrink memory, allowing relocation.
+    ///
+    /// `memory.len` must equal the length requested from the most recent
+    /// successful call to `alloc`, `resize`, or `remap`. `alignment` must
+    /// equal the same value that was passed as the `alignment` parameter to
+    /// the original `alloc` call.
+    ///
+    /// A non-`null` return value indicates the resize was successful. The
+    /// allocation may have same address, or may have been relocated. In either
+    /// case, the allocation now has size of `new_len`. A `null` return value
+    /// indicates that the resize would be equivalent to allocating new memory,
+    /// copying the bytes from the old memory, and then freeing the old memory.
+    /// In such case, it is more efficient for the caller to perform the copy.
+    ///
+    /// `new_len` must be greater than zero.
+    ///
+    /// `ret_addr` is optionally provided as the first return address of the
+    /// allocation call stack. If the value is `0` it means no return address
+    /// has been provided.
+    fn remap(
+        ptr: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const staging_alloc: *StagingAllocator = @ptrCast(ptr);
+        _ = staging_alloc;
+        _ = memory;
+        _ = alignment;
+        _ = new_len;
+        _ = ret_addr;
+        return null;
+    }
+
+    /// Free and invalidate a region of memory.
+    ///
+    /// `memory.len` must equal the length requested from the most recent
+    /// successful call to `alloc`, `resize`, or `remap`. `alignment` must
+    /// equal the same value that was passed as the `alignment` parameter to
+    /// the original `alloc` call.
+    ///
+    /// `ret_addr` is optionally provided as the first return address of the
+    /// allocation call stack. If the value is `0` it means no return address
+    /// has been provided.
+    fn free(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const staging_alloc: *StagingAllocator = @ptrCast(ptr);
+        _ = staging_alloc;
+        _ = memory;
+        _ = alignment;
+        _ = ret_addr;
     }
 };
