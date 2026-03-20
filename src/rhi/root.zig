@@ -357,8 +357,8 @@ pub const Context = struct {
         ctx.shader_pool = .init(std.heap.page_allocator);
         ctx.graphics_pipeline_pool = .init(std.heap.page_allocator);
 
-        ctx.staging_allocs.getPtr(.upload).* = try .init(ctx, .upload);
-        ctx.staging_allocs.getPtr(.download).* = try .init(ctx, .download);
+        ctx.staging_allocs.getPtr(.upload).* = try .init(ctx, .upload, 256 * 1024 * 1024, 3);
+        ctx.staging_allocs.getPtr(.download).* = try .init(ctx, .download, 256 * 1024 * 1024, 1);
 
         return ctx;
     }
@@ -1264,6 +1264,19 @@ const Swapchain = struct {
     }
 };
 
+const Buffer = struct {
+    memory: union(enum) {
+        slab: struct {
+            allocation: Allocation,
+            slab: *Allocator.Slab,
+        },
+        dedicated: vk.DeviceMemory,
+    },
+    buffer: vk.Buffer,
+    size: usize,
+    buffer_device_address: u64,
+};
+
 const Allocator = struct {
     const Slab = struct {
         const slab_size = 256 * 1024 * 1024;
@@ -1296,160 +1309,130 @@ const Allocator = struct {
         allocator.* = undefined;
     }
 
-    // fn createBuffer(
-    //     allocator: *Allocator,
-    //     allocation_create_info: AllocationCreateInfo,
-    //     buffer_create_info: BufferCreateInfo,
-    // ) !Buffer {
-    //     const queue_family_indices: FixedSet(3, u32) = .init(&.{
-    //         allocator.ctx.queue_families.get(.graphics),
-    //         allocator.ctx.queue_families.get(.async_compute),
-    //         allocator.ctx.queue_families.get(.transfer),
-    //     });
-    //     const buffer_info = vk.BufferCreateInfo{
-    //         .size = buffer_create_info.size,
-    //         .usage = .{
-    //             .transfer_src_bit = true,
-    //             .transfer_dst_bit = true,
-    //             .storage_buffer_bit = true,
-    //             .index_buffer_bit = true,
-    //             .indirect_buffer_bit = true,
-    //             .shader_device_address_bit = true,
-    //         },
-    //         .sharing_mode = .concurrent,
-    //         .p_queue_family_indices = @ptrCast(queue_family_indices.items().ptr),
-    //         .queue_family_index_count = @intCast(queue_family_indices.items().len),
-    //     };
-    //     const buffer = try allocator.ctx.device.createBuffer(&buffer_info, null);
-    //     errdefer allocator.ctx.device.destroyBuffer(buffer, null);
+    fn createBuffer(
+        allocator: *Allocator,
+        buffer_create_info: BufferCreateInfo,
+    ) !Buffer {
+        const buffer_info = vk.BufferCreateInfo{
+            .size = buffer_create_info.size,
+            .usage = .{
+                .transfer_src_bit = true,
+                .transfer_dst_bit = true,
+                .storage_buffer_bit = true,
+                .index_buffer_bit = true,
+                .indirect_buffer_bit = true,
+                .shader_device_address_bit = true,
+            },
+            .sharing_mode = .exclusive,
+            .p_queue_family_indices = @ptrCast(allocator.ctx.queue_family),
+            .queue_family_index_count = 1,
+        };
+        const buffer = try allocator.ctx.device.createBuffer(&buffer_info, null);
+        errdefer allocator.ctx.device.destroyBuffer(buffer, null);
 
-    //     var dedicated_memreq: vk.MemoryDedicatedRequirements = .{
-    //         .prefers_dedicated_allocation = .false,
-    //         .requires_dedicated_allocation = .false,
-    //     };
-    //     var buffer_memreq: vk.MemoryRequirements2 = .{
-    //         .p_next = &dedicated_memreq,
-    //         .memory_requirements = undefined,
-    //     };
-    //     allocator.ctx.device.getBufferMemoryRequirements2(&.{
-    //         .buffer = buffer,
-    //     }, &buffer_memreq);
+        var dedicated_memreq: vk.MemoryDedicatedRequirements = .{
+            .prefers_dedicated_allocation = .false,
+            .requires_dedicated_allocation = .false,
+        };
+        var buffer_memreq: vk.MemoryRequirements2 = .{
+            .p_next = &dedicated_memreq,
+            .memory_requirements = undefined,
+        };
+        allocator.ctx.device.getBufferMemoryRequirements2(&.{
+            .buffer = buffer,
+        }, &buffer_memreq);
 
-    //     std.debug.print("{}\n", .{buffer_memreq});
-    //     std.debug.print("{}\n", .{dedicated_memreq});
+        std.debug.print("{}\n", .{buffer_memreq});
+        std.debug.print("{}\n", .{dedicated_memreq});
 
-    //     var memory_type_index: u32 = undefined;
-    //     var best_score: i32 = -999;
+        var memory_type_index: u32 = undefined;
+        var best_score: i32 = -999;
 
-    //     const memory_types = allocator.ctx.physical_device_memory_properties.memory_types;
-    //     const memory_type_count = allocator.ctx.physical_device_memory_properties.memory_type_count;
-    //     for (memory_types[0..memory_type_count], 0..) |memory_type, i| {
-    //         // hard requirements
-    //         if (buffer_memreq.memory_requirements.memory_type_bits &
-    //             (@as(u32, 1) << @intCast(i)) == 0) continue;
-    //         // soft requirements
-    //         var score: i32 = 0;
-    //         if (memory_type.property_flags.device_local_bit) score += 2;
-    //         if (buffer_create_info.host_access_mode == .host_write and
-    //             memory_type.property_flags.host_visible_bit and
-    //             memory_type.property_flags.host_coherent_bit) score += 1;
-    //         if (buffer_create_info.host_access_mode == .host_read and
-    //             memory_type.property_flags.host_visible_bit and
-    //             memory_type.property_flags.host_coherent_bit and
-    //             memory_type.property_flags.host_cached_bit) score += 1;
-    //         if (score > best_score) {
-    //             best_score = score;
-    //             memory_type_index = @intCast(i);
-    //         }
-    //     }
+        const memory_types = allocator.ctx.physical_device_memory_properties.memory_types;
+        const memory_type_count = allocator.ctx.physical_device_memory_properties.memory_type_count;
+        for (memory_types[0..memory_type_count], 0..) |memory_type, i| {
+            // hard requirements
+            if (buffer_memreq.memory_requirements.memory_type_bits &
+                (@as(u32, 1) << @intCast(i)) == 0) continue;
+            // soft requirements
+            var score: i32 = 0;
+            if (memory_type.property_flags.device_local_bit) score += 2;
+            if (memory_type.property_flags.host_visible_bit) score -= 1;
+            if (score > best_score) {
+                best_score = score;
+                memory_type_index = @intCast(i);
+            }
+        }
 
-    //     if (allocation_create_info.dedicated == .always or
-    //         dedicated_memreq.requires_dedicated_allocation == .true or
-    //         (dedicated_memreq.prefers_dedicated_allocation == .true and
-    //             allocation_create_info.dedicated == .if_preferred) or
-    //         buffer_memreq.memory_requirements.size > Slab.slab_size / 2)
-    //     {
-    //         // dedicated allocation
-    //         const dedicated_info: vk.MemoryDedicatedAllocateInfo = .{
-    //             .buffer = buffer,
-    //         };
-    //         const alloc_flags: vk.MemoryAllocateFlagsInfo = .{
-    //             .flags = .{ .device_address_bit = true },
-    //             .device_mask = 0,
-    //             .p_next = &dedicated_info,
-    //         };
-    //         const memory = try allocator.ctx.device.allocateMemory(&.{
-    //             .allocation_size = buffer_memreq.memory_requirements.size,
-    //             .memory_type_index = memory_type_index,
-    //             .p_next = &alloc_flags,
-    //         }, null);
-    //         errdefer allocator.ctx.device.freeMemory(memory, null);
-    //         try allocator.ctx.device.bindBufferMemory(buffer, memory, 0);
+        if (dedicated_memreq.requires_dedicated_allocation == .true or
+            buffer_memreq.memory_requirements.size > Slab.slab_size / 2)
+        {
+            // dedicated allocation
+            const dedicated_info: vk.MemoryDedicatedAllocateInfo = .{
+                .buffer = buffer,
+            };
+            const alloc_flags: vk.MemoryAllocateFlagsInfo = .{
+                .flags = .{ .device_address_bit = true },
+                .device_mask = 0,
+                .p_next = &dedicated_info,
+            };
+            const memory = try allocator.ctx.device.allocateMemory(&.{
+                .allocation_size = buffer_memreq.memory_requirements.size,
+                .memory_type_index = memory_type_index,
+                .p_next = &alloc_flags,
+            }, null);
+            errdefer allocator.ctx.device.freeMemory(memory, null);
+            try allocator.ctx.device.bindBufferMemory(buffer, memory, 0);
 
-    //         const address = allocator.ctx.device.getBufferDeviceAddress(&.{
-    //             .buffer = buffer,
-    //         });
+            const address = allocator.ctx.device.getBufferDeviceAddress(&.{
+                .buffer = buffer,
+            });
 
-    //         // NOTE if mapping fails, since it's not guaranteed just dont' do it
-    //         var mapped: ?[]u8 = null;
-    //         if (memory_types[memory_type_index].property_flags.host_visible_bit and
-    //             memory_types[memory_type_index].property_flags.host_coherent_bit)
-    //             mapped = blk: {
-    //                 const ptr: [*]u8 = @ptrCast(allocator.ctx.device.mapMemory(
-    //                     memory,
-    //                     0,
-    //                     buffer_create_info.size,
-    //                     .{},
-    //                 ) catch break :blk null);
-    //                 break :blk ptr[0..buffer_create_info.size];
-    //             };
+            return .{
+                .memory = .{ .dedicated = memory },
+                .buffer = buffer,
+                .size = buffer_create_info.size,
+                .buffer_device_address = address,
+            };
+        }
 
-    //         return .{
-    //             .memory = .{ .dedicated = memory },
-    //             .buffer = buffer,
-    //             .size = buffer_create_info.size,
-    //             .buffer_device_address = address,
-    //             .mapped_memory = mapped,
-    //         };
-    //     }
+        // suballocate
+        std.debug.assert(buffer_memreq.memory_requirements.alignment <= Slab.granularity);
+        const suballoc = try allocator.alloc(
+            memory_type_index,
+            memory_types[memory_type_index].property_flags,
+            .{ .device_address_bit = true },
+            // buffer_create_info.size,
+            buffer_memreq.memory_requirements.size,
+        );
 
-    //     // suballocate
-    //     std.debug.assert(buffer_memreq.memory_requirements.alignment <= Slab.granularity);
-    //     const suballoc = try allocator.alloc(
-    //         memory_type_index,
-    //         memory_types[memory_type_index].property_flags,
-    //         .{ .device_address_bit = true },
-    //         // buffer_create_info.size,
-    //         buffer_memreq.memory_requirements.size,
-    //     );
+        try allocator.ctx.device.bindBufferMemory(
+            buffer,
+            suballoc.slab.memory,
+            suballoc.allocation.offset,
+        );
 
-    //     try allocator.ctx.device.bindBufferMemory(
-    //         buffer,
-    //         suballoc.slab.memory,
-    //         suballoc.allocation.offset,
-    //     );
+        const address = allocator.ctx.device.getBufferDeviceAddress(&.{
+            .buffer = buffer,
+        });
 
-    //     const address = allocator.ctx.device.getBufferDeviceAddress(&.{
-    //         .buffer = buffer,
-    //     });
+        const offset = suballoc.allocation.offset * Slab.granularity;
+        const mapped: ?[]u8 = if (suballoc.slab.mapped_memory) |mm|
+            mm[offset .. offset + buffer_create_info.size]
+        else
+            null;
 
-    //     const offset = suballoc.allocation.offset * Slab.granularity;
-    //     const mapped: ?[]u8 = if (suballoc.slab.mapped_memory) |mm|
-    //         mm[offset .. offset + buffer_create_info.size]
-    //     else
-    //         null;
-
-    //     return .{
-    //         .memory = .{ .slab = .{
-    //             .allocation = suballoc.allocation,
-    //             .slab = suballoc.slab,
-    //         } },
-    //         .buffer = buffer,
-    //         .size = buffer_create_info.size,
-    //         .buffer_device_address = address,
-    //         .mapped_memory = mapped,
-    //     };
-    // }
+        return .{
+            .memory = .{ .slab = .{
+                .allocation = suballoc.allocation,
+                .slab = suballoc.slab,
+            } },
+            .buffer = buffer,
+            .size = buffer_create_info.size,
+            .buffer_device_address = address,
+            .mapped_memory = mapped,
+        };
+    }
 
     fn alloc(
         allocator: *Allocator,
@@ -2168,17 +2151,21 @@ const ComputePipeline = struct {};
 const StagingAllocator = struct {
     const Usage = enum { upload, download };
 
+    const Metadata = struct {
+        allocation: Allocation,
+    };
+
     const Slab = struct {
+        granularity: u64,
+
         next: ?*Slab,
 
         memory: vk.DeviceMemory,
         buffer: vk.Buffer,
         mapped_memory: []u8,
-        granularity: u64,
-        head: u64,
-        tail: u64,
-        semaphore_value: u64,
-        open_allocations: u64,
+
+        allocator: OffsetAllocator,
+        metadata: []Metadata,
 
         fn init(ctx: *Context, size: u64, usage: Usage) !Slab {
             const buffer_info = vk.BufferCreateInfo{
@@ -2239,42 +2226,56 @@ const StagingAllocator = struct {
             const granularity = @max(optimal_alignment, 4096);
             std.debug.assert(size % granularity == 0);
 
+            const metadata = try ctx.gpa.alloc(Metadata, size / granularity);
+            errdefer ctx.gpa.free(metadata);
+            var suballoc: OffsetAllocator = try .init(
+                ctx.gpa,
+                @intCast(size / granularity),
+                @intCast(size / granularity),
+            );
+            errdefer suballoc.deinit(ctx.gpa);
+
             return .{
+                .granularity = granularity,
                 .next = null,
                 .memory = memory,
                 .buffer = buffer,
                 .mapped_memory = buffer_ptr[0..size],
-                .granularity = granularity,
-                .head = 0,
-                .tail = 0,
-                .semaphore_value = 0,
-                .open_allocations = 0,
+                .allocator = suballoc,
+                .metadata = metadata,
             };
         }
 
         fn deinit(slab: *Slab, ctx: *Context) void {
             ctx.device.destroyBuffer(slab.buffer, null);
             ctx.device.freeMemory(slab.memory, null);
+            slab.allocator.deinit(ctx.gpa);
+            ctx.gpa.free(slab.metadata);
         }
 
         fn alloc(slab: *Slab, size: u64) ?[]u8 {
             const slots = (size + slab.granularity - 1) / slab.granularity;
-            if ((slab.tail + slots) * slab.granularity > slab.mapped_memory.len) return null;
-            const offset = slab.tail * slab.granularity;
-            slab.tail += slots;
-            slab.open_allocations += 1;
-            return slab.mapped_memory[offset .. offset + size];
+            const allocation = slab.allocator.allocate(@intCast(slots)) catch return null;
+            const bytes = slab.mapped_memory[allocation.offset * slab.granularity .. allocation.offset * slab.granularity + size];
+            slab.getMetadata(bytes).* = .{
+                .allocation = allocation,
+            };
+            return bytes;
         }
 
-        fn testFree(slab: *Slab, ctx: *Context) bool {
-            if (slab.open_allocations > 0) return false;
-            const semaphore_value = ctx.device.getSemaphoreCounterValue(ctx.queue_semaphore);
-            return (semaphore_value >= slab.semaphore_value);
+        fn free(slab: *Slab, ptr: anytype) void {
+            const metadata = slab.getMetadata(ptr);
+            slab.allocator.free(metadata.allocation);
         }
 
-        fn canFit(slab: *Slab, size: u64) bool {
-            const slots = (size + slab.granularity - 1) / slab.granularity;
-            return (slab.tail + slots) * slab.granularity <= slab.mapped_memory.len;
+        fn getMetadata(slab: *Slab, ptr: anytype) *Metadata {
+            const info = @typeInfo(@TypeOf(ptr));
+            if (info != .pointer) @compileError("not a pointer or slice");
+            const addr = switch (info.pointer.size) {
+                .slice => @intFromPtr(ptr.ptr),
+                else => @intFromPtr(ptr),
+            };
+            return &slab.metadata[(addr - @intFromPtr(slab.mapped_memory.ptr)) / slab.granularity];
         }
 
         fn contains(slab: *Slab, addr: usize) bool {
@@ -2284,131 +2285,65 @@ const StagingAllocator = struct {
     };
 
     ctx: *Context,
+    slabs: ?*Slab,
 
-    usage: Usage,
-    min_slab_count: u32, // maximum number of slabs in free_slabs list
-    max_slab_count: u32, // maximum number of slabs in total
-    slab_size: u64,
-
-    slab_pool: std.heap.MemoryPoolExtra(Slab, .{ .growable = false }), // unused (no gpu allocation)
-
-    free_slabs: ?*Slab,
-    free_slab_count: u32,
-    total_slab_count: u32,
-
-    active_slab: ?*Slab,
-
-    used_slabs: ?*Slab,
-
-    fn init(ctx: *Context, usage: Usage) !StagingAllocator {
+    fn init(ctx: *Context, usage: Usage, size: u64, slab_count: usize) !StagingAllocator {
         var staging_alloc: StagingAllocator = .{
             .ctx = ctx,
-            .usage = usage,
-            .min_slab_count = 2,
-            .max_slab_count = 8,
-            .slab_size = 256 * 1024 * 1024,
-            .free_slabs = null,
-            .slab_pool = try .initPreheated(ctx.gpa, 3),
-            .free_slab_count = 0,
-            .total_slab_count = 0,
-            .active_slab = null,
-            .used_slabs = null,
+            .slabs = null,
         };
-        errdefer staging_alloc.slab_pool.deinit();
 
         // FIXME proper cleanup on fail
-        for (0..2) |_| {
-            const slab = staging_alloc.slab_pool.create() catch unreachable;
-            slab.* = try .init(ctx, staging_alloc.slab_size, usage);
-            slab.next = staging_alloc.free_slabs;
-            staging_alloc.free_slabs = slab;
-            staging_alloc.free_slab_count += 1;
-            staging_alloc.total_slab_count += 1;
+        for (0..slab_count) |_| {
+            const slab = try ctx.gpa.create(Slab);
+            slab.* = try .init(ctx, size, usage);
+            slab.next = staging_alloc.slabs;
+            staging_alloc.slabs = slab;
         }
 
         return staging_alloc;
     }
 
     fn deinit(staging_alloc: *StagingAllocator) void {
-        var walk: ?*Slab = staging_alloc.free_slabs;
+        var walk: ?*Slab = staging_alloc.slabs;
         while (walk) |slab| {
             walk = slab.next;
             slab.deinit(staging_alloc.ctx);
-            staging_alloc.free_slab_count -= 1;
-            staging_alloc.total_slab_count -= 1;
+            staging_alloc.ctx.gpa.destroy(slab);
         }
-        walk = staging_alloc.used_slabs;
-        while (walk) |slab| {
-            walk = slab.next;
-            slab.deinit(staging_alloc.ctx);
-            staging_alloc.total_slab_count -= 1;
-        }
-        if (staging_alloc.active_slab) |slab| {
-            slab.deinit(staging_alloc.ctx);
-            staging_alloc.total_slab_count -= 1;
-        }
-
-        std.debug.assert(staging_alloc.free_slab_count == 0);
-        std.debug.assert(staging_alloc.total_slab_count == 0);
-
-        staging_alloc.slab_pool.deinit();
     }
 
-    fn getSlab(staging_alloc: *StagingAllocator, size: u64) !*Slab {
-        if (staging_alloc.active_slab) |slab| {
-            if (slab.canFit(size)) {
-                return slab;
-            } else {
-                slab.next = staging_alloc.used_slabs;
-                staging_alloc.used_slabs = slab.next;
-                staging_alloc.active_slab = null;
-            }
-        }
-
-        if (staging_alloc.free_slabs) |slab| {
-            staging_alloc.active_slab = slab;
-            staging_alloc.free_slabs = slab.next;
-            slab.next = null;
-            staging_alloc.free_slab_count -= 1;
-            return slab;
-        }
-
-        if (staging_alloc.total_slab_count >= staging_alloc.max_slab_count) {
-            return error.OutOfMemory;
-        }
-
-        const slab = staging_alloc.slab_pool.create() catch unreachable;
-        slab.* = try .init(staging_alloc.ctx, staging_alloc.slab_size, staging_alloc.usage);
-        slab.next = staging_alloc.free_slabs;
-        staging_alloc.free_slabs = slab;
-        staging_alloc.free_slab_count += 1;
-        staging_alloc.total_slab_count += 1;
-        return slab;
+    fn getTransferInfo(staging_alloc: *StagingAllocator, ptr: anytype) struct {
+        buffer: vk.Buffer,
+        dst_offset: u64,
+        size: u64,
+    } {
+        const info = @typeInfo(@TypeOf(ptr));
+        if (info != .pointer) @compileError("not a pointer or slice");
+        const addr = switch (info.pointer.size) {
+            .slice => @intFromPtr(ptr.ptr),
+            else => @intFromPtr(ptr),
+        };
+        const size = switch (info.pointer.size) {
+            .slice => @sizeOf(info.pointer.child) * ptr.len,
+            else => @sizeOf(info.pointer.child),
+        };
+        const slab = staging_alloc.getSlabOf(addr);
+        return .{
+            .buffer = slab.buffer,
+            .size = size,
+            .dst_offset = addr - @intFromPtr(slab.mapped_memory.ptr),
+        };
     }
 
     fn getSlabOf(staging_alloc: *StagingAllocator, addr: usize) *Slab {
-        if (staging_alloc.active_slab) |slab| {
-            if (slab.contains(addr)) return slab;
-        }
-        var walk: ?*Slab = staging_alloc.used_slabs;
+        var walk: ?*Slab = staging_alloc.slabs;
         while (walk) |slab| {
             walk = slab.next;
             if (slab.contains(addr)) return slab;
         }
-
         unreachable; // pointer was not allocated by this allocator or has already been freed
     }
-
-    // fn tryRelease(staging_alloc: *StagingAllocator) void {
-    //     var walk: ?*Slab = staging_alloc.used_slabs;
-    //     while (walk) |slab| {
-    //         walk = slab.next;
-    //         if (slab.testFree(staging_alloc.ctx)) {
-    //             slab.next = staging_alloc.free_slabs.?;
-    //             staging_alloc.fr
-    //         }
-    //     }
-    // }
 
     fn allocator(staging_alloc: *StagingAllocator) std.mem.Allocator {
         return .{
@@ -2427,9 +2362,15 @@ const StagingAllocator = struct {
         _ = alignment;
         _ = ret_addr;
         const staging_alloc: *StagingAllocator = @ptrCast(@alignCast(ptr));
-        const slab = staging_alloc.getSlab(len) catch return null;
-        const bytes = slab.alloc(len).?;
-        return bytes.ptr;
+
+        var walk: ?*Slab = staging_alloc.slabs;
+        while (walk) |slab| {
+            walk = slab.next;
+            const bytes = slab.alloc(len) orelse continue;
+            return bytes.ptr;
+        }
+
+        return null;
     }
 
     /// Attempt to expand or shrink memory in place.
@@ -2458,12 +2399,9 @@ const StagingAllocator = struct {
     ) bool {
         const staging_alloc: *StagingAllocator = @ptrCast(@alignCast(ptr));
         _ = staging_alloc;
-        _ = memory;
         _ = alignment;
-        _ = new_len;
         _ = ret_addr;
-        @panic("resize is not implemented");
-        // return false;
+        return new_len <= memory.len; // don't even try, but shrinking works by definition
     }
 
     /// Attempt to expand or shrink memory, allowing relocation.
@@ -2494,12 +2432,10 @@ const StagingAllocator = struct {
     ) ?[*]u8 {
         const staging_alloc: *StagingAllocator = @ptrCast(@alignCast(ptr));
         _ = staging_alloc;
-        _ = memory;
         _ = alignment;
-        _ = new_len;
         _ = ret_addr;
-        @panic("remap is not implemented");
-        // return null;
+        if (new_len < memory.len) return memory.ptr; // just allow shrinking
+        return null;
     }
 
     /// Free and invalidate a region of memory.
@@ -2517,6 +2453,6 @@ const StagingAllocator = struct {
         _ = ret_addr;
         const staging_alloc: *StagingAllocator = @ptrCast(@alignCast(ptr));
         const slab = staging_alloc.getSlabOf(@intFromPtr(memory.ptr));
-        slab.open_allocations -= 1;
+        slab.free(memory);
     }
 };

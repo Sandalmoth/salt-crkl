@@ -92,7 +92,9 @@ pub fn main() !void {
 
     const upload_allocator = ctx.stagingAllocator(.upload);
     const vertex_staging = try upload_allocator.alloc([3]f32, 4);
-    _ = vertex_staging;
+    defer upload_allocator.free(vertex_staging);
+    const index_staging = try upload_allocator.alloc(u32, 4);
+    defer upload_allocator.free(index_staging);
 
     // {
     //     const command_buffer = ctx.acquireCommandBuffer(.graphics);
