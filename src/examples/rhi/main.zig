@@ -33,16 +33,24 @@ pub fn main() !void {
     }, "example_rhi");
     defer ctx.destroy();
 
-    // var transfer_buffer = try ctx.createTransferBuffer(.upload, 1024 * 1024);
-    // defer transfer_buffer.deinit();
+    const vertex_buffer = try ctx.createBuffer(.{
+        .usage = .{
+            .transfer_dst = true,
+        },
+        .size = 1024,
+    });
+    defer ctx.destroyBuffer(vertex_buffer);
+    std.debug.print("{}\n", .{vertex_buffer});
 
-    // var vertex_buffer = try ctx.createBuffer(.{}, .{ .size = 1024 });
-    // defer ctx.destroyBuffer(&vertex_buffer);
-    // std.debug.print("{}\n", .{vertex_buffer});
-
-    // var index_buffer = try ctx.createBuffer(.{}, .{ .size = 1024 });
-    // defer ctx.destroyBuffer(&index_buffer);
-    // std.debug.print("{}\n", .{index_buffer});
+    const index_buffer = try ctx.createBuffer(.{
+        .usage = .{
+            .transfer_dst = true,
+            .index = true,
+        },
+        .size = 1024,
+    });
+    defer ctx.destroyBuffer(index_buffer);
+    std.debug.print("{}\n", .{index_buffer});
 
     const vertex_shader = try ctx.createShader(
         .vertex,
@@ -55,19 +63,18 @@ pub fn main() !void {
     );
     defer ctx.destroyShader(fragment_shader);
 
-    // var color_target = try ctx.createTexture(.{ .dedicated = .if_preferred }, .{
-    //     .usage = .{
-    //         .color_attachment = true,
-    //         .sampled = true,
-    //     },
-    //     .image_type = .image_2d,
-    //     .mip_levels = 1,
-    //     .size = .{ 640, 480, 1 },
-    //     .queue = .graphics,
-    //     .format = .r8g8b8a8_srgb,
-    // });
-    // defer ctx.destroyTexture(&color_target);
-    // std.debug.print("{}\n", .{color_target});
+    const color_target = try ctx.createTexture(.{
+        .usage = .{
+            .color_attachment = true,
+            .sampled = true,
+        },
+        .image_type = .image_2d,
+        .mip_levels = 1,
+        .size = .{ 640, 480, 1 },
+        .format = .r8g8b8a8_srgb,
+    });
+    defer ctx.destroyTexture(color_target);
+    std.debug.print("{}\n", .{color_target});
 
     const pipeline = try ctx.createGraphicsPipeline(.{
         .vertex_shader = vertex_shader,
@@ -90,11 +97,19 @@ pub fn main() !void {
     });
     defer ctx.destroyGraphicsPipeline(pipeline);
 
-    const upload_allocator = ctx.stagingAllocator(.upload);
+    const upload_buffer = try ctx.createTransferBuffer(.upload, 1024 * 1024);
+    defer ctx.destroyTransferBuffer(upload_buffer);
+    const upload_allocator = upload_buffer.allocator();
+
     const vertex_staging = try upload_allocator.alloc([3]f32, 4);
-    defer upload_allocator.free(vertex_staging);
-    const index_staging = try upload_allocator.alloc(u32, 4);
-    defer upload_allocator.free(index_staging);
+    vertex_staging[0..4].* = .{
+        .{ -1, -1, 0.5 },
+        .{ 1, -1, 0.5 },
+        .{ -1, 1, 0.5 },
+        .{ 1, 1, 0.5 },
+    };
+    const index_staging = try upload_allocator.alloc(u32, 6);
+    index_staging[0..6].* = .{ 0, 2, 1, 2, 3, 1 };
 
     // {
     //     const command_buffer = ctx.acquireCommandBuffer(.graphics);

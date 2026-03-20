@@ -123,7 +123,7 @@ pub const Format = enum {
 };
 
 pub const ImageLayout = enum {
-    unknown,
+    undefined,
     general,
     read_only,
     attachment,
@@ -134,7 +134,7 @@ pub const ImageLayout = enum {
 
     fn vulkan(layout: ImageLayout) vk.ImageLayout {
         return switch (layout) {
-            .unknown => .undefined,
+            .undefined => .undefined,
             .general => .general,
             .read_only => .read_only_optimal,
             .attachment => .attachment_optimal,
@@ -168,11 +168,15 @@ const SampleCount = enum {
     }
 };
 
-const AllocationCreateInfo = struct {
-    dedicated: enum { if_required, if_preferred, always } = .if_required,
-};
-
 pub const BufferCreateInfo = struct {
+    usage: packed struct(u32) {
+        storage: bool = false,
+        transfer_src: bool = false,
+        transfer_dst: bool = false,
+        index: bool = false,
+        indirect: bool = false,
+        _padding: u27 = 0,
+    },
     size: usize,
 };
 
@@ -187,7 +191,6 @@ pub const TextureCreateInfo = struct {
         _padding: u26 = 0,
     },
     format: Format,
-    cubemap: bool = false,
     image_type: enum {
         // more distinct than the vulkan image type
         // to allow us to make a useful default view
@@ -223,7 +226,6 @@ pub const TextureCreateInfo = struct {
     mip_levels: u32,
     size: [3]u32, // x, y, z or depth
     samples: SampleCount = .@"1",
-    layout: ImageLayout = .unknown,
     views: []const ImageViewCreateInfo = &.{},
 };
 
@@ -287,6 +289,35 @@ const Shader = struct {
     module: vk.ShaderModule,
 };
 
+const Buffer = struct {
+    memory: union(enum) {
+        slab: struct {
+            allocation: Allocation,
+            slab: *Allocator.Slab,
+        },
+        dedicated: vk.DeviceMemory,
+    },
+    buffer: vk.Buffer,
+    size: usize,
+    buffer_device_address: u64,
+};
+
+const Texture = struct {
+    memory: union(enum) {
+        slab: struct {
+            allocation: Allocation,
+            slab: *Allocator.Slab,
+        },
+        dedicated: vk.DeviceMemory,
+    },
+    image: vk.Image,
+    default_view: vk.ImageView,
+    size: [3]u32,
+    layout: vk.ImageLayout,
+};
+
+const Sampler = struct {};
+
 pub const Context = struct {
     gpa: std.mem.Allocator,
     platform: Platform,
@@ -318,8 +349,13 @@ pub const Context = struct {
 
     shader_pool: std.heap.MemoryPool(Shader),
     graphics_pipeline_pool: std.heap.MemoryPool(GraphicsPipeline),
+    compute_pipeline_pool: std.heap.MemoryPool(ComputePipeline),
+    transfer_buffer_pool: std.heap.MemoryPool(TransferBuffer),
+    sampler_pool: std.heap.MemoryPool(Sampler),
+    texture_pool: std.heap.MemoryPool(Texture),
+    buffer_pool: std.heap.MemoryPool(Buffer),
 
-    staging_allocs: std.EnumArray(StagingAllocator.Usage, StagingAllocator),
+    // staging_allocs: std.EnumArray(StagingAllocator.Usage, StagingAllocator),
 
     pub fn create(
         gpa: std.mem.Allocator,
@@ -356,9 +392,14 @@ pub const Context = struct {
 
         ctx.shader_pool = .init(std.heap.page_allocator);
         ctx.graphics_pipeline_pool = .init(std.heap.page_allocator);
+        ctx.compute_pipeline_pool = .init(std.heap.page_allocator);
+        ctx.transfer_buffer_pool = .init(std.heap.page_allocator);
+        ctx.sampler_pool = .init(std.heap.page_allocator);
+        ctx.texture_pool = .init(std.heap.page_allocator);
+        ctx.buffer_pool = .init(std.heap.page_allocator);
 
-        ctx.staging_allocs.getPtr(.upload).* = try .init(ctx, .upload, 256 * 1024 * 1024, 3);
-        ctx.staging_allocs.getPtr(.download).* = try .init(ctx, .download, 256 * 1024 * 1024, 1);
+        // ctx.staging_allocs.getPtr(.upload).* = try .init(ctx, .upload, 256 * 1024 * 1024, 3);
+        // ctx.staging_allocs.getPtr(.download).* = try .init(ctx, .download, 256 * 1024 * 1024, 1);
 
         return ctx;
     }
@@ -368,11 +409,16 @@ pub const Context = struct {
             log.warn("Failed deviceWaitIdle in vulkan_context deinit: {}", .{e});
         };
 
-        ctx.staging_allocs.getPtr(.upload).deinit();
-        ctx.staging_allocs.getPtr(.download).deinit();
+        // ctx.staging_allocs.getPtr(.upload).deinit();
+        // ctx.staging_allocs.getPtr(.download).deinit();
 
         ctx.shader_pool.deinit();
         ctx.graphics_pipeline_pool.deinit();
+        ctx.compute_pipeline_pool.deinit();
+        ctx.transfer_buffer_pool.deinit();
+        ctx.sampler_pool.deinit();
+        ctx.texture_pool.deinit();
+        ctx.buffer_pool.deinit();
 
         ctx.allocator.deinit();
 
@@ -388,9 +434,9 @@ pub const Context = struct {
         ctx.gpa.destroy(ctx);
     }
 
-    pub fn stagingAllocator(ctx: *Context, usage: StagingAllocator.Usage) std.mem.Allocator {
-        return ctx.staging_allocs.getPtr(usage).allocator();
-    }
+    // pub fn stagingAllocator(ctx: *Context, usage: StagingAllocator.Usage) std.mem.Allocator {
+    //     return ctx.staging_allocs.getPtr(usage).allocator();
+    // }
 
     // pub fn acquireCommandBuffer(ctx: *Context, queue_type: QueueType) *CommandBuffer {
     //     std.debug.assert(ctx.active_command_buffer == null);
@@ -547,59 +593,71 @@ pub const Context = struct {
     //     );
     // }
 
-    // pub fn createBuffer(
-    //     ctx: *Context,
-    //     allocation_create_info: AllocationCreateInfo,
-    //     buffer_create_info: BufferCreateInfo,
-    // ) !Buffer {
-    //     return ctx.allocator.createBuffer(allocation_create_info, buffer_create_info);
-    // }
+    pub fn createBuffer(
+        ctx: *Context,
+        buffer_create_info: BufferCreateInfo,
+    ) !*Buffer {
+        const buffer = try ctx.buffer_pool.create();
+        errdefer ctx.buffer_pool.destroy(buffer);
+        buffer.* = try ctx.allocator.createBuffer(buffer_create_info);
+        return buffer;
+    }
 
-    // pub fn destroyBuffer(ctx: *Context, buffer: *Buffer) void {
-    //     switch (buffer.memory) {
-    //         .slab => |memory| {
-    //             ctx.device.destroyBuffer(buffer.buffer, null);
-    //             memory.slab.allocator.free(memory.allocation);
-    //         },
-    //         .dedicated => |memory| {
-    //             ctx.device.destroyBuffer(buffer.buffer, null);
-    //             ctx.device.freeMemory(memory, null);
-    //         },
-    //     }
-    //     buffer.* = undefined;
-    // }
+    pub fn destroyBuffer(ctx: *Context, buffer: *Buffer) void {
+        switch (buffer.memory) {
+            .slab => |memory| {
+                ctx.device.destroyBuffer(buffer.buffer, null);
+                memory.slab.allocator.free(memory.allocation);
+            },
+            .dedicated => |memory| {
+                ctx.device.destroyBuffer(buffer.buffer, null);
+                ctx.device.freeMemory(memory, null);
+            },
+        }
+        ctx.buffer_pool.destroy(buffer);
+    }
 
-    // pub fn createTexture(
-    //     ctx: *Context,
-    //     allocation_create_info: AllocationCreateInfo,
-    //     texture_create_info: TextureCreateInfo,
-    // ) !Texture {
-    //     return ctx.allocator.createTexture(allocation_create_info, texture_create_info);
-    // }
+    pub fn createTexture(
+        ctx: *Context,
+        texture_create_info: TextureCreateInfo,
+    ) !*Texture {
+        const texture = try ctx.texture_pool.create();
+        errdefer ctx.texture_pool.destroy(texture);
+        texture.* = try ctx.allocator.createTexture(texture_create_info);
+        return texture;
+    }
 
-    // pub fn destroyTexture(ctx: *Context, texture: *Texture) void {
-    //     switch (texture.memory) {
-    //         .slab => |memory| {
-    //             ctx.device.destroyImageView(texture.default_view, null);
-    //             ctx.device.destroyImage(texture.image, null);
-    //             memory.slab.allocator.free(memory.allocation);
-    //         },
-    //         .dedicated => |memory| {
-    //             ctx.device.destroyImageView(texture.default_view, null);
-    //             ctx.device.destroyImage(texture.image, null);
-    //             ctx.device.freeMemory(memory, null);
-    //         },
-    //     }
-    //     texture.* = undefined;
-    // }
+    pub fn destroyTexture(ctx: *Context, texture: *Texture) void {
+        switch (texture.memory) {
+            .slab => |memory| {
+                ctx.device.destroyImageView(texture.default_view, null);
+                ctx.device.destroyImage(texture.image, null);
+                memory.slab.allocator.free(memory.allocation);
+            },
+            .dedicated => |memory| {
+                ctx.device.destroyImageView(texture.default_view, null);
+                ctx.device.destroyImage(texture.image, null);
+                ctx.device.freeMemory(memory, null);
+            },
+        }
+        ctx.texture_pool.destroy(texture);
+    }
 
-    // pub fn createTransferBuffer(
-    //     ctx: *Context,
-    //     usage: TransferBuffer.Usage,
-    //     size: usize,
-    // ) !TransferBuffer {
-    //     return try .init(ctx, usage, size);
-    // }
+    pub fn createTransferBuffer(
+        ctx: *Context,
+        usage: TransferBuffer.Usage,
+        size: usize,
+    ) !*TransferBuffer {
+        const buffer = try ctx.transfer_buffer_pool.create();
+        errdefer ctx.transfer_buffer_pool.destroy(buffer);
+        buffer.* = try .init(ctx, usage, size);
+        return buffer;
+    }
+
+    pub fn destroyTransferBuffer(ctx: *Context, buffer: *TransferBuffer) void {
+        buffer.deinit();
+        ctx.transfer_buffer_pool.destroy(buffer);
+    }
 
     pub fn createGraphicsPipeline(
         ctx: *Context,
@@ -1264,19 +1322,6 @@ const Swapchain = struct {
     }
 };
 
-const Buffer = struct {
-    memory: union(enum) {
-        slab: struct {
-            allocation: Allocation,
-            slab: *Allocator.Slab,
-        },
-        dedicated: vk.DeviceMemory,
-    },
-    buffer: vk.Buffer,
-    size: usize,
-    buffer_device_address: u64,
-};
-
 const Allocator = struct {
     const Slab = struct {
         const slab_size = 256 * 1024 * 1024;
@@ -1316,15 +1361,15 @@ const Allocator = struct {
         const buffer_info = vk.BufferCreateInfo{
             .size = buffer_create_info.size,
             .usage = .{
-                .transfer_src_bit = true,
-                .transfer_dst_bit = true,
-                .storage_buffer_bit = true,
-                .index_buffer_bit = true,
-                .indirect_buffer_bit = true,
+                .transfer_src_bit = buffer_create_info.usage.transfer_src,
+                .transfer_dst_bit = buffer_create_info.usage.transfer_dst,
+                .storage_buffer_bit = buffer_create_info.usage.storage,
+                .index_buffer_bit = buffer_create_info.usage.index,
+                .indirect_buffer_bit = buffer_create_info.usage.indirect,
                 .shader_device_address_bit = true,
             },
             .sharing_mode = .exclusive,
-            .p_queue_family_indices = @ptrCast(allocator.ctx.queue_family),
+            .p_queue_family_indices = @ptrCast(&allocator.ctx.queue_family),
             .queue_family_index_count = 1,
         };
         const buffer = try allocator.ctx.device.createBuffer(&buffer_info, null);
@@ -1416,12 +1461,6 @@ const Allocator = struct {
             .buffer = buffer,
         });
 
-        const offset = suballoc.allocation.offset * Slab.granularity;
-        const mapped: ?[]u8 = if (suballoc.slab.mapped_memory) |mm|
-            mm[offset .. offset + buffer_create_info.size]
-        else
-            null;
-
         return .{
             .memory = .{ .slab = .{
                 .allocation = suballoc.allocation,
@@ -1430,7 +1469,6 @@ const Allocator = struct {
             .buffer = buffer,
             .size = buffer_create_info.size,
             .buffer_device_address = address,
-            .mapped_memory = mapped,
         };
     }
 
@@ -1505,190 +1543,190 @@ const Allocator = struct {
         };
     }
 
-    // fn createTexture(
-    //     allocator: *Allocator,
-    //     allocation_create_info: AllocationCreateInfo,
-    //     texture_create_info: TextureCreateInfo,
-    // ) !Texture {
-    //     const multiformat: bool = blk: {
-    //         const base_format = texture_create_info.format;
-    //         for (texture_create_info.views) |view| {
-    //             if (view.format) |format| {
-    //                 if (format != base_format) break :blk true;
-    //             }
-    //         }
-    //         break :blk false;
-    //     };
+    fn createTexture(
+        allocator: *Allocator,
+        texture_create_info: TextureCreateInfo,
+    ) !Texture {
+        const multiformat: bool = blk: {
+            const base_format = texture_create_info.format;
+            for (texture_create_info.views) |view| {
+                if (view.format) |format| {
+                    if (format != base_format) break :blk true;
+                }
+            }
+            break :blk false;
+        };
 
-    //     const arrayview: bool = blk: {
-    //         if (texture_create_info.image_type != .image_3d) break :blk false;
-    //         for (texture_create_info.views) |view| {
-    //             if (view.view_type == .view_2d_array) break :blk true;
-    //         }
-    //         break :blk false;
-    //     };
+        const arrayview: bool = blk: {
+            if (texture_create_info.image_type != .image_3d) break :blk false;
+            for (texture_create_info.views) |view| {
+                if (view.view_type == .view_2d_array) break :blk true;
+            }
+            break :blk false;
+        };
 
-    //     const image_info: vk.ImageCreateInfo = .{
-    //         .flags = .{
-    //             .mutable_format_bit = multiformat,
-    //             .cube_compatible_bit = texture_create_info.cubemap,
-    //             .@"2d_array_compatible_bit" = arrayview,
-    //         },
-    //         .image_type = texture_create_info.image_type.vulkanImageType(),
-    //         .format = texture_create_info.format.vulkan(),
-    //         .extent = .{
-    //             .width = texture_create_info.size[0],
-    //             .height = texture_create_info.size[1],
-    //             .depth = if (texture_create_info.image_type == .image_3d)
-    //                 texture_create_info.size[2]
-    //             else
-    //                 1,
-    //         },
-    //         .mip_levels = texture_create_info.mip_levels,
-    //         .array_layers = if (texture_create_info.image_type == .image_3d)
-    //             1
-    //         else
-    //             texture_create_info.size[2],
-    //         .samples = texture_create_info.samples.vulkan(),
-    //         .tiling = .optimal,
-    //         .usage = .{
-    //             .storage_bit = texture_create_info.usage.storage,
-    //             .sampled_bit = texture_create_info.usage.sampled,
-    //             .transfer_src_bit = texture_create_info.usage.transfer_src,
-    //             .transfer_dst_bit = texture_create_info.usage.transfer_dst,
-    //             .color_attachment_bit = texture_create_info.usage.color_attachment,
-    //             .depth_stencil_attachment_bit = texture_create_info.usage.depth_stencil_attachment,
-    //         },
-    //         .sharing_mode = .exclusive,
-    //         .queue_family_index_count = 1,
-    //         .p_queue_family_indices = @ptrCast(allocator.ctx.queue_families.getPtrConst(
-    //             texture_create_info.queue,
-    //         )),
-    //         .initial_layout = texture_create_info.layout.vulkan(),
-    //     };
-    //     const image = try allocator.ctx.device.createImage(&image_info, null);
-    //     errdefer allocator.ctx.device.destroyImage(image, null);
+        const image_info: vk.ImageCreateInfo = .{
+            .flags = .{
+                .mutable_format_bit = multiformat,
+                .cube_compatible_bit = texture_create_info.image_type == .image_cube or
+                    texture_create_info.image_type == .image_cube_array,
+                .@"2d_array_compatible_bit" = arrayview,
+            },
+            .image_type = texture_create_info.image_type.vulkanImageType(),
+            .format = texture_create_info.format.vulkan(),
+            .extent = .{
+                .width = texture_create_info.size[0],
+                .height = texture_create_info.size[1],
+                .depth = if (texture_create_info.image_type == .image_3d)
+                    texture_create_info.size[2]
+                else
+                    1,
+            },
+            .mip_levels = texture_create_info.mip_levels,
+            .array_layers = if (texture_create_info.image_type == .image_3d)
+                1
+            else
+                texture_create_info.size[2],
+            .samples = texture_create_info.samples.vulkan(),
+            .tiling = .optimal,
+            .usage = .{
+                .storage_bit = texture_create_info.usage.storage,
+                .sampled_bit = texture_create_info.usage.sampled,
+                .transfer_src_bit = texture_create_info.usage.transfer_src,
+                .transfer_dst_bit = texture_create_info.usage.transfer_dst,
+                .color_attachment_bit = texture_create_info.usage.color_attachment,
+                .depth_stencil_attachment_bit = texture_create_info.usage.depth_stencil_attachment,
+            },
+            .sharing_mode = .exclusive,
+            .p_queue_family_indices = @ptrCast(&allocator.ctx.queue_family),
+            .queue_family_index_count = 1,
+            .initial_layout = .undefined,
+        };
+        const image = try allocator.ctx.device.createImage(&image_info, null);
+        errdefer allocator.ctx.device.destroyImage(image, null);
 
-    //     var dedicated_memreq: vk.MemoryDedicatedRequirements = .{
-    //         .prefers_dedicated_allocation = .false,
-    //         .requires_dedicated_allocation = .false,
-    //     };
-    //     var image_memreq: vk.MemoryRequirements2 = .{
-    //         .p_next = &dedicated_memreq,
-    //         .memory_requirements = undefined,
-    //     };
-    //     allocator.ctx.device.getImageMemoryRequirements2(&.{
-    //         .image = image,
-    //     }, &image_memreq);
+        var dedicated_memreq: vk.MemoryDedicatedRequirements = .{
+            .prefers_dedicated_allocation = .false,
+            .requires_dedicated_allocation = .false,
+        };
+        var image_memreq: vk.MemoryRequirements2 = .{
+            .p_next = &dedicated_memreq,
+            .memory_requirements = undefined,
+        };
+        allocator.ctx.device.getImageMemoryRequirements2(&.{
+            .image = image,
+        }, &image_memreq);
 
-    //     std.debug.print("{}\n", .{image_memreq});
-    //     std.debug.print("{}\n", .{dedicated_memreq});
+        std.debug.print("{}\n", .{image_memreq});
+        std.debug.print("{}\n", .{dedicated_memreq});
 
-    //     var memory_type_index: u32 = undefined;
-    //     var best_score: i32 = -999;
+        var memory_type_index: u32 = undefined;
+        var best_score: i32 = -999;
 
-    //     const memory_types = allocator.ctx.physical_device_memory_properties.memory_types;
-    //     const memory_type_count = allocator.ctx.physical_device_memory_properties.memory_type_count;
-    //     for (memory_types[0..memory_type_count], 0..) |memory_type, i| {
-    //         // hard requirements
-    //         if (image_memreq.memory_requirements.memory_type_bits &
-    //             (@as(u32, 1) << @intCast(i)) == 0) continue;
-    //         // soft requirements
-    //         var score: i32 = 0;
-    //         if (memory_type.property_flags.device_local_bit) score += 1;
-    //         if (score > best_score) {
-    //             best_score = score;
-    //             memory_type_index = @intCast(i);
-    //         }
-    //     }
+        const memory_types = allocator.ctx.physical_device_memory_properties.memory_types;
+        const memory_type_count = allocator.ctx.physical_device_memory_properties.memory_type_count;
+        for (memory_types[0..memory_type_count], 0..) |memory_type, i| {
+            // hard requirements
+            if (image_memreq.memory_requirements.memory_type_bits &
+                (@as(u32, 1) << @intCast(i)) == 0) continue;
+            // soft requirements
+            var score: i32 = 0;
+            if (memory_type.property_flags.device_local_bit) score += 1;
+            if (score > best_score) {
+                best_score = score;
+                memory_type_index = @intCast(i);
+            }
+        }
 
-    //     var texture: Texture = undefined;
-    //     texture.image = image;
+        var texture: Texture = undefined;
+        texture.image = image;
 
-    //     if (allocation_create_info.dedicated == .always or
-    //         dedicated_memreq.requires_dedicated_allocation == .true or
-    //         (dedicated_memreq.prefers_dedicated_allocation == .true and
-    //             allocation_create_info.dedicated == .if_preferred) or
-    //         image_memreq.memory_requirements.size > Slab.slab_size / 2)
-    //     {
-    //         // dedicated allocation
-    //         const dedicated_info: vk.MemoryDedicatedAllocateInfo = .{
-    //             .image = image,
-    //         };
-    //         const alloc_flags: vk.MemoryAllocateFlagsInfo = .{
-    //             .device_mask = 0,
-    //             .p_next = &dedicated_info,
-    //         };
-    //         const memory = try allocator.ctx.device.allocateMemory(&.{
-    //             .allocation_size = image_memreq.memory_requirements.size,
-    //             .memory_type_index = memory_type_index,
-    //             .p_next = &alloc_flags,
-    //         }, null);
-    //         errdefer allocator.ctx.device.freeMemory(memory, null);
-    //         try allocator.ctx.device.bindImageMemory(image, memory, 0);
+        if (dedicated_memreq.requires_dedicated_allocation == .true or
+            (dedicated_memreq.prefers_dedicated_allocation == .true and
+                (texture_create_info.usage.color_attachment == true or
+                    texture_create_info.usage.depth_stencil_attachment == true)) or
+            image_memreq.memory_requirements.size > Slab.slab_size / 2)
+        {
+            // dedicated allocation
+            const dedicated_info: vk.MemoryDedicatedAllocateInfo = .{
+                .image = image,
+            };
+            const alloc_flags: vk.MemoryAllocateFlagsInfo = .{
+                .device_mask = 0,
+                .p_next = &dedicated_info,
+            };
+            const memory = try allocator.ctx.device.allocateMemory(&.{
+                .allocation_size = image_memreq.memory_requirements.size,
+                .memory_type_index = memory_type_index,
+                .p_next = &alloc_flags,
+            }, null);
+            errdefer allocator.ctx.device.freeMemory(memory, null);
+            try allocator.ctx.device.bindImageMemory(image, memory, 0);
 
-    //         texture.memory = .{ .dedicated = memory };
-    //     } else {
-    //         // suballocate
-    //         const suballoc = try allocator.alloc(
-    //             memory_type_index,
-    //             memory_types[memory_type_index].property_flags,
-    //             .{ .device_address_bit = true },
-    //             if (image_memreq.memory_requirements.alignment <= Slab.granularity)
-    //                 image_memreq.memory_requirements.size
-    //             else
-    //                 image_memreq.memory_requirements.size + image_memreq.memory_requirements.alignment,
-    //         );
+            texture.memory = .{ .dedicated = memory };
+        } else {
+            // suballocate
+            const suballoc = try allocator.alloc(
+                memory_type_index,
+                memory_types[memory_type_index].property_flags,
+                .{ .device_address_bit = true },
+                if (image_memreq.memory_requirements.alignment <= Slab.granularity)
+                    image_memreq.memory_requirements.size
+                else
+                    image_memreq.memory_requirements.size + image_memreq.memory_requirements.alignment,
+            );
 
-    //         try allocator.ctx.device.bindImageMemory(
-    //             image,
-    //             suballoc.slab.memory,
-    //             std.mem.alignForward(
-    //                 u32,
-    //                 suballoc.allocation.offset,
-    //                 @intCast(image_memreq.memory_requirements.alignment),
-    //             ),
-    //         );
+            try allocator.ctx.device.bindImageMemory(
+                image,
+                suballoc.slab.memory,
+                std.mem.alignForward(
+                    u32,
+                    suballoc.allocation.offset,
+                    @intCast(image_memreq.memory_requirements.alignment),
+                ),
+            );
 
-    //         texture.memory = .{ .slab = .{
-    //             .allocation = suballoc.allocation,
-    //             .slab = suballoc.slab,
-    //         } };
-    //     }
+            texture.memory = .{ .slab = .{
+                .allocation = suballoc.allocation,
+                .slab = suballoc.slab,
+            } };
+        }
 
-    //     const default_view_info: vk.ImageViewCreateInfo = .{
-    //         .image = image,
-    //         .view_type = texture_create_info.image_type.vulkanImageViewType(),
-    //         .format = texture_create_info.format.vulkan(),
-    //         .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
-    //         .subresource_range = .{
-    //             .base_mip_level = 0,
-    //             .level_count = texture_create_info.mip_levels,
-    //             .base_array_layer = 0,
-    //             .layer_count = texture_create_info.size[2],
-    //             .aspect_mask = switch (texture_create_info.format) {
-    //                 .s8_uint => .{ .stencil_bit = true },
-    //                 .d16_unorm,
-    //                 .d16_unorm_s8_uint,
-    //                 .d24_unorm_s8_uint,
-    //                 .d32_sfloat,
-    //                 .d32_sfloat_s8_uint,
-    //                 => .{ .depth_bit = true },
-    //                 else => .{ .color_bit = true },
-    //             },
-    //         },
-    //     };
-    //     const default_view = try allocator.ctx.device.createImageView(&default_view_info, null);
-    //     errdefer allocator.ctx.device.destroyImageView(default_view, null);
+        const default_view_info: vk.ImageViewCreateInfo = .{
+            .image = image,
+            .view_type = texture_create_info.image_type.vulkanImageViewType(),
+            .format = texture_create_info.format.vulkan(),
+            .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
+            .subresource_range = .{
+                .base_mip_level = 0,
+                .level_count = texture_create_info.mip_levels,
+                .base_array_layer = 0,
+                .layer_count = texture_create_info.size[2],
+                .aspect_mask = switch (texture_create_info.format) {
+                    .s8_uint => .{ .stencil_bit = true },
+                    .d16_unorm,
+                    .d16_unorm_s8_uint,
+                    .d24_unorm_s8_uint,
+                    .d32_sfloat,
+                    .d32_sfloat_s8_uint,
+                    => .{ .depth_bit = true },
+                    else => .{ .color_bit = true },
+                },
+            },
+        };
+        const default_view = try allocator.ctx.device.createImageView(&default_view_info, null);
+        errdefer allocator.ctx.device.destroyImageView(default_view, null);
 
-    //     texture.default_view = default_view;
-    //     texture.size = texture_create_info.size;
-    //     texture.layout = texture_create_info.layout.vulkan();
-    //     texture.queue = texture_create_info.queue;
+        // TODO create the other views
 
-    //     return texture;
-    // }
+        texture.default_view = default_view;
+        texture.size = texture_create_info.size;
+        texture.layout = .undefined;
+
+        return texture;
+    }
 };
+
 const GraphicsPipeline = struct {
     const StaticState = struct {
         const PolygonMode = enum {
@@ -2148,311 +2186,402 @@ const GraphicsPipeline = struct {
 
 const ComputePipeline = struct {};
 
-const StagingAllocator = struct {
+const TransferBuffer = struct {
     const Usage = enum { upload, download };
 
-    const Metadata = struct {
-        allocation: Allocation,
-    };
-
-    const Slab = struct {
-        granularity: u64,
-
-        next: ?*Slab,
-
-        memory: vk.DeviceMemory,
-        buffer: vk.Buffer,
-        mapped_memory: []u8,
-
-        allocator: OffsetAllocator,
-        metadata: []Metadata,
-
-        fn init(ctx: *Context, size: u64, usage: Usage) !Slab {
-            const buffer_info = vk.BufferCreateInfo{
-                .size = size,
-                .usage = .{
-                    .transfer_src_bit = usage == .upload,
-                    .transfer_dst_bit = usage == .download,
-                },
-                .sharing_mode = .exclusive,
-                .p_queue_family_indices = @ptrCast(&ctx.queue_family),
-                .queue_family_index_count = 1,
-            };
-            const buffer = try ctx.device.createBuffer(&buffer_info, null);
-            errdefer ctx.device.destroyBuffer(buffer, null);
-
-            const optimal_alignment = ctx.physical_device_properties.limits
-                .optimal_buffer_copy_offset_alignment;
-            var buffer_memreq = ctx.device.getBufferMemoryRequirements(buffer);
-            buffer_memreq.alignment = @max(buffer_memreq.alignment, optimal_alignment);
-
-            var memory_type_index: ?u32 = null;
-            var best_score: i32 = -999;
-
-            for (ctx.physical_device_memory_properties.memory_types[0..ctx.physical_device_memory_properties
-                .memory_type_count], 0..) |memory_type, i|
-            {
-                // hard requirements
-                if (buffer_memreq.memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
-                if (!memory_type.property_flags.host_visible_bit) continue;
-                if (!memory_type.property_flags.host_coherent_bit) continue;
-                // soft requirements
-                var score: i32 = 0;
-                if (memory_type.property_flags.device_local_bit) score -= 1;
-                if (usage == .download and memory_type.property_flags.host_cached_bit) score += 2;
-                if (score > best_score) {
-                    best_score = score;
-                    memory_type_index = @intCast(i);
-                }
-            }
-
-            // vulkan spec
-            // There must be at least one memory type with both the
-            // VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT and VK_MEMORY_PROPERTY_HOST_COHERENT_BIT bits
-            // set in its propertyFlags
-            // so this should always work
-            std.debug.assert(memory_type_index != null);
-
-            const alloc_info = vk.MemoryAllocateInfo{
-                .allocation_size = buffer_memreq.size,
-                .memory_type_index = memory_type_index.?,
-            };
-            const memory = try ctx.device.allocateMemory(&alloc_info, null);
-            errdefer ctx.device.freeMemory(memory, null);
-
-            try ctx.device.bindBufferMemory(buffer, memory, 0);
-            const buffer_ptr: [*]u8 = @ptrCast((try ctx.device.mapMemory(memory, 0, size, .{})).?);
-
-            const granularity = @max(optimal_alignment, 4096);
-            std.debug.assert(size % granularity == 0);
-
-            const metadata = try ctx.gpa.alloc(Metadata, size / granularity);
-            errdefer ctx.gpa.free(metadata);
-            var suballoc: OffsetAllocator = try .init(
-                ctx.gpa,
-                @intCast(size / granularity),
-                @intCast(size / granularity),
-            );
-            errdefer suballoc.deinit(ctx.gpa);
-
-            return .{
-                .granularity = granularity,
-                .next = null,
-                .memory = memory,
-                .buffer = buffer,
-                .mapped_memory = buffer_ptr[0..size],
-                .allocator = suballoc,
-                .metadata = metadata,
-            };
-        }
-
-        fn deinit(slab: *Slab, ctx: *Context) void {
-            ctx.device.destroyBuffer(slab.buffer, null);
-            ctx.device.freeMemory(slab.memory, null);
-            slab.allocator.deinit(ctx.gpa);
-            ctx.gpa.free(slab.metadata);
-        }
-
-        fn alloc(slab: *Slab, size: u64) ?[]u8 {
-            const slots = (size + slab.granularity - 1) / slab.granularity;
-            const allocation = slab.allocator.allocate(@intCast(slots)) catch return null;
-            const bytes = slab.mapped_memory[allocation.offset * slab.granularity .. allocation.offset * slab.granularity + size];
-            slab.getMetadata(bytes).* = .{
-                .allocation = allocation,
-            };
-            return bytes;
-        }
-
-        fn free(slab: *Slab, ptr: anytype) void {
-            const metadata = slab.getMetadata(ptr);
-            slab.allocator.free(metadata.allocation);
-        }
-
-        fn getMetadata(slab: *Slab, ptr: anytype) *Metadata {
-            const info = @typeInfo(@TypeOf(ptr));
-            if (info != .pointer) @compileError("not a pointer or slice");
-            const addr = switch (info.pointer.size) {
-                .slice => @intFromPtr(ptr.ptr),
-                else => @intFromPtr(ptr),
-            };
-            return &slab.metadata[(addr - @intFromPtr(slab.mapped_memory.ptr)) / slab.granularity];
-        }
-
-        fn contains(slab: *Slab, addr: usize) bool {
-            const slab_addr = @intFromPtr(slab.mapped_memory.ptr);
-            return addr >= slab_addr and addr < slab_addr + slab.mapped_memory.len;
-        }
-    };
-
     ctx: *Context,
-    slabs: ?*Slab,
 
-    fn init(ctx: *Context, usage: Usage, size: u64, slab_count: usize) !StagingAllocator {
-        var staging_alloc: StagingAllocator = .{
-            .ctx = ctx,
-            .slabs = null,
-        };
+    memory: vk.DeviceMemory,
+    buffer: vk.Buffer,
+    mapped_memory: []u8,
 
-        // FIXME proper cleanup on fail
-        for (0..slab_count) |_| {
-            const slab = try ctx.gpa.create(Slab);
-            slab.* = try .init(ctx, size, usage);
-            slab.next = staging_alloc.slabs;
-            staging_alloc.slabs = slab;
-        }
+    suballoc: std.heap.FixedBufferAllocator,
 
-        return staging_alloc;
-    }
-
-    fn deinit(staging_alloc: *StagingAllocator) void {
-        var walk: ?*Slab = staging_alloc.slabs;
-        while (walk) |slab| {
-            walk = slab.next;
-            slab.deinit(staging_alloc.ctx);
-            staging_alloc.ctx.gpa.destroy(slab);
-        }
-    }
-
-    fn getTransferInfo(staging_alloc: *StagingAllocator, ptr: anytype) struct {
-        buffer: vk.Buffer,
-        dst_offset: u64,
-        size: u64,
-    } {
-        const info = @typeInfo(@TypeOf(ptr));
-        if (info != .pointer) @compileError("not a pointer or slice");
-        const addr = switch (info.pointer.size) {
-            .slice => @intFromPtr(ptr.ptr),
-            else => @intFromPtr(ptr),
-        };
-        const size = switch (info.pointer.size) {
-            .slice => @sizeOf(info.pointer.child) * ptr.len,
-            else => @sizeOf(info.pointer.child),
-        };
-        const slab = staging_alloc.getSlabOf(addr);
-        return .{
-            .buffer = slab.buffer,
+    fn init(ctx: *Context, usage: Usage, size: usize) !TransferBuffer {
+        const buffer_info = vk.BufferCreateInfo{
             .size = size,
-            .dst_offset = addr - @intFromPtr(slab.mapped_memory.ptr),
+            .usage = .{
+                .transfer_src_bit = usage == .upload,
+                .transfer_dst_bit = usage == .download,
+            },
+            .sharing_mode = .exclusive,
+            .p_queue_family_indices = @ptrCast(&ctx.queue_family),
+            .queue_family_index_count = 1,
         };
-    }
+        const buffer = try ctx.device.createBuffer(&buffer_info, null);
+        errdefer ctx.device.destroyBuffer(buffer, null);
 
-    fn getSlabOf(staging_alloc: *StagingAllocator, addr: usize) *Slab {
-        var walk: ?*Slab = staging_alloc.slabs;
-        while (walk) |slab| {
-            walk = slab.next;
-            if (slab.contains(addr)) return slab;
+        const optimal_alignment = ctx.physical_device_properties.limits
+            .optimal_buffer_copy_offset_alignment;
+        var buffer_memreq = ctx.device.getBufferMemoryRequirements(buffer);
+        buffer_memreq.alignment = @max(buffer_memreq.alignment, optimal_alignment);
+
+        var memory_type_index: ?u32 = null;
+        var best_score: i32 = -999;
+
+        for (ctx.physical_device_memory_properties.memory_types[0..ctx.physical_device_memory_properties
+            .memory_type_count], 0..) |memory_type, i|
+        {
+            // hard requirements
+            if (buffer_memreq.memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
+            if (!memory_type.property_flags.host_visible_bit) continue;
+            if (!memory_type.property_flags.host_coherent_bit) continue;
+            // soft requirements
+            var score: i32 = 0;
+            if (memory_type.property_flags.device_local_bit) score -= 1;
+            if (usage == .download and memory_type.property_flags.host_cached_bit) score += 2;
+            if (score > best_score) {
+                best_score = score;
+                memory_type_index = @intCast(i);
+            }
         }
-        unreachable; // pointer was not allocated by this allocator or has already been freed
-    }
 
-    fn allocator(staging_alloc: *StagingAllocator) std.mem.Allocator {
+        // vulkan spec
+        // There must be at least one memory type with both the
+        // VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT and VK_MEMORY_PROPERTY_HOST_COHERENT_BIT bits
+        // set in its propertyFlags
+        // so this should always work
+        std.debug.assert(memory_type_index != null);
+
+        const alloc_info = vk.MemoryAllocateInfo{
+            .allocation_size = buffer_memreq.size,
+            .memory_type_index = memory_type_index.?,
+        };
+        const memory = try ctx.device.allocateMemory(&alloc_info, null);
+        errdefer ctx.device.freeMemory(memory, null);
+
+        try ctx.device.bindBufferMemory(buffer, memory, 0);
+        const buffer_ptr: [*]u8 = @ptrCast((try ctx.device.mapMemory(memory, 0, size, .{})).?);
+
         return .{
-            .ptr = staging_alloc,
-            .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free },
+            .ctx = ctx,
+            .memory = memory,
+            .buffer = buffer,
+            .mapped_memory = buffer_ptr[0..size],
+            .suballoc = .init(buffer_ptr[0..size]),
         };
     }
 
-    /// Return a pointer to `len` bytes with specified `alignment`, or return
-    /// `null` indicating the allocation failed.
-    ///
-    /// `ret_addr` is optionally provided as the first return address of the
-    /// allocation call stack. If the value is `0` it means no return address
-    /// has been provided.
-    fn alloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
-        _ = alignment;
-        _ = ret_addr;
-        const staging_alloc: *StagingAllocator = @ptrCast(@alignCast(ptr));
-
-        var walk: ?*Slab = staging_alloc.slabs;
-        while (walk) |slab| {
-            walk = slab.next;
-            const bytes = slab.alloc(len) orelse continue;
-            return bytes.ptr;
-        }
-
-        return null;
+    fn deinit(buffer: *TransferBuffer) void {
+        buffer.ctx.device.destroyBuffer(buffer.buffer, null);
+        buffer.ctx.device.freeMemory(buffer.memory, null);
+        buffer.* = undefined;
     }
 
-    /// Attempt to expand or shrink memory in place.
-    ///
-    /// `memory.len` must equal the length requested from the most recent
-    /// successful call to `alloc`, `resize`, or `remap`. `alignment` must
-    /// equal the same value that was passed as the `alignment` parameter to
-    /// the original `alloc` call.
-    ///
-    /// A result of `true` indicates the resize was successful and the
-    /// allocation now has the same address but a size of `new_len`. `false`
-    /// indicates the resize could not be completed without moving the
-    /// allocation to a different address.
-    ///
-    /// `new_len` must be greater than zero.
-    ///
-    /// `ret_addr` is optionally provided as the first return address of the
-    /// allocation call stack. If the value is `0` it means no return address
-    /// has been provided.
-    fn resize(
-        ptr: *anyopaque,
-        memory: []u8,
-        alignment: std.mem.Alignment,
-        new_len: usize,
-        ret_addr: usize,
-    ) bool {
-        const staging_alloc: *StagingAllocator = @ptrCast(@alignCast(ptr));
-        _ = staging_alloc;
-        _ = alignment;
-        _ = ret_addr;
-        return new_len <= memory.len; // don't even try, but shrinking works by definition
+    pub fn allocator(buffer: *TransferBuffer) std.mem.Allocator {
+        return buffer.suballoc.allocator();
     }
 
-    /// Attempt to expand or shrink memory, allowing relocation.
-    ///
-    /// `memory.len` must equal the length requested from the most recent
-    /// successful call to `alloc`, `resize`, or `remap`. `alignment` must
-    /// equal the same value that was passed as the `alignment` parameter to
-    /// the original `alloc` call.
-    ///
-    /// A non-`null` return value indicates the resize was successful. The
-    /// allocation may have same address, or may have been relocated. In either
-    /// case, the allocation now has size of `new_len`. A `null` return value
-    /// indicates that the resize would be equivalent to allocating new memory,
-    /// copying the bytes from the old memory, and then freeing the old memory.
-    /// In such case, it is more efficient for the caller to perform the copy.
-    ///
-    /// `new_len` must be greater than zero.
-    ///
-    /// `ret_addr` is optionally provided as the first return address of the
-    /// allocation call stack. If the value is `0` it means no return address
-    /// has been provided.
-    fn remap(
-        ptr: *anyopaque,
-        memory: []u8,
-        alignment: std.mem.Alignment,
-        new_len: usize,
-        ret_addr: usize,
-    ) ?[*]u8 {
-        const staging_alloc: *StagingAllocator = @ptrCast(@alignCast(ptr));
-        _ = staging_alloc;
-        _ = alignment;
-        _ = ret_addr;
-        if (new_len < memory.len) return memory.ptr; // just allow shrinking
-        return null;
-    }
-
-    /// Free and invalidate a region of memory.
-    ///
-    /// `memory.len` must equal the length requested from the most recent
-    /// successful call to `alloc`, `resize`, or `remap`. `alignment` must
-    /// equal the same value that was passed as the `alignment` parameter to
-    /// the original `alloc` call.
-    ///
-    /// `ret_addr` is optionally provided as the first return address of the
-    /// allocation call stack. If the value is `0` it means no return address
-    /// has been provided.
-    fn free(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
-        _ = alignment;
-        _ = ret_addr;
-        const staging_alloc: *StagingAllocator = @ptrCast(@alignCast(ptr));
-        const slab = staging_alloc.getSlabOf(@intFromPtr(memory.ptr));
-        slab.free(memory);
+    pub fn reset(buffer: *TransferBuffer) void {
+        buffer.suballoc.reset();
     }
 };
+
+// const StagingAllocator = struct {
+//     const Usage = enum { upload, download };
+
+//     const Metadata = struct {
+//         allocation: Allocation,
+//     };
+
+//     const Slab = struct {
+//         granularity: u64,
+
+//         next: ?*Slab,
+
+//         memory: vk.DeviceMemory,
+//         buffer: vk.Buffer,
+//         mapped_memory: []u8,
+
+//         allocator: OffsetAllocator,
+//         metadata: []Metadata,
+
+//         fn init(ctx: *Context, size: u64, usage: Usage) !Slab {
+//             const buffer_info = vk.BufferCreateInfo{
+//                 .size = size,
+//                 .usage = .{
+//                     .transfer_src_bit = usage == .upload,
+//                     .transfer_dst_bit = usage == .download,
+//                 },
+//                 .sharing_mode = .exclusive,
+//                 .p_queue_family_indices = @ptrCast(&ctx.queue_family),
+//                 .queue_family_index_count = 1,
+//             };
+//             const buffer = try ctx.device.createBuffer(&buffer_info, null);
+//             errdefer ctx.device.destroyBuffer(buffer, null);
+
+//             const optimal_alignment = ctx.physical_device_properties.limits
+//                 .optimal_buffer_copy_offset_alignment;
+//             var buffer_memreq = ctx.device.getBufferMemoryRequirements(buffer);
+//             buffer_memreq.alignment = @max(buffer_memreq.alignment, optimal_alignment);
+
+//             var memory_type_index: ?u32 = null;
+//             var best_score: i32 = -999;
+
+//             for (ctx.physical_device_memory_properties.memory_types[0..ctx.physical_device_memory_properties
+//                 .memory_type_count], 0..) |memory_type, i|
+//             {
+//                 // hard requirements
+//                 if (buffer_memreq.memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
+//                 if (!memory_type.property_flags.host_visible_bit) continue;
+//                 if (!memory_type.property_flags.host_coherent_bit) continue;
+//                 // soft requirements
+//                 var score: i32 = 0;
+//                 if (memory_type.property_flags.device_local_bit) score -= 1;
+//                 if (usage == .download and memory_type.property_flags.host_cached_bit) score += 2;
+//                 if (score > best_score) {
+//                     best_score = score;
+//                     memory_type_index = @intCast(i);
+//                 }
+//             }
+
+//             // vulkan spec
+//             // There must be at least one memory type with both the
+//             // VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT and VK_MEMORY_PROPERTY_HOST_COHERENT_BIT bits
+//             // set in its propertyFlags
+//             // so this should always work
+//             std.debug.assert(memory_type_index != null);
+
+//             const alloc_info = vk.MemoryAllocateInfo{
+//                 .allocation_size = buffer_memreq.size,
+//                 .memory_type_index = memory_type_index.?,
+//             };
+//             const memory = try ctx.device.allocateMemory(&alloc_info, null);
+//             errdefer ctx.device.freeMemory(memory, null);
+
+//             try ctx.device.bindBufferMemory(buffer, memory, 0);
+//             const buffer_ptr: [*]u8 = @ptrCast((try ctx.device.mapMemory(memory, 0, size, .{})).?);
+
+//             const granularity = @max(optimal_alignment, 4096);
+//             std.debug.assert(size % granularity == 0);
+
+//             const metadata = try ctx.gpa.alloc(Metadata, size / granularity);
+//             errdefer ctx.gpa.free(metadata);
+//             var suballoc: OffsetAllocator = try .init(
+//                 ctx.gpa,
+//                 @intCast(size / granularity),
+//                 @intCast(size / granularity),
+//             );
+//             errdefer suballoc.deinit(ctx.gpa);
+
+//             return .{
+//                 .granularity = granularity,
+//                 .next = null,
+//                 .memory = memory,
+//                 .buffer = buffer,
+//                 .mapped_memory = buffer_ptr[0..size],
+//                 .allocator = suballoc,
+//                 .metadata = metadata,
+//             };
+//         }
+
+//         fn deinit(slab: *Slab, ctx: *Context) void {
+//             ctx.device.destroyBuffer(slab.buffer, null);
+//             ctx.device.freeMemory(slab.memory, null);
+//             slab.allocator.deinit(ctx.gpa);
+//             ctx.gpa.free(slab.metadata);
+//         }
+
+//         fn alloc(slab: *Slab, size: u64) ?[]u8 {
+//             const slots = (size + slab.granularity - 1) / slab.granularity;
+//             const allocation = slab.allocator.allocate(@intCast(slots)) catch return null;
+//             const bytes = slab.mapped_memory[allocation.offset * slab.granularity .. allocation.offset * slab.granularity + size];
+//             slab.getMetadata(bytes).* = .{
+//                 .allocation = allocation,
+//             };
+//             return bytes;
+//         }
+
+//         fn free(slab: *Slab, ptr: anytype) void {
+//             const metadata = slab.getMetadata(ptr);
+//             slab.allocator.free(metadata.allocation);
+//         }
+
+//         fn getMetadata(slab: *Slab, ptr: anytype) *Metadata {
+//             const info = @typeInfo(@TypeOf(ptr));
+//             if (info != .pointer) @compileError("not a pointer or slice");
+//             const addr = switch (info.pointer.size) {
+//                 .slice => @intFromPtr(ptr.ptr),
+//                 else => @intFromPtr(ptr),
+//             };
+//             return &slab.metadata[(addr - @intFromPtr(slab.mapped_memory.ptr)) / slab.granularity];
+//         }
+
+//         fn contains(slab: *Slab, addr: usize) bool {
+//             const slab_addr = @intFromPtr(slab.mapped_memory.ptr);
+//             return addr >= slab_addr and addr < slab_addr + slab.mapped_memory.len;
+//         }
+//     };
+
+//     ctx: *Context,
+//     slabs: ?*Slab,
+
+//     fn init(ctx: *Context, usage: Usage, size: u64, slab_count: usize) !StagingAllocator {
+//         var staging_alloc: StagingAllocator = .{
+//             .ctx = ctx,
+//             .slabs = null,
+//         };
+
+//         // FIXME proper cleanup on fail
+//         for (0..slab_count) |_| {
+//             const slab = try ctx.gpa.create(Slab);
+//             slab.* = try .init(ctx, size, usage);
+//             slab.next = staging_alloc.slabs;
+//             staging_alloc.slabs = slab;
+//         }
+
+//         return staging_alloc;
+//     }
+
+//     fn deinit(staging_alloc: *StagingAllocator) void {
+//         var walk: ?*Slab = staging_alloc.slabs;
+//         while (walk) |slab| {
+//             walk = slab.next;
+//             slab.deinit(staging_alloc.ctx);
+//             staging_alloc.ctx.gpa.destroy(slab);
+//         }
+//     }
+
+//     fn getTransferInfo(staging_alloc: *StagingAllocator, ptr: anytype) struct {
+//         buffer: vk.Buffer,
+//         dst_offset: u64,
+//         size: u64,
+//     } {
+//         const info = @typeInfo(@TypeOf(ptr));
+//         if (info != .pointer) @compileError("not a pointer or slice");
+//         const addr = switch (info.pointer.size) {
+//             .slice => @intFromPtr(ptr.ptr),
+//             else => @intFromPtr(ptr),
+//         };
+//         const size = switch (info.pointer.size) {
+//             .slice => @sizeOf(info.pointer.child) * ptr.len,
+//             else => @sizeOf(info.pointer.child),
+//         };
+//         const slab = staging_alloc.getSlabOf(addr);
+//         return .{
+//             .buffer = slab.buffer,
+//             .size = size,
+//             .dst_offset = addr - @intFromPtr(slab.mapped_memory.ptr),
+//         };
+//     }
+
+//     fn getSlabOf(staging_alloc: *StagingAllocator, addr: usize) *Slab {
+//         var walk: ?*Slab = staging_alloc.slabs;
+//         while (walk) |slab| {
+//             walk = slab.next;
+//             if (slab.contains(addr)) return slab;
+//         }
+//         unreachable; // pointer was not allocated by this allocator or has already been freed
+//     }
+
+//     fn allocator(staging_alloc: *StagingAllocator) std.mem.Allocator {
+//         return .{
+//             .ptr = staging_alloc,
+//             .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free },
+//         };
+//     }
+
+//     /// Return a pointer to `len` bytes with specified `alignment`, or return
+//     /// `null` indicating the allocation failed.
+//     ///
+//     /// `ret_addr` is optionally provided as the first return address of the
+//     /// allocation call stack. If the value is `0` it means no return address
+//     /// has been provided.
+//     fn alloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+//         _ = alignment;
+//         _ = ret_addr;
+//         const staging_alloc: *StagingAllocator = @ptrCast(@alignCast(ptr));
+
+//         var walk: ?*Slab = staging_alloc.slabs;
+//         while (walk) |slab| {
+//             walk = slab.next;
+//             const bytes = slab.alloc(len) orelse continue;
+//             return bytes.ptr;
+//         }
+
+//         return null;
+//     }
+
+//     /// Attempt to expand or shrink memory in place.
+//     ///
+//     /// `memory.len` must equal the length requested from the most recent
+//     /// successful call to `alloc`, `resize`, or `remap`. `alignment` must
+//     /// equal the same value that was passed as the `alignment` parameter to
+//     /// the original `alloc` call.
+//     ///
+//     /// A result of `true` indicates the resize was successful and the
+//     /// allocation now has the same address but a size of `new_len`. `false`
+//     /// indicates the resize could not be completed without moving the
+//     /// allocation to a different address.
+//     ///
+//     /// `new_len` must be greater than zero.
+//     ///
+//     /// `ret_addr` is optionally provided as the first return address of the
+//     /// allocation call stack. If the value is `0` it means no return address
+//     /// has been provided.
+//     fn resize(
+//         ptr: *anyopaque,
+//         memory: []u8,
+//         alignment: std.mem.Alignment,
+//         new_len: usize,
+//         ret_addr: usize,
+//     ) bool {
+//         const staging_alloc: *StagingAllocator = @ptrCast(@alignCast(ptr));
+//         _ = staging_alloc;
+//         _ = alignment;
+//         _ = ret_addr;
+//         return new_len <= memory.len; // don't even try, but shrinking works by definition
+//     }
+
+//     /// Attempt to expand or shrink memory, allowing relocation.
+//     ///
+//     /// `memory.len` must equal the length requested from the most recent
+//     /// successful call to `alloc`, `resize`, or `remap`. `alignment` must
+//     /// equal the same value that was passed as the `alignment` parameter to
+//     /// the original `alloc` call.
+//     ///
+//     /// A non-`null` return value indicates the resize was successful. The
+//     /// allocation may have same address, or may have been relocated. In either
+//     /// case, the allocation now has size of `new_len`. A `null` return value
+//     /// indicates that the resize would be equivalent to allocating new memory,
+//     /// copying the bytes from the old memory, and then freeing the old memory.
+//     /// In such case, it is more efficient for the caller to perform the copy.
+//     ///
+//     /// `new_len` must be greater than zero.
+//     ///
+//     /// `ret_addr` is optionally provided as the first return address of the
+//     /// allocation call stack. If the value is `0` it means no return address
+//     /// has been provided.
+//     fn remap(
+//         ptr: *anyopaque,
+//         memory: []u8,
+//         alignment: std.mem.Alignment,
+//         new_len: usize,
+//         ret_addr: usize,
+//     ) ?[*]u8 {
+//         const staging_alloc: *StagingAllocator = @ptrCast(@alignCast(ptr));
+//         _ = staging_alloc;
+//         _ = alignment;
+//         _ = ret_addr;
+//         if (new_len < memory.len) return memory.ptr; // just allow shrinking
+//         return null;
+//     }
+
+//     /// Free and invalidate a region of memory.
+//     ///
+//     /// `memory.len` must equal the length requested from the most recent
+//     /// successful call to `alloc`, `resize`, or `remap`. `alignment` must
+//     /// equal the same value that was passed as the `alignment` parameter to
+//     /// the original `alloc` call.
+//     ///
+//     /// `ret_addr` is optionally provided as the first return address of the
+//     /// allocation call stack. If the value is `0` it means no return address
+//     /// has been provided.
+//     fn free(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+//         _ = alignment;
+//         _ = ret_addr;
+//         const staging_alloc: *StagingAllocator = @ptrCast(@alignCast(ptr));
+//         const slab = staging_alloc.getSlabOf(@intFromPtr(memory.ptr));
+//         slab.free(memory);
+//     }
+// };
