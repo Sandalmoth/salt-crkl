@@ -354,8 +354,13 @@ pub const Context = struct {
     sampler_pool: std.heap.MemoryPool(Sampler),
     texture_pool: std.heap.MemoryPool(Texture),
     buffer_pool: std.heap.MemoryPool(Buffer),
+    command_buffer_pool: std.heap.MemoryPool(CommandBuffer),
 
-    // staging_allocs: std.EnumArray(StagingAllocator.Usage, StagingAllocator),
+    command_buffers: std.ArrayList(struct {
+        pool: vk.CommandPool,
+        buffer: vk.CommandBuffer,
+        semaphore_value: u64,
+    }),
 
     pub fn create(
         gpa: std.mem.Allocator,
@@ -397,6 +402,9 @@ pub const Context = struct {
         ctx.sampler_pool = .init(std.heap.page_allocator);
         ctx.texture_pool = .init(std.heap.page_allocator);
         ctx.buffer_pool = .init(std.heap.page_allocator);
+        ctx.command_buffer_pool = .init(std.heap.page_allocator);
+
+        ctx.command_buffers = .empty;
 
         // ctx.staging_allocs.getPtr(.upload).* = try .init(ctx, .upload, 256 * 1024 * 1024, 3);
         // ctx.staging_allocs.getPtr(.download).* = try .init(ctx, .download, 256 * 1024 * 1024, 1);
@@ -419,6 +427,17 @@ pub const Context = struct {
         ctx.sampler_pool.deinit();
         ctx.texture_pool.deinit();
         ctx.buffer_pool.deinit();
+        ctx.command_buffer_pool.deinit();
+
+        for (ctx.command_buffers.items) |command_buffer| {
+            ctx.device.freeCommandBuffers(
+                command_buffer.pool,
+                1,
+                @ptrCast(&command_buffer.buffer),
+            );
+            ctx.device.destroyCommandPool(command_buffer.pool, null);
+        }
+        ctx.command_buffers.deinit(ctx.gpa);
 
         ctx.allocator.deinit();
 
@@ -434,19 +453,72 @@ pub const Context = struct {
         ctx.gpa.destroy(ctx);
     }
 
-    // pub fn stagingAllocator(ctx: *Context, usage: StagingAllocator.Usage) std.mem.Allocator {
-    //     return ctx.staging_allocs.getPtr(usage).allocator();
-    // }
+    pub fn acquireCommandBuffer(ctx: *Context, arena: std.mem.Allocator) !*CommandBuffer {
+        const cmdbuf = try ctx.command_buffer_pool.create();
+        cmdbuf.* = .init(arena);
+        return cmdbuf;
+    }
 
-    // pub fn acquireCommandBuffer(ctx: *Context, queue_type: QueueType) *CommandBuffer {
-    //     std.debug.assert(ctx.active_command_buffer == null);
-    //     ctx.active_command_buffer = queue_type;
-    //     const cmdbuf = ctx.command_buffers.getPtr(queue_type);
-    //     _ = cmdbuf.arena_impl.reset(.retain_capacity);
-    //     return cmdbuf;
-    // }
+    pub fn submitCommandBuffer(ctx: *Context, command_buffer: *CommandBuffer) !void {
+        const semaphore_value = try ctx.device.getSemaphoreCounterValue(ctx.queue_semaphore);
+        const cmdbuf = blk: {
+            for (ctx.command_buffers.items) |*x| {
+                if (x.semaphore_value > semaphore_value) continue;
+                try ctx.device.resetCommandPool(x.pool, .{});
+                x.semaphore_value = ctx.queue_semaphore_value + 1;
+                break :blk x.buffer;
+            }
 
-    // pub fn submitCommandBuffer(ctx: *Context, command_buffer: *CommandBuffer) !void {
+            const pool = try ctx.device.createCommandPool(&.{
+                .flags = .{},
+                .queue_family_index = ctx.queue_family,
+            }, null);
+            errdefer ctx.device.destroyCommandPool(pool, null);
+            var buffer: vk.CommandBuffer = .null_handle;
+            try ctx.device.allocateCommandBuffers(&.{
+                .command_pool = pool,
+                .level = .primary,
+                .command_buffer_count = 1,
+            }, @ptrCast(&buffer));
+            errdefer ctx.device.freeCommandBuffers(pool, 1, @ptrCast(&buffer));
+            try ctx.command_buffers.append(ctx.gpa, .{
+                .pool = pool,
+                .buffer = buffer,
+                .semaphore_value = ctx.queue_semaphore_value + 1,
+            });
+            break :blk buffer;
+        };
+        try ctx.device.beginCommandBuffer(cmdbuf, &.{ .flags = .{ .one_time_submit_bit = true } });
+        try ctx.device.endCommandBuffer(cmdbuf);
+
+        const semval = ctx.queue_semaphore_values.get(.graphics);
+        ctx.queue_semaphore_values.set(.graphics, semval + 1);
+        const timeline_semaphore_info: vk.TimelineSemaphoreSubmitInfo = .{
+            .p_wait_semaphore_values = @ptrCast(&semval),
+            .p_signal_semaphore_values = @ptrCast(&(semval + 1)),
+            .signal_semaphore_value_count = 1,
+            .wait_semaphore_value_count = 1,
+        };
+        const wait_dst_stage_mask: vk.PipelineStageFlags = .{ .top_of_pipe_bit = true };
+        const submit_info: vk.SubmitInfo = .{
+            .command_buffer_count = 1,
+            .p_command_buffers = @ptrCast(&cmdbuf),
+            .wait_semaphore_count = 1,
+            .p_wait_semaphores = @ptrCast(ctx.queue_semaphores.getPtr(command_buffer.queue_type)),
+            .p_wait_dst_stage_mask = @ptrCast(&wait_dst_stage_mask),
+            .signal_semaphore_count = 1,
+            .p_signal_semaphores = @ptrCast(ctx.queue_semaphores.getPtr(command_buffer.queue_type)),
+            .p_next = &timeline_semaphore_info,
+        };
+        try ctx.queues.get(command_buffer.queue_type).submit(
+            1,
+            @ptrCast(&submit_info),
+            .null_handle,
+        );
+
+        ctx.command_buffer_pool.destroy(command_buffer);
+        ctx.queue_semaphore_value += 1;
+    }
     //     std.debug.assert(ctx.active_command_buffer == command_buffer.queue_type);
     //     ctx.active_command_buffer = null;
 
@@ -2277,311 +2349,269 @@ const TransferBuffer = struct {
     }
 };
 
-// const StagingAllocator = struct {
-//     const Usage = enum { upload, download };
+const StageFlags = struct {
+    vertex: bool = false,
+    fragment: bool = false,
+    compute: bool = false,
+    transfer: bool = false,
+};
 
-//     const Metadata = struct {
-//         allocation: Allocation,
-//     };
+const AccessFlags = struct {
+    storage_and_sampled: bool = false,
+    attachment: bool = false,
+    indirect: bool = false,
+};
 
-//     const Slab = struct {
-//         granularity: u64,
+const RenderingAttachment = struct {
+    const LoadOp = enum {
+        load,
+        clear,
+        dont_care,
 
-//         next: ?*Slab,
+        fn vulkan(load_op: LoadOp) vk.AttachmentLoadOp {
+            return switch (load_op) {
+                .load => .load,
+                .clear => .clear,
+                .dont_care => .dont_care,
+            };
+        }
+    };
+    const StoreOp = enum {
+        store,
+        dont_care,
+        none,
 
-//         memory: vk.DeviceMemory,
-//         buffer: vk.Buffer,
-//         mapped_memory: []u8,
+        fn vulkan(store_op: StoreOp) vk.AttachmentStoreOp {
+            return switch (store_op) {
+                .store => .store,
+                .dont_care => .dont_care,
+                .none => .none,
+            };
+        }
+    };
+    const ClearValue = union(enum) {
+        // probably more elegant to just let all these be optional, and assert that only one is set
+        color: union(enum) {
+            float: [4]f32,
+            int: [4]i32,
+            uint: [4]u32,
+        },
+        depth_stencil: struct {
+            depth: f32,
+            stencil: u32,
+        },
 
-//         allocator: OffsetAllocator,
-//         metadata: []Metadata,
+        pub fn float(r: f32, g: f32, b: f32, a: f32) ClearValue {
+            return .{ .color = .{ .float = .{ r, g, b, a } } };
+        }
+        pub fn int(r: i32, g: i32, b: i32, a: i32) ClearValue {
+            return .{ .color = .{ .int = .{ r, g, b, a } } };
+        }
+        pub fn uint(r: u32, g: u32, b: u32, a: u32) ClearValue {
+            return .{ .color = .{ .uint = .{ r, g, b, a } } };
+        }
+        pub fn depthStencil(depth: f32, stencil: u32) ClearValue {
+            return .{ .depth_stencil = .{ .depth = depth, .stencil = stencil } };
+        }
 
-//         fn init(ctx: *Context, size: u64, usage: Usage) !Slab {
-//             const buffer_info = vk.BufferCreateInfo{
-//                 .size = size,
-//                 .usage = .{
-//                     .transfer_src_bit = usage == .upload,
-//                     .transfer_dst_bit = usage == .download,
-//                 },
-//                 .sharing_mode = .exclusive,
-//                 .p_queue_family_indices = @ptrCast(&ctx.queue_family),
-//                 .queue_family_index_count = 1,
-//             };
-//             const buffer = try ctx.device.createBuffer(&buffer_info, null);
-//             errdefer ctx.device.destroyBuffer(buffer, null);
+        fn vulkan(clear_value: ClearValue) vk.ClearValue {
+            return switch (clear_value) {
+                .color => |color| switch (color) {
+                    .float => .{ .color = .{ .float_32 = color.float } },
+                    .int => .{ .color = .{ .int_32 = color.int } },
+                    .uint => .{ .color = .{ .uint_32 = color.uint } },
+                },
+                .depth_stencil => |depth_stencil| .{ .depth_stencil = .{
+                    .depth = depth_stencil.depth,
+                    .stencil = depth_stencil.stencil,
+                } },
+            };
+        }
+    };
 
-//             const optimal_alignment = ctx.physical_device_properties.limits
-//                 .optimal_buffer_copy_offset_alignment;
-//             var buffer_memreq = ctx.device.getBufferMemoryRequirements(buffer);
-//             buffer_memreq.alignment = @max(buffer_memreq.alignment, optimal_alignment);
+    texture: *Texture,
+    load_op: LoadOp,
+    store_op: StoreOp,
+    clear_value: ClearValue,
+};
 
-//             var memory_type_index: ?u32 = null;
-//             var best_score: i32 = -999;
+const LayoutTransition = struct {
+    texture: *Texture,
+    layout: ImageLayout,
+    preserve_contents: bool,
+};
 
-//             for (ctx.physical_device_memory_properties.memory_types[0..ctx.physical_device_memory_properties
-//                 .memory_type_count], 0..) |memory_type, i|
-//             {
-//                 // hard requirements
-//                 if (buffer_memreq.memory_type_bits & (@as(u32, 1) << @intCast(i)) == 0) continue;
-//                 if (!memory_type.property_flags.host_visible_bit) continue;
-//                 if (!memory_type.property_flags.host_coherent_bit) continue;
-//                 // soft requirements
-//                 var score: i32 = 0;
-//                 if (memory_type.property_flags.device_local_bit) score -= 1;
-//                 if (usage == .download and memory_type.property_flags.host_cached_bit) score += 2;
-//                 if (score > best_score) {
-//                     best_score = score;
-//                     memory_type_index = @intCast(i);
-//                 }
-//             }
+const Command = union(enum) {
+    upload_to_buffer: struct {
+        size: u32,
+        src_offset: u32,
+        src_buffer: vk.Buffer,
+        dst_buffer: vk.Buffer,
+        dst_offset: u32,
+    },
+    begin_render_pass: struct {
+        pipeline: *GraphicsPipeline,
+        color_attachments: []const vk.RenderingAttachmentInfo,
+        depth_attachment: ?*const vk.RenderingAttachmentInfo,
+        stencil_attachment: ?*const vk.RenderingAttachmentInfo,
+        render_area_extent: vk.Extent2D,
+    },
+    end_render_pass: struct {},
+    barrier: struct {
+        src_stages: StageFlags,
+        dst_stages: StageFlags,
+        access: AccessFlags,
+        transitions: []const LayoutTransition = &.{},
 
-//             // vulkan spec
-//             // There must be at least one memory type with both the
-//             // VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT and VK_MEMORY_PROPERTY_HOST_COHERENT_BIT bits
-//             // set in its propertyFlags
-//             // so this should always work
-//             std.debug.assert(memory_type_index != null);
+        fn vulkanStageFlags(barrier: @This()) vk.PipelineStageFlags2 {
+            const stage_flags = barrier.stage_flags;
+            const access_flags = barrier.access_flags;
+            const graphics = stage_flags.graphics;
+            const compute = stage_flags.compute;
+            const transfer = stage_flags.transfer;
+            return .{
+                .draw_indirect_bit = access_flags.indirect_read,
+                .vertex_shader_bit = graphics,
+                .fragment_shader_bit = graphics,
+                .early_fragment_tests_bit = graphics,
+                .late_fragment_tests_bit = graphics,
+                .color_attachment_output_bit = graphics,
+                .compute_shader_bit = compute,
+                .all_transfer_bit = transfer,
+                .index_input_bit = graphics,
+            };
+        }
+        fn vulkanAccessFlags(barrier: @This()) vk.AccessFlags2 {
+            const stage_flags = barrier.stage_flags;
+            const access_flags = barrier.access_flags;
+            const graphics = stage_flags.graphics;
+            const compute = stage_flags.compute;
+            const transfer = stage_flags.transfer;
+            return .{
+                .indirect_command_read_bit = access_flags.indirect_read,
+                .index_read_bit = graphics and access_flags.generic_read,
+                .shader_read_bit = (graphics or compute) and access_flags.generic_read,
+                .shader_write_bit = (graphics or compute) and access_flags.generic_write,
+                .color_attachment_read_bit = graphics and access_flags.attachment_read,
+                .color_attachment_write_bit = graphics and access_flags.attachment_write,
+                .depth_stencil_attachment_read_bit = graphics and access_flags.attachment_read,
+                .depth_stencil_attachment_write_bit = graphics and access_flags.attachment_write,
+                .transfer_read_bit = transfer and access_flags.generic_read,
+                .transfer_write_bit = transfer and access_flags.generic_write,
+            };
+        }
+    },
+};
 
-//             const alloc_info = vk.MemoryAllocateInfo{
-//                 .allocation_size = buffer_memreq.size,
-//                 .memory_type_index = memory_type_index.?,
-//             };
-//             const memory = try ctx.device.allocateMemory(&alloc_info, null);
-//             errdefer ctx.device.freeMemory(memory, null);
+const CommandBuffer = struct {
+    arena: std.mem.Allocator,
+    commands: std.SegmentedList(Command, 64),
 
-//             try ctx.device.bindBufferMemory(buffer, memory, 0);
-//             const buffer_ptr: [*]u8 = @ptrCast((try ctx.device.mapMemory(memory, 0, size, .{})).?);
+    fn init(arena: std.mem.Allocator) CommandBuffer {
+        return .{
+            .arena = arena,
+            .commands = .{},
+        };
+    }
 
-//             const granularity = @max(optimal_alignment, 4096);
-//             std.debug.assert(size % granularity == 0);
+    pub fn uploadToBuffer(
+        buffer: *CommandBuffer,
+        src_buffer: *TransferBuffer,
+        src_data: anytype,
+        dst_buffer: *Buffer,
+        dst_offset: u32,
+    ) !void {
+        const info = @typeInfo(@TypeOf(src_data));
+        const addr: usize = switch (info.pointer.size) {
+            .slice => @intFromPtr(src_data.ptr),
+            else => @intFromPtr(src_data),
+        };
+        const len: usize = switch (info.pointer.size) {
+            .slice => @sizeOf(info.pointer.child) * src_data.len,
+            else => @sizeOf(info.pointer.child),
+        };
+        try buffer.commands.append(buffer.arena, .{ .upload_to_buffer = .{
+            .size = @intCast(len),
+            .src_offset = @intCast(addr - @intFromPtr(src_buffer.mapped_memory.ptr)),
+            .src_buffer = src_buffer.buffer,
+            .dst_offset = dst_offset,
+            .dst_buffer = dst_buffer.buffer,
+        } });
+    }
 
-//             const metadata = try ctx.gpa.alloc(Metadata, size / granularity);
-//             errdefer ctx.gpa.free(metadata);
-//             var suballoc: OffsetAllocator = try .init(
-//                 ctx.gpa,
-//                 @intCast(size / granularity),
-//                 @intCast(size / granularity),
-//             );
-//             errdefer suballoc.deinit(ctx.gpa);
+    // pub fn beginRenderPass(
+    //     buffer: *CommandBuffer,
+    //     pipeline: *GraphicsPipeline,
+    //     color_attachments: []const RenderingAttachment,
+    //     depth_attachment: ?RenderingAttachment,
+    //     stencil_attachment: ?RenderingAttachment,
+    // ) !void {
+    //     const color_attachment_infos: []vk.RenderingAttachmentInfo = if (color_attachments.len > 0)
+    //         try buffer.arena.alloc(vk.RenderingAttachmentInfo, color_attachments.len)
+    //     else
+    //         &.{};
 
-//             return .{
-//                 .granularity = granularity,
-//                 .next = null,
-//                 .memory = memory,
-//                 .buffer = buffer,
-//                 .mapped_memory = buffer_ptr[0..size],
-//                 .allocator = suballoc,
-//                 .metadata = metadata,
-//             };
-//         }
+    //     const depth_attachment_info: ?*vk.RenderingAttachmentInfo = if (depth_attachment != null)
+    //         try buffer.arena.create(vk.RenderingAttachmentInfo)
+    //     else
+    //         null;
+    //     const stencil_attachment_info: ?*vk.RenderingAttachmentInfo = if (stencil_attachment != null)
+    //         try buffer.arena.create(vk.RenderingAttachmentInfo)
+    //     else
+    //         null;
 
-//         fn deinit(slab: *Slab, ctx: *Context) void {
-//             ctx.device.destroyBuffer(slab.buffer, null);
-//             ctx.device.freeMemory(slab.memory, null);
-//             slab.allocator.deinit(ctx.gpa);
-//             ctx.gpa.free(slab.metadata);
-//         }
+    //     for (color_attachments, 0..) |attachment, i| {
+    //         color_attachment_infos[i] = .{
+    //             .image_view = attachment.texture.default_view,
+    //             .image_layout = attachment.texture.layout,
+    //             .resolve_mode = .{},
+    //             .resolve_image_layout = .undefined,
+    //             .load_op = attachment.load_op.vulkan(),
+    //             .store_op = attachment.store_op.vulkan(),
+    //             .clear_value = attachment.clear_value.vulkan(),
+    //         };
+    //     }
+    //     if (depth_attachment) |attachment| {
+    //         _ = attachment;
+    //     }
+    //     if (stencil_attachment) |attachment| {
+    //         _ = attachment;
+    //     }
 
-//         fn alloc(slab: *Slab, size: u64) ?[]u8 {
-//             const slots = (size + slab.granularity - 1) / slab.granularity;
-//             const allocation = slab.allocator.allocate(@intCast(slots)) catch return null;
-//             const bytes = slab.mapped_memory[allocation.offset * slab.granularity .. allocation.offset * slab.granularity + size];
-//             slab.getMetadata(bytes).* = .{
-//                 .allocation = allocation,
-//             };
-//             return bytes;
-//         }
+    //     const size = if (depth_attachment) |info|
+    //         info.texture.size
+    //     else if (stencil_attachment) |info|
+    //         info.texture.size
+    //     else
+    //         color_attachments[0].texture.size;
 
-//         fn free(slab: *Slab, ptr: anytype) void {
-//             const metadata = slab.getMetadata(ptr);
-//             slab.allocator.free(metadata.allocation);
-//         }
+    //     try buffer.buffer.append(buffer.ctx.gpa, .{
+    //         .begin_render_pass = .{
+    //             .pipeline = pipeline,
+    //             .color_attachments = color_attachment_infos,
+    //             .depth_attachment = depth_attachment_info,
+    //             .stencil_attachment = stencil_attachment_info,
+    //             .render_area_extent = .{ .width = size[0], .height = size[0] },
+    //         },
+    //     });
+    // }
 
-//         fn getMetadata(slab: *Slab, ptr: anytype) *Metadata {
-//             const info = @typeInfo(@TypeOf(ptr));
-//             if (info != .pointer) @compileError("not a pointer or slice");
-//             const addr = switch (info.pointer.size) {
-//                 .slice => @intFromPtr(ptr.ptr),
-//                 else => @intFromPtr(ptr),
-//             };
-//             return &slab.metadata[(addr - @intFromPtr(slab.mapped_memory.ptr)) / slab.granularity];
-//         }
+    // pub fn endRenderPass(buffer: *CommandBuffer) !void {
+    //     try buffer.buffer.append(buffer.ctx.gpa, .{ .end_render_pass = .{} });
+    // }
 
-//         fn contains(slab: *Slab, addr: usize) bool {
-//             const slab_addr = @intFromPtr(slab.mapped_memory.ptr);
-//             return addr >= slab_addr and addr < slab_addr + slab.mapped_memory.len;
-//         }
-//     };
-
-//     ctx: *Context,
-//     slabs: ?*Slab,
-
-//     fn init(ctx: *Context, usage: Usage, size: u64, slab_count: usize) !StagingAllocator {
-//         var staging_alloc: StagingAllocator = .{
-//             .ctx = ctx,
-//             .slabs = null,
-//         };
-
-//         // FIXME proper cleanup on fail
-//         for (0..slab_count) |_| {
-//             const slab = try ctx.gpa.create(Slab);
-//             slab.* = try .init(ctx, size, usage);
-//             slab.next = staging_alloc.slabs;
-//             staging_alloc.slabs = slab;
-//         }
-
-//         return staging_alloc;
-//     }
-
-//     fn deinit(staging_alloc: *StagingAllocator) void {
-//         var walk: ?*Slab = staging_alloc.slabs;
-//         while (walk) |slab| {
-//             walk = slab.next;
-//             slab.deinit(staging_alloc.ctx);
-//             staging_alloc.ctx.gpa.destroy(slab);
-//         }
-//     }
-
-//     fn getTransferInfo(staging_alloc: *StagingAllocator, ptr: anytype) struct {
-//         buffer: vk.Buffer,
-//         dst_offset: u64,
-//         size: u64,
-//     } {
-//         const info = @typeInfo(@TypeOf(ptr));
-//         if (info != .pointer) @compileError("not a pointer or slice");
-//         const addr = switch (info.pointer.size) {
-//             .slice => @intFromPtr(ptr.ptr),
-//             else => @intFromPtr(ptr),
-//         };
-//         const size = switch (info.pointer.size) {
-//             .slice => @sizeOf(info.pointer.child) * ptr.len,
-//             else => @sizeOf(info.pointer.child),
-//         };
-//         const slab = staging_alloc.getSlabOf(addr);
-//         return .{
-//             .buffer = slab.buffer,
-//             .size = size,
-//             .dst_offset = addr - @intFromPtr(slab.mapped_memory.ptr),
-//         };
-//     }
-
-//     fn getSlabOf(staging_alloc: *StagingAllocator, addr: usize) *Slab {
-//         var walk: ?*Slab = staging_alloc.slabs;
-//         while (walk) |slab| {
-//             walk = slab.next;
-//             if (slab.contains(addr)) return slab;
-//         }
-//         unreachable; // pointer was not allocated by this allocator or has already been freed
-//     }
-
-//     fn allocator(staging_alloc: *StagingAllocator) std.mem.Allocator {
-//         return .{
-//             .ptr = staging_alloc,
-//             .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free },
-//         };
-//     }
-
-//     /// Return a pointer to `len` bytes with specified `alignment`, or return
-//     /// `null` indicating the allocation failed.
-//     ///
-//     /// `ret_addr` is optionally provided as the first return address of the
-//     /// allocation call stack. If the value is `0` it means no return address
-//     /// has been provided.
-//     fn alloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
-//         _ = alignment;
-//         _ = ret_addr;
-//         const staging_alloc: *StagingAllocator = @ptrCast(@alignCast(ptr));
-
-//         var walk: ?*Slab = staging_alloc.slabs;
-//         while (walk) |slab| {
-//             walk = slab.next;
-//             const bytes = slab.alloc(len) orelse continue;
-//             return bytes.ptr;
-//         }
-
-//         return null;
-//     }
-
-//     /// Attempt to expand or shrink memory in place.
-//     ///
-//     /// `memory.len` must equal the length requested from the most recent
-//     /// successful call to `alloc`, `resize`, or `remap`. `alignment` must
-//     /// equal the same value that was passed as the `alignment` parameter to
-//     /// the original `alloc` call.
-//     ///
-//     /// A result of `true` indicates the resize was successful and the
-//     /// allocation now has the same address but a size of `new_len`. `false`
-//     /// indicates the resize could not be completed without moving the
-//     /// allocation to a different address.
-//     ///
-//     /// `new_len` must be greater than zero.
-//     ///
-//     /// `ret_addr` is optionally provided as the first return address of the
-//     /// allocation call stack. If the value is `0` it means no return address
-//     /// has been provided.
-//     fn resize(
-//         ptr: *anyopaque,
-//         memory: []u8,
-//         alignment: std.mem.Alignment,
-//         new_len: usize,
-//         ret_addr: usize,
-//     ) bool {
-//         const staging_alloc: *StagingAllocator = @ptrCast(@alignCast(ptr));
-//         _ = staging_alloc;
-//         _ = alignment;
-//         _ = ret_addr;
-//         return new_len <= memory.len; // don't even try, but shrinking works by definition
-//     }
-
-//     /// Attempt to expand or shrink memory, allowing relocation.
-//     ///
-//     /// `memory.len` must equal the length requested from the most recent
-//     /// successful call to `alloc`, `resize`, or `remap`. `alignment` must
-//     /// equal the same value that was passed as the `alignment` parameter to
-//     /// the original `alloc` call.
-//     ///
-//     /// A non-`null` return value indicates the resize was successful. The
-//     /// allocation may have same address, or may have been relocated. In either
-//     /// case, the allocation now has size of `new_len`. A `null` return value
-//     /// indicates that the resize would be equivalent to allocating new memory,
-//     /// copying the bytes from the old memory, and then freeing the old memory.
-//     /// In such case, it is more efficient for the caller to perform the copy.
-//     ///
-//     /// `new_len` must be greater than zero.
-//     ///
-//     /// `ret_addr` is optionally provided as the first return address of the
-//     /// allocation call stack. If the value is `0` it means no return address
-//     /// has been provided.
-//     fn remap(
-//         ptr: *anyopaque,
-//         memory: []u8,
-//         alignment: std.mem.Alignment,
-//         new_len: usize,
-//         ret_addr: usize,
-//     ) ?[*]u8 {
-//         const staging_alloc: *StagingAllocator = @ptrCast(@alignCast(ptr));
-//         _ = staging_alloc;
-//         _ = alignment;
-//         _ = ret_addr;
-//         if (new_len < memory.len) return memory.ptr; // just allow shrinking
-//         return null;
-//     }
-
-//     /// Free and invalidate a region of memory.
-//     ///
-//     /// `memory.len` must equal the length requested from the most recent
-//     /// successful call to `alloc`, `resize`, or `remap`. `alignment` must
-//     /// equal the same value that was passed as the `alignment` parameter to
-//     /// the original `alloc` call.
-//     ///
-//     /// `ret_addr` is optionally provided as the first return address of the
-//     /// allocation call stack. If the value is `0` it means no return address
-//     /// has been provided.
-//     fn free(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
-//         _ = alignment;
-//         _ = ret_addr;
-//         const staging_alloc: *StagingAllocator = @ptrCast(@alignCast(ptr));
-//         const slab = staging_alloc.getSlabOf(@intFromPtr(memory.ptr));
-//         slab.free(memory);
-//     }
-// };
+    // pub fn barrier(
+    //     buffer: *CommandBuffer,
+    //     src_stage_flags: StageFlags,
+    //     dst_stage_flags: StageFlags,
+    //     access_flags: AccessFlags,
+    //     transitions: []const LayoutTransition,
+    // ) !void {
+    //     try buffer.commands.append(buffer.arena, .{ .barrier = .{
+    //         .src_stages = src_stage_flags,
+    //         .dst_stages = dst_stage_flags,
+    //         .access = access_flags,
+    //         .transitions = transitions,
+    //     } });
+    // }
+};

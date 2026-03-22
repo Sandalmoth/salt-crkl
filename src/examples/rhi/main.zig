@@ -13,6 +13,10 @@ pub fn main() !void {
     defer _ = gpa_struct.deinit();
     const gpa = gpa_struct.allocator();
 
+    var arena_struct: std.heap.ArenaAllocator = .init(gpa);
+    defer _ = arena_struct.deinit();
+    const arena = arena_struct.allocator();
+
     try sdl.init(sdl.c.SDL_INIT_VIDEO);
     defer sdl.quit();
 
@@ -111,27 +115,12 @@ pub fn main() !void {
     const index_staging = try upload_allocator.alloc(u32, 6);
     index_staging[0..6].* = .{ 0, 2, 1, 2, 3, 1 };
 
-    // {
-    //     const command_buffer = ctx.acquireCommandBuffer(.graphics);
-    //     try command_buffer.uploadToBuffer(
-    //         std.mem.sliceAsBytes(&[4][3]f32{
-    //             .{ -1, -1, 0.5 },
-    //             .{ 1, -1, 0.5 },
-    //             .{ -1, 1, 0.5 },
-    //             .{ 1, 1, 0.5 },
-    //         }),
-    //         &transfer_buffer,
-    //         &vertex_buffer,
-    //         0,
-    //     );
-    //     try command_buffer.uploadToBuffer(
-    //         std.mem.sliceAsBytes(&[6]u32{ 0, 2, 1, 2, 3, 1 }),
-    //         &transfer_buffer,
-    //         &index_buffer,
-    //         0,
-    //     );
-    //     try ctx.submitCommandBuffer(command_buffer);
-    // }
+    {
+        const command_buffer = try ctx.acquireCommandBuffer(arena);
+        try command_buffer.uploadToBuffer(upload_buffer, vertex_staging, vertex_buffer, 0);
+        try command_buffer.uploadToBuffer(upload_buffer, index_staging, index_buffer, 0);
+        try ctx.submitCommandBuffer(command_buffer);
+    }
 
     // main_loop: while (true) {
     //     var event: sdl.Event = undefined;
