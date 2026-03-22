@@ -491,11 +491,9 @@ pub const Context = struct {
         try ctx.device.beginCommandBuffer(cmdbuf, &.{ .flags = .{ .one_time_submit_bit = true } });
         try ctx.device.endCommandBuffer(cmdbuf);
 
-        const semval = ctx.queue_semaphore_values.get(.graphics);
-        ctx.queue_semaphore_values.set(.graphics, semval + 1);
         const timeline_semaphore_info: vk.TimelineSemaphoreSubmitInfo = .{
-            .p_wait_semaphore_values = @ptrCast(&semval),
-            .p_signal_semaphore_values = @ptrCast(&(semval + 1)),
+            .p_wait_semaphore_values = @ptrCast(&ctx.queue_semaphore_value),
+            .p_signal_semaphore_values = @ptrCast(&(ctx.queue_semaphore_value + 1)),
             .signal_semaphore_value_count = 1,
             .wait_semaphore_value_count = 1,
         };
@@ -504,13 +502,13 @@ pub const Context = struct {
             .command_buffer_count = 1,
             .p_command_buffers = @ptrCast(&cmdbuf),
             .wait_semaphore_count = 1,
-            .p_wait_semaphores = @ptrCast(ctx.queue_semaphores.getPtr(command_buffer.queue_type)),
+            .p_wait_semaphores = @ptrCast(&ctx.queue_semaphore),
             .p_wait_dst_stage_mask = @ptrCast(&wait_dst_stage_mask),
             .signal_semaphore_count = 1,
-            .p_signal_semaphores = @ptrCast(ctx.queue_semaphores.getPtr(command_buffer.queue_type)),
+            .p_signal_semaphores = @ptrCast(&ctx.queue_semaphore),
             .p_next = &timeline_semaphore_info,
         };
-        try ctx.queues.get(command_buffer.queue_type).submit(
+        try ctx.queue.submit(
             1,
             @ptrCast(&submit_info),
             .null_handle,
