@@ -314,6 +314,8 @@ const Texture = struct {
     default_view: vk.ImageView,
     size: [3]u32,
     layout: vk.ImageLayout,
+    format: Format,
+    mip_levels: u32,
 };
 
 const Sampler = struct {};
@@ -361,6 +363,8 @@ pub const Context = struct {
         buffer: vk.CommandBuffer,
         semaphore_value: u64,
     }),
+    pending_memory_barriers: std.ArrayList(vk.MemoryBarrier2),
+    pending_image_barriers: std.ArrayList(vk.ImageMemoryBarrier2),
 
     pub fn create(
         gpa: std.mem.Allocator,
@@ -405,6 +409,8 @@ pub const Context = struct {
         ctx.command_buffer_pool = .init(std.heap.page_allocator);
 
         ctx.command_buffers = .empty;
+        ctx.pending_memory_barriers = .empty;
+        ctx.pending_image_barriers = .empty;
 
         // ctx.staging_allocs.getPtr(.upload).* = try .init(ctx, .upload, 256 * 1024 * 1024, 3);
         // ctx.staging_allocs.getPtr(.download).* = try .init(ctx, .download, 256 * 1024 * 1024, 1);
@@ -489,6 +495,91 @@ pub const Context = struct {
             break :blk buffer;
         };
         try ctx.device.beginCommandBuffer(cmdbuf, &.{ .flags = .{ .one_time_submit_bit = true } });
+
+        var it = command_buffer.commands.iterator(0);
+        while (it.next()) |command| {
+            switch (command.*) {
+                .buffer_upload => |cmd| {
+                    // touches memory so needs to potentially flush all pending barriers
+
+                    // NOTE we could accumulate regions per buffer combination and batch
+                    const region: vk.BufferCopy = .{
+                        .src_offset = cmd.src_offset,
+                        .dst_offset = cmd.dst_offset,
+                        .size = cmd.size,
+                    };
+                    ctx.device.cmdCopyBuffer(
+                        cmdbuf,
+                        cmd.src_buffer,
+                        cmd.dst_buffer,
+                        1,
+                        @ptrCast(&region),
+                    );
+                },
+                .barrier => |cmd| {
+                    try ctx.pending_memory_barriers.ensureUnusedCapacity(ctx.gpa, 1);
+                    try ctx.pending_image_barriers.ensureUnusedCapacity(
+                        ctx.gpa,
+                        cmd.transitions.len,
+                    );
+                    const access = cmd.vulkanAccessFlags();
+                    const barrier: vk.MemoryBarrier2 = .{
+                        .src_stage_mask = cmd.vulkanStageFlags(.src),
+                        .src_access_mask = access,
+                        .dst_stage_mask = cmd.vulkanStageFlags(.dst),
+                        .dst_access_mask = access,
+                    };
+                    ctx.pending_memory_barriers.appendAssumeCapacity(barrier);
+                    for (cmd.transitions) |transition| {
+                        ctx.pending_image_barriers.appendAssumeCapacity(.{
+                            .src_stage_mask = barrier.src_stage_mask,
+                            .src_access_mask = barrier.src_access_mask,
+                            .dst_stage_mask = barrier.dst_stage_mask,
+                            .dst_access_mask = barrier.dst_access_mask,
+                            .old_layout = transition.texture.layout,
+                            .new_layout = transition.layout.vulkan(),
+                            .src_queue_family_index = ctx.queue_family,
+                            .dst_queue_family_index = ctx.queue_family,
+                            .image = transition.texture.image,
+                            .subresource_range = .{
+                                .base_mip_level = 0,
+                                .level_count = transition.texture.mip_levels,
+                                .base_array_layer = 0,
+                                .layer_count = transition.texture.size[2], // FIXME probably validation error for 3d texture?
+                                .aspect_mask = switch (transition.texture.format) {
+                                    .s8_uint => .{ .stencil_bit = true },
+                                    .d16_unorm,
+                                    .d16_unorm_s8_uint,
+                                    .d24_unorm_s8_uint,
+                                    .d32_sfloat,
+                                    .d32_sfloat_s8_uint,
+                                    => .{ .depth_bit = true },
+                                    else => .{ .color_bit = true },
+                                },
+                            },
+                        });
+                        // TODO we should error if the same image is transitioned twice in one barrier maybe?
+                        // or we could just do whatever is the last one but merge the stages/accesses?
+                        transition.texture.layout = transition.layout.vulkan();
+                    }
+                },
+            }
+        }
+
+        // always synchronize host at the end, s.t. when the semaphore is hit we can copy data out
+        // OPTIMIZE remove this if there were no operations downloading data
+        // OPTIMIZE keep track of possible writers and make the barrier more specific
+        const host_memory_barrier: vk.MemoryBarrier2 = .{
+            .src_stage_mask = .{ .all_commands_bit = true },
+            .src_access_mask = .{ .memory_write_bit = true },
+            .dst_stage_mask = .{ .host_bit = true },
+            .dst_access_mask = .{ .host_read_bit = true },
+        };
+        ctx.device.cmdPipelineBarrier2(cmdbuf, &.{
+            .p_memory_barriers = @ptrCast(&host_memory_barrier),
+            .memory_barrier_count = 1,
+        });
+
         try ctx.device.endCommandBuffer(cmdbuf);
 
         const timeline_semaphore_info: vk.TimelineSemaphoreSubmitInfo = .{
@@ -1792,6 +1883,8 @@ const Allocator = struct {
         texture.default_view = default_view;
         texture.size = texture_create_info.size;
         texture.layout = .undefined;
+        texture.format = texture_create_info.format;
+        texture.mip_levels = texture_create_info.mip_levels;
 
         return texture;
     }
@@ -2347,19 +2440,6 @@ const TransferBuffer = struct {
     }
 };
 
-const StageFlags = struct {
-    vertex: bool = false,
-    fragment: bool = false,
-    compute: bool = false,
-    transfer: bool = false,
-};
-
-const AccessFlags = struct {
-    storage_and_sampled: bool = false,
-    attachment: bool = false,
-    indirect: bool = false,
-};
-
 const RenderingAttachment = struct {
     const LoadOp = enum {
         load,
@@ -2433,6 +2513,19 @@ const RenderingAttachment = struct {
     clear_value: ClearValue,
 };
 
+const StageFlags = struct {
+    vertex: bool = false,
+    fragment: bool = false,
+    compute: bool = false,
+    transfer: bool = false,
+};
+
+const AccessFlags = struct {
+    storage: bool = false,
+    attachment: bool = false,
+    indirect: bool = false,
+};
+
 const LayoutTransition = struct {
     texture: *Texture,
     layout: ImageLayout,
@@ -2440,65 +2533,71 @@ const LayoutTransition = struct {
 };
 
 const Command = union(enum) {
-    upload_to_buffer: struct {
+    buffer_upload: struct {
         size: u32,
         src_offset: u32,
         src_buffer: vk.Buffer,
         dst_buffer: vk.Buffer,
         dst_offset: u32,
     },
-    begin_render_pass: struct {
-        pipeline: *GraphicsPipeline,
-        color_attachments: []const vk.RenderingAttachmentInfo,
-        depth_attachment: ?*const vk.RenderingAttachmentInfo,
-        stencil_attachment: ?*const vk.RenderingAttachmentInfo,
-        render_area_extent: vk.Extent2D,
-    },
-    end_render_pass: struct {},
     barrier: struct {
         src_stages: StageFlags,
         dst_stages: StageFlags,
         access: AccessFlags,
         transitions: []const LayoutTransition = &.{},
 
-        fn vulkanStageFlags(barrier: @This()) vk.PipelineStageFlags2 {
-            const stage_flags = barrier.stage_flags;
-            const access_flags = barrier.access_flags;
-            const graphics = stage_flags.graphics;
+        fn vulkanStageFlags(barrier: @This(), which: enum { src, dst }) vk.PipelineStageFlags2 {
+            const stage_flags = switch (which) {
+                .src => barrier.src_stages,
+                .dst => barrier.dst_stages,
+            };
+            const access_flags = barrier.access;
+            const vertex = stage_flags.vertex;
+            const fragment = stage_flags.fragment;
             const compute = stage_flags.compute;
             const transfer = stage_flags.transfer;
             return .{
-                .draw_indirect_bit = access_flags.indirect_read,
-                .vertex_shader_bit = graphics,
-                .fragment_shader_bit = graphics,
-                .early_fragment_tests_bit = graphics,
-                .late_fragment_tests_bit = graphics,
-                .color_attachment_output_bit = graphics,
+                .draw_indirect_bit = access_flags.indirect,
+                .vertex_shader_bit = vertex,
+                .fragment_shader_bit = fragment,
+                .early_fragment_tests_bit = fragment,
+                .late_fragment_tests_bit = fragment,
+                .color_attachment_output_bit = fragment,
                 .compute_shader_bit = compute,
                 .all_transfer_bit = transfer,
-                .index_input_bit = graphics,
+                .index_input_bit = vertex,
             };
         }
         fn vulkanAccessFlags(barrier: @This()) vk.AccessFlags2 {
-            const stage_flags = barrier.stage_flags;
-            const access_flags = barrier.access_flags;
-            const graphics = stage_flags.graphics;
-            const compute = stage_flags.compute;
-            const transfer = stage_flags.transfer;
+            const src_stage_flags = barrier.src_stages;
+            const dst_stage_flags = barrier.dst_stages;
+            const access_flags = barrier.access;
+            const vertex = src_stage_flags.vertex or dst_stage_flags.vertex;
+            const fragment = src_stage_flags.fragment or dst_stage_flags.fragment;
+            const compute = src_stage_flags.compute or dst_stage_flags.compute;
+            const transfer = src_stage_flags.transfer or dst_stage_flags.transfer;
             return .{
-                .indirect_command_read_bit = access_flags.indirect_read,
-                .index_read_bit = graphics and access_flags.generic_read,
-                .shader_read_bit = (graphics or compute) and access_flags.generic_read,
-                .shader_write_bit = (graphics or compute) and access_flags.generic_write,
-                .color_attachment_read_bit = graphics and access_flags.attachment_read,
-                .color_attachment_write_bit = graphics and access_flags.attachment_write,
-                .depth_stencil_attachment_read_bit = graphics and access_flags.attachment_read,
-                .depth_stencil_attachment_write_bit = graphics and access_flags.attachment_write,
-                .transfer_read_bit = transfer and access_flags.generic_read,
-                .transfer_write_bit = transfer and access_flags.generic_write,
+                .indirect_command_read_bit = access_flags.indirect,
+                .index_read_bit = vertex and access_flags.storage,
+                .shader_read_bit = (vertex or fragment or compute) and access_flags.storage,
+                .shader_write_bit = (vertex or fragment or compute) and access_flags.storage,
+                .color_attachment_read_bit = fragment and access_flags.attachment,
+                .color_attachment_write_bit = fragment and access_flags.attachment,
+                .depth_stencil_attachment_read_bit = fragment and access_flags.attachment,
+                .depth_stencil_attachment_write_bit = fragment and access_flags.attachment,
+                .transfer_read_bit = transfer and access_flags.storage,
+                .transfer_write_bit = transfer and access_flags.storage,
             };
         }
     },
+    // begin_render_pass: struct {
+    //     pipeline: *GraphicsPipeline,
+    //     color_attachments: []const vk.RenderingAttachmentInfo,
+    //     depth_attachment: ?*const vk.RenderingAttachmentInfo,
+    //     stencil_attachment: ?*const vk.RenderingAttachmentInfo,
+    //     render_area_extent: vk.Extent2D,
+    // },
+    // end_render_pass: struct {},
 };
 
 const CommandBuffer = struct {
@@ -2510,6 +2609,21 @@ const CommandBuffer = struct {
             .arena = arena,
             .commands = .{},
         };
+    }
+
+    pub fn barrier(
+        buffer: *CommandBuffer,
+        src_stage_flags: StageFlags,
+        dst_stage_flags: StageFlags,
+        access_flags: AccessFlags,
+        transitions: []const LayoutTransition,
+    ) !void {
+        try buffer.commands.append(buffer.arena, .{ .barrier = .{
+            .src_stages = src_stage_flags,
+            .dst_stages = dst_stage_flags,
+            .access = access_flags,
+            .transitions = transitions,
+        } });
     }
 
     pub fn uploadToBuffer(
@@ -2528,7 +2642,7 @@ const CommandBuffer = struct {
             .slice => @sizeOf(info.pointer.child) * src_data.len,
             else => @sizeOf(info.pointer.child),
         };
-        try buffer.commands.append(buffer.arena, .{ .upload_to_buffer = .{
+        try buffer.commands.append(buffer.arena, .{ .buffer_upload = .{
             .size = @intCast(len),
             .src_offset = @intCast(addr - @intFromPtr(src_buffer.mapped_memory.ptr)),
             .src_buffer = src_buffer.buffer,
@@ -2596,20 +2710,5 @@ const CommandBuffer = struct {
 
     // pub fn endRenderPass(buffer: *CommandBuffer) !void {
     //     try buffer.buffer.append(buffer.ctx.gpa, .{ .end_render_pass = .{} });
-    // }
-
-    // pub fn barrier(
-    //     buffer: *CommandBuffer,
-    //     src_stage_flags: StageFlags,
-    //     dst_stage_flags: StageFlags,
-    //     access_flags: AccessFlags,
-    //     transitions: []const LayoutTransition,
-    // ) !void {
-    //     try buffer.commands.append(buffer.arena, .{ .barrier = .{
-    //         .src_stages = src_stage_flags,
-    //         .dst_stages = dst_stage_flags,
-    //         .access = access_flags,
-    //         .transitions = transitions,
-    //     } });
     // }
 };

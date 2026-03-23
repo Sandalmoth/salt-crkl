@@ -122,45 +122,50 @@ pub fn main() !void {
         try ctx.submitCommandBuffer(command_buffer);
     }
 
-    // main_loop: while (true) {
-    //     var event: sdl.Event = undefined;
-    //     while (sdl.pollEvent(&event)) {
-    //         if (event.type == sdl.c.SDL_EVENT_QUIT) break :main_loop;
-    //         if (event.type == sdl.c.SDL_EVENT_KEY_DOWN) switch (event.key.key) {
-    //             sdl.c.SDLK_ESCAPE => break :main_loop,
-    //             else => {},
-    //         };
-    //     }
+    main_loop: while (true) {
+        _ = arena_struct.reset(.retain_capacity);
 
-    //     std.debug.print("yo\n", .{});
+        var event: sdl.Event = undefined;
+        while (sdl.pollEvent(&event)) {
+            if (event.type == sdl.c.SDL_EVENT_QUIT) break :main_loop;
+            if (event.type == sdl.c.SDL_EVENT_KEY_DOWN) switch (event.key.key) {
+                sdl.c.SDLK_ESCAPE => break :main_loop,
+                else => {},
+            };
+        }
 
-    //     std.Thread.sleep(100_000_000);
+        std.Thread.sleep(100_000_000);
 
-    //     // lets just aim for a hello triangle as step one
-    //     // just to see what needs to be abstracted
-    //     const command_buffer = ctx.acquireCommandBuffer(.graphics);
+        // lets just aim for a hello triangle as step one
+        // just to see what needs to be abstracted
+        const command_buffer = try ctx.acquireCommandBuffer(arena);
 
-    //     try command_buffer.transition(&color_target, .graphics, .attachment);
-    //     try command_buffer.beginRenderPass(&pipeline, &.{
-    //         .{
-    //             .texture = &color_target,
-    //             .load_op = .clear,
-    //             .store_op = .store,
-    //             .clear_value = .{ .color = .{ .float = .{ 0.2, 0.2, 0.2, 1.0 } } }, // FIXME UGLY!
-    //         },
-    //     }, null, null);
-    //     try command_buffer.endRenderPass();
+        try command_buffer.barrier(
+            .{ .fragment = true },
+            .{ .fragment = true },
+            .{ .attachment = true },
+            &.{.{ .texture = color_target, .layout = .attachment, .preserve_contents = false }},
+        );
+        // try command_buffer.beginRenderPass(&pipeline, &.{
+        //     .{
+        //         .texture = &color_target,
+        //         .load_op = .clear,
+        //         .store_op = .store,
+        //         .clear_value = .{ .color = .{ .float = .{ 0.2, 0.2, 0.2, 1.0 } } }, // FIXME UGLY!
+        //     },
+        // }, null, null);
+        // try command_buffer.endRenderPass();
 
-    //     // [x] bind our pipeline
-    //     // [x] bind the off-screen texture as the render target
-    //     // [ ] bind the index buffer
-    //     // [ ] push constant upload with the vertex buffer address
-    //     // [ ] draw
-    //     // [ ] present
-    //     //   - queue ownership transfer of off-screen buffer?
+        // [x] bind our pipeline
+        // [x] bind the off-screen texture as the render target
+        // [ ] bind the index buffer
+        // [ ] push constant upload with the vertex buffer address
+        // [ ] draw
+        // [ ] present
+        //   - queue ownership transfer of off-screen buffer?
 
-    //     try ctx.submitCommandBuffer(command_buffer);
-    // }
+        try ctx.submitCommandBuffer(command_buffer);
+    }
 }
 
 fn getInstanceProcAddress(
