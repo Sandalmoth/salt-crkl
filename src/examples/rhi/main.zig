@@ -88,7 +88,7 @@ pub fn main() !void {
             .x = 0,
             .y = 0,
             .width = 640,
-            .height = 640,
+            .height = 480,
             .min_depth = 0,
             .max_depth = 1,
         },
@@ -96,7 +96,7 @@ pub fn main() !void {
             .x = 0,
             .y = 0,
             .width = 640,
-            .height = 640,
+            .height = 480,
         },
     });
     defer ctx.destroyGraphicsPipeline(pipeline);
@@ -119,8 +119,10 @@ pub fn main() !void {
         const command_buffer = try ctx.acquireCommandBuffer(arena);
         try command_buffer.uploadToBuffer(upload_buffer, vertex_staging, vertex_buffer, 0);
         try command_buffer.uploadToBuffer(upload_buffer, index_staging, index_buffer, 0);
-        try ctx.submitCommandBuffer(command_buffer);
+        _ = try ctx.submitCommandBuffer(command_buffer);
     }
+
+    var last_submit: u64 = 0;
 
     main_loop: while (true) {
         _ = arena_struct.reset(.retain_capacity);
@@ -146,15 +148,15 @@ pub fn main() !void {
             .{ .attachment = true },
             &.{.{ .texture = color_target, .layout = .attachment, .preserve_contents = false }},
         );
-        // try command_buffer.beginRenderPass(&pipeline, &.{
-        //     .{
-        //         .texture = &color_target,
-        //         .load_op = .clear,
-        //         .store_op = .store,
-        //         .clear_value = .{ .color = .{ .float = .{ 0.2, 0.2, 0.2, 1.0 } } }, // FIXME UGLY!
-        //     },
-        // }, null, null);
-        // try command_buffer.endRenderPass();
+        try command_buffer.beginRenderPass(pipeline, &.{
+            .{
+                .texture = color_target,
+                .load_op = .clear,
+                .store_op = .store,
+                .clear_value = .{ .color = .{ .float = .{ 0.2, 0.2, 0.2, 1.0 } } }, // FIXME UGLY!
+            },
+        }, null, null);
+        try command_buffer.endRenderPass();
 
         // [x] bind our pipeline
         // [x] bind the off-screen texture as the render target
@@ -164,8 +166,10 @@ pub fn main() !void {
         // [ ] present
         //   - queue ownership transfer of off-screen buffer?
 
-        try ctx.submitCommandBuffer(command_buffer);
+        last_submit = try ctx.submitCommandBuffer(command_buffer);
     }
+
+    try ctx.wait(last_submit);
 }
 
 fn getInstanceProcAddress(
