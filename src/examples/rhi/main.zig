@@ -156,13 +156,16 @@ pub fn main() !void {
                 .clear_value = .{ .color = .{ .float = .{ 0.2, 0.2, 0.2, 1.0 } } }, // FIXME UGLY!
             },
         }, null, null);
+        try command_buffer.bindIndexBuffer(index_buffer, 0);
+        try command_buffer.pushConstant(u64, vertex_buffer.buffer_device_address);
+        try command_buffer.drawIndexedInstanced(6, 1, 0, 0, 0);
         try command_buffer.endRenderPass();
 
         // [x] bind our pipeline
         // [x] bind the off-screen texture as the render target
-        // [ ] bind the index buffer
-        // [ ] push constant upload with the vertex buffer address
-        // [ ] draw
+        // [x] bind the index buffer
+        // [x] push constant upload with the vertex buffer address
+        // [x] draw
         // [ ] present
         //   - queue ownership transfer of off-screen buffer?
 

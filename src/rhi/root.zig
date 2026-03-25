@@ -30,6 +30,7 @@ const device_features = vk.PhysicalDeviceFeatures{
     .draw_indirect_first_instance = .true,
     .shader_int_64 = .true,
     .texture_compression_bc = .true,
+    .depth_bias_clamp = .true, // maybe we should remove this requirement?
 };
 const device_features_1_1 = vk.PhysicalDeviceVulkan11Features{
     .p_next = @ptrCast(@constCast(&device_features_1_2)),
@@ -679,14 +680,12 @@ pub const Context = struct {
                         );
                     } else {
                         ctx.device.cmdSetDepthBiasEnable(cmdbuf, .false);
-                        // ctx.device.cmdSetDepthBias(cmdbuf, 0.0, 0.0, 0.0);
                     }
                     if (dynamic_state.depth_stencil.depth_test) |compare_op| {
                         ctx.device.cmdSetDepthTestEnable(cmdbuf, .true);
                         ctx.device.cmdSetDepthCompareOp(cmdbuf, compare_op.vulkan());
                     } else {
                         ctx.device.cmdSetDepthTestEnable(cmdbuf, .false);
-                        // ctx.device.cmdSetDepthCompareOp(cmdbuf, .always);
                     }
                     ctx.device.cmdSetDepthWriteEnable(
                         cmdbuf,
@@ -744,33 +743,33 @@ pub const Context = struct {
                         );
                     } else {
                         ctx.device.cmdSetStencilTestEnable(cmdbuf, .false);
-                        // ctx.device.cmdSetStencilOp(
-                        //     cmdbuf,
-                        //     .{ .front_bit = true, .back_bit = true },
-                        //     .keep,
-                        //     .keep,
-                        //     .keep,
-                        //     .always,
-                        // );
-                        // ctx.device.cmdSetStencilCompareMask(
-                        //     cmdbuf,
-                        //     .{ .front_bit = true, .back_bit = true },
-                        //     0xFFFFFFFF,
-                        // );
-                        // ctx.device.cmdSetStencilWriteMask(
-                        //     cmdbuf,
-                        //     .{ .front_bit = true, .back_bit = true },
-                        //     0xFFFFFFFF,
-                        // );
-                        // ctx.device.cmdSetStencilReference(
-                        //     cmdbuf,
-                        //     .{ .front_bit = true, .back_bit = true },
-                        //     0x00000000,
-                        // );
                     }
                 },
                 .end_render_pass => {
                     ctx.device.cmdEndRendering(cmdbuf);
+                },
+                .bind_index_buffer => |cmd| {
+                    ctx.device.cmdBindIndexBuffer(cmdbuf, cmd.buffer, cmd.offset, .uint32);
+                },
+                .draw_indexed_instanced => |cmd| {
+                    ctx.device.cmdDrawIndexed(
+                        cmdbuf,
+                        cmd.index_count,
+                        cmd.instance_count,
+                        cmd.first_index,
+                        cmd.vertex_offset,
+                        cmd.first_instance,
+                    );
+                },
+                .push_constant => |cmd| {
+                    ctx.device.cmdPushConstants(
+                        cmdbuf,
+                        ctx.pipeline_layout,
+                        .{ .vertex_bit = true, .fragment_bit = true, .compute_bit = true },
+                        0,
+                        cmd.size,
+                        cmd.data,
+                    );
                 },
             }
         }
@@ -2836,6 +2835,21 @@ const Command = union(enum) {
         render_area_extent: vk.Extent2D,
     },
     end_render_pass: struct {},
+    bind_index_buffer: struct {
+        buffer: vk.Buffer,
+        offset: u64,
+    },
+    draw_indexed_instanced: struct {
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        vertex_offset: i32,
+        first_instance: u32,
+    },
+    push_constant: struct {
+        size: u32,
+        data: *const anyopaque,
+    },
 };
 
 const CommandBuffer = struct {
@@ -2916,5 +2930,38 @@ const CommandBuffer = struct {
 
     pub fn endRenderPass(buffer: *CommandBuffer) !void {
         try buffer.commands.append(buffer.arena, .{ .end_render_pass = .{} });
+    }
+
+    pub fn bindIndexBuffer(buffer: *CommandBuffer, index_buffer: *Buffer, offset: u64) !void {
+        try buffer.commands.append(
+            buffer.arena,
+            .{ .bind_index_buffer = .{ .buffer = index_buffer.buffer, .offset = offset } },
+        );
+    }
+
+    pub fn drawIndexedInstanced(
+        buffer: *CommandBuffer,
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        vertex_offset: i32,
+        first_instance: u32,
+    ) !void {
+        try buffer.commands.append(buffer.arena, .{ .draw_indexed_instanced = .{
+            .index_count = index_count,
+            .instance_count = instance_count,
+            .first_index = first_index,
+            .vertex_offset = vertex_offset,
+            .first_instance = first_instance,
+        } });
+    }
+
+    pub fn pushConstant(buffer: *CommandBuffer, comptime T: type, value: T) !void {
+        const data = try buffer.arena.create(T);
+        data.* = value;
+        try buffer.commands.append(buffer.arena, .{ .push_constant = .{
+            .size = @intCast(@sizeOf(T)),
+            .data = data,
+        } });
     }
 };

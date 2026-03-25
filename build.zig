@@ -98,7 +98,7 @@ fn addSlangShader(
         "-target", "spirv",
         "-entry",  b.fmt("{s}Main", .{stage}),
         "-stage",  stage,
-        "-O3",
+        "-O3",     "-fvk-use-c-layout",
     });
     cmd.addArg("-o");
     const spv_name = b.fmt("slang_{s}_{s}.spv", .{ stem, stage });
