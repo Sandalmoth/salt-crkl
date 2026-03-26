@@ -367,6 +367,11 @@ pub const Context = struct {
     pending_memory_barriers: std.ArrayList(vk.MemoryBarrier2),
     pending_image_barriers: std.ArrayList(vk.ImageMemoryBarrier2),
 
+    image_acquire_semaphores: std.ArrayList(struct {
+        semaphore: vk.Semaphore,
+        semaphore_value: u64,
+    }),
+
     pub fn create(
         gpa: std.mem.Allocator,
         platform: Platform,
@@ -412,6 +417,7 @@ pub const Context = struct {
         ctx.command_buffers = .empty;
         ctx.pending_memory_barriers = .empty;
         ctx.pending_image_barriers = .empty;
+        ctx.image_acquire_semaphores = .empty;
 
         // ctx.staging_allocs.getPtr(.upload).* = try .init(ctx, .upload, 256 * 1024 * 1024, 3);
         // ctx.staging_allocs.getPtr(.download).* = try .init(ctx, .download, 256 * 1024 * 1024, 1);
@@ -454,6 +460,11 @@ pub const Context = struct {
             ctx.device.destroyCommandPool(command_buffer.pool, null);
         }
         ctx.command_buffers.deinit(ctx.gpa);
+
+        for (ctx.image_acquire_semaphores.items) |semaphore| {
+            ctx.device.destroySemaphore(semaphore.semaphore, null);
+        }
+        ctx.image_acquire_semaphores.deinit(ctx.gpa);
 
         ctx.allocator.deinit();
 
