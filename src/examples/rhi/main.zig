@@ -84,6 +84,9 @@ pub fn main() !void {
     const pipeline = try ctx.createGraphicsPipeline(.{
         .vertex_shader = vertex_shader,
         .fragment_shader = fragment_shader,
+        .color_attachments = &.{.{
+            .format = .r8g8b8a8_srgb,
+        }},
     }, .{
         .viewport = .{
             .x = 0,
@@ -110,10 +113,10 @@ pub fn main() !void {
 
     const vertex_staging = try upload_allocator.alloc([3]f32, 4);
     vertex_staging[0..4].* = .{
-        .{ -1, -1, 0.5 },
-        .{ 1, -1, 0.5 },
-        .{ -1, 1, 0.5 },
-        .{ 1, 1, 0.5 },
+        .{ -0.9, -0.9, 0.5 },
+        .{ 0.9, -0.9, 0.5 },
+        .{ -0.9, 0.9, 0.5 },
+        .{ 0.9, 0.9, 0.5 },
     };
     const index_staging = try upload_allocator.alloc(u32, 6);
     index_staging[0..6].* = .{ 0, 2, 1, 2, 3, 1 };
