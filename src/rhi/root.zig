@@ -310,6 +310,7 @@ const Texture = struct {
             slab: *Allocator.Slab,
         },
         dedicated: vk.DeviceMemory,
+        swapchain: void,
     },
     image: vk.Image,
     default_view: vk.ImageView,
@@ -537,6 +538,7 @@ pub const Context = struct {
                         .dst_offset = cmd.dst_offset,
                         .size = cmd.size,
                     };
+                    std.debug.print("{}\n", .{region});
                     ctx.device.cmdCopyBuffer(
                         cmdbuf,
                         cmd.src_buffer,
@@ -551,12 +553,11 @@ pub const Context = struct {
                         ctx.gpa,
                         cmd.transitions.len,
                     );
-                    const access = cmd.vulkanAccessFlags();
                     const barrier: vk.MemoryBarrier2 = .{
                         .src_stage_mask = cmd.vulkanStageFlags(.src),
-                        .src_access_mask = access,
+                        .src_access_mask = cmd.vulkanAccessFlags(.src),
                         .dst_stage_mask = cmd.vulkanStageFlags(.dst),
-                        .dst_access_mask = access,
+                        .dst_access_mask = cmd.vulkanAccessFlags(.dst),
                     };
                     ctx.pending_memory_barriers.appendAssumeCapacity(barrier);
                     for (cmd.transitions) |transition| {
@@ -782,6 +783,60 @@ pub const Context = struct {
                         cmd.data,
                     );
                 },
+                .blit => |cmd| {
+                    // flush barriers, transitions need to happen before binding
+                    ctx.device.cmdPipelineBarrier2(cmdbuf, &.{
+                        .memory_barrier_count = @intCast(ctx.pending_memory_barriers.items.len),
+                        .p_memory_barriers = ctx.pending_memory_barriers.items.ptr,
+                        .image_memory_barrier_count = @intCast(ctx.pending_image_barriers.items.len),
+                        .p_image_memory_barriers = ctx.pending_image_barriers.items.ptr,
+                    });
+                    ctx.pending_memory_barriers.clearRetainingCapacity();
+                    ctx.pending_image_barriers.clearRetainingCapacity();
+
+                    // TODO proper setup of region
+                    const region: vk.ImageBlit2 = .{
+                        .src_offsets = .{ .{
+                            .x = cmd.src_region.bounds[0][0],
+                            .y = cmd.src_region.bounds[0][1],
+                            .z = cmd.src_region.bounds[0][2],
+                        }, .{
+                            .x = cmd.src_region.bounds[1][0],
+                            .y = cmd.src_region.bounds[1][1],
+                            .z = cmd.src_region.bounds[1][2],
+                        } },
+                        .src_subresource = .{
+                            .aspect_mask = .{ .color_bit = true },
+                            .base_array_layer = 0,
+                            .layer_count = 1,
+                            .mip_level = cmd.src_region.mip_level,
+                        },
+                        .dst_offsets = .{ .{
+                            .x = cmd.dst_region.bounds[0][0],
+                            .y = cmd.dst_region.bounds[0][1],
+                            .z = cmd.dst_region.bounds[0][2],
+                        }, .{
+                            .x = cmd.dst_region.bounds[1][0],
+                            .y = cmd.dst_region.bounds[1][1],
+                            .z = cmd.dst_region.bounds[1][2],
+                        } },
+                        .dst_subresource = .{
+                            .aspect_mask = .{ .color_bit = true },
+                            .base_array_layer = 0,
+                            .layer_count = 1,
+                            .mip_level = cmd.dst_region.mip_level,
+                        },
+                    };
+                    ctx.device.cmdBlitImage2(cmdbuf, &.{
+                        .src_image = cmd.src.image,
+                        .src_image_layout = cmd.src.layout,
+                        .dst_image = cmd.dst.image,
+                        .dst_image_layout = cmd.dst.layout,
+                        .region_count = 1,
+                        .p_regions = @ptrCast(&region),
+                        .filter = .nearest, // TODO expose
+                    });
+                },
             }
         }
 
@@ -799,30 +854,101 @@ pub const Context = struct {
             .memory_barrier_count = 1,
         });
 
-        try ctx.device.endCommandBuffer(cmdbuf);
+        if (command_buffer.swapchain == null) {
+            try ctx.device.endCommandBuffer(cmdbuf);
+            const command_buffer_submit_info: vk.CommandBufferSubmitInfo = .{
+                .command_buffer = cmdbuf,
+                .device_mask = 0,
+            };
+            const signal_semaphore_info: vk.SemaphoreSubmitInfo = .{
+                .semaphore = ctx.queue_semaphore,
+                .value = ctx.queue_semaphore_value + 1,
+                .stage_mask = .{ .all_commands_bit = true },
+                .device_index = 0,
+            };
+            try ctx.queue.submit2(1, @ptrCast(&vk.SubmitInfo2{
+                .command_buffer_info_count = 1,
+                .p_command_buffer_infos = @ptrCast(&command_buffer_submit_info),
+                .signal_semaphore_info_count = 1,
+                .p_signal_semaphore_infos = @ptrCast(&signal_semaphore_info),
+            }), .null_handle);
+        } else {
+            // FIXME don't sync too much
+            // flush barriers, transitions need to happen before binding
+            ctx.device.cmdPipelineBarrier2(cmdbuf, &.{
+                .memory_barrier_count = @intCast(ctx.pending_memory_barriers.items.len),
+                .p_memory_barriers = ctx.pending_memory_barriers.items.ptr,
+                .image_memory_barrier_count = @intCast(ctx.pending_image_barriers.items.len),
+                .p_image_memory_barriers = ctx.pending_image_barriers.items.ptr,
+            });
+            ctx.pending_memory_barriers.clearRetainingCapacity();
+            ctx.pending_image_barriers.clearRetainingCapacity();
+            ctx.device.cmdPipelineBarrier2(cmdbuf, &.{
+                .image_memory_barrier_count = 1,
+                .p_image_memory_barriers = @ptrCast(&vk.ImageMemoryBarrier2{
+                    .src_stage_mask = .{ .all_commands_bit = true },
+                    .src_access_mask = .{ .memory_write_bit = true },
+                    .dst_stage_mask = .{ .all_commands_bit = true },
+                    .dst_access_mask = .{ .memory_read_bit = true },
+                    .image = command_buffer.swapchain_texture.?.image,
+                    .old_layout = command_buffer.swapchain_texture.?.layout,
+                    .new_layout = .present_src_khr,
+                    .src_queue_family_index = ctx.queue_family,
+                    .dst_queue_family_index = ctx.queue_family,
+                    .subresource_range = .{
+                        .aspect_mask = .{ .color_bit = true },
+                        .base_array_layer = 0,
+                        .base_mip_level = 0,
+                        .layer_count = 1,
+                        .level_count = 1,
+                    },
+                }),
+            });
+            try ctx.device.endCommandBuffer(cmdbuf);
 
-        const timeline_semaphore_info: vk.TimelineSemaphoreSubmitInfo = .{
-            .p_wait_semaphore_values = @ptrCast(&ctx.queue_semaphore_value),
-            .p_signal_semaphore_values = @ptrCast(&(ctx.queue_semaphore_value + 1)),
-            .signal_semaphore_value_count = 1,
-            .wait_semaphore_value_count = 1,
-        };
-        const wait_dst_stage_mask: vk.PipelineStageFlags = .{ .top_of_pipe_bit = true };
-        const submit_info: vk.SubmitInfo = .{
-            .command_buffer_count = 1,
-            .p_command_buffers = @ptrCast(&cmdbuf),
-            .wait_semaphore_count = 1,
-            .p_wait_semaphores = @ptrCast(&ctx.queue_semaphore),
-            .p_wait_dst_stage_mask = @ptrCast(&wait_dst_stage_mask),
-            .signal_semaphore_count = 1,
-            .p_signal_semaphores = @ptrCast(&ctx.queue_semaphore),
-            .p_next = &timeline_semaphore_info,
-        };
-        try ctx.queue.submit(
-            1,
-            @ptrCast(&submit_info),
-            .null_handle,
-        );
+            const command_buffer_submit_info: vk.CommandBufferSubmitInfo = .{
+                .command_buffer = cmdbuf,
+                .device_mask = 0,
+            };
+            const wait_semaphore_info: vk.SemaphoreSubmitInfo = .{
+                .semaphore = command_buffer.swapchain_acquire_semaphore.?,
+                .stage_mask = .{ .all_commands_bit = true },
+                .device_index = 0,
+                .value = undefined, // ignored, not a timeline semaphore
+            };
+            const signal_semaphore_infos: [2]vk.SemaphoreSubmitInfo = .{
+                .{
+                    .semaphore = ctx.queue_semaphore,
+                    .value = ctx.queue_semaphore_value + 1,
+                    .stage_mask = .{ .all_commands_bit = true },
+                    .device_index = 0,
+                },
+                .{
+                    .semaphore = command_buffer.swapchain_release_semaphore.?,
+                    .stage_mask = .{ .all_commands_bit = true },
+                    .device_index = 0,
+                    .value = undefined, // ignored, not a timeline semaphore
+                },
+            };
+            try ctx.queue.submit2(1, @ptrCast(&vk.SubmitInfo2{
+                .command_buffer_info_count = 1,
+                .p_command_buffer_infos = @ptrCast(&command_buffer_submit_info),
+                .wait_semaphore_info_count = 1,
+                .p_wait_semaphore_infos = @ptrCast(&wait_semaphore_info),
+                .signal_semaphore_info_count = 2,
+                .p_signal_semaphore_infos = @ptrCast(&signal_semaphore_infos[0]),
+            }), .null_handle);
+            // std.debug.print("{}\n", .{command_buffer.*});
+            _ = try ctx.queue.presentKHR(&.{
+                .wait_semaphore_count = 1,
+                .p_wait_semaphores = @ptrCast(&command_buffer.swapchain_release_semaphore.?),
+                .swapchain_count = 1,
+                .p_swapchains = @ptrCast(&command_buffer.swapchain.?),
+                .p_image_indices = @ptrCast(&command_buffer.swapchain_image_index.?),
+            });
+
+            ctx.texture_pool.destroy(command_buffer.swapchain_texture.?);
+        }
 
         ctx.command_buffer_pool.destroy(command_buffer);
         ctx.queue_semaphore_value += 1;
@@ -1021,6 +1147,7 @@ pub const Context = struct {
                 ctx.device.destroyImage(texture.image, null);
                 ctx.device.freeMemory(memory, null);
             },
+            .swapchain => @panic("swapchain image must not be destroyed"),
         }
         ctx.texture_pool.destroy(texture);
     }
@@ -1512,9 +1639,7 @@ const Swapchain = struct {
     extent: vk.Extent2D,
     images: []vk.Image,
     views: []vk.ImageView,
-    acquire_semaphores: []vk.Semaphore,
     release_semaphores: []vk.Semaphore,
-    fences: []vk.Fence,
 
     fn init(ctx: *const Context, old_swapchain: vk.SwapchainKHR) !Swapchain {
         var arena_struct = std.heap.ArenaAllocator.init(ctx.gpa);
@@ -1600,16 +1725,6 @@ const Swapchain = struct {
             };
         }
 
-        const acquire_semaphores = try ctx.gpa.alloc(vk.Semaphore, swapchain_images.len);
-        errdefer ctx.gpa.free(acquire_semaphores);
-        for (0..swapchain_images.len) |i| {
-            acquire_semaphores[i] = ctx.device.createSemaphore(&.{}, null) catch |e| {
-                var j = i;
-                while (j > 0) : (j -= 1) ctx.device.destroySemaphore(acquire_semaphores[j - 1], null);
-                return e;
-            };
-        }
-
         const release_semaphores = try ctx.gpa.alloc(vk.Semaphore, swapchain_images.len);
         errdefer ctx.gpa.free(release_semaphores);
         for (0..swapchain_images.len) |i| {
@@ -1620,38 +1735,19 @@ const Swapchain = struct {
             };
         }
 
-        const fences = try ctx.gpa.alloc(vk.Fence, swapchain_images.len);
-        errdefer ctx.gpa.free(fences);
-        for (0..swapchain_images.len) |i| {
-            fences[i] = ctx.device.createFence(&.{
-                .flags = .{ .signaled_bit = true }, // create signalled so we can use it right away
-            }, null) catch |e| {
-                var j = i;
-                while (j > 0) : (j -= 1) ctx.device.destroyFence(fences[j - 1], null);
-                return e;
-            };
-        }
-
         return .{
             .swapchain = swapchain,
             .format = swapchain_format,
             .extent = swapchain_extent,
             .images = swapchain_images,
             .views = swapchain_views,
-            .acquire_semaphores = acquire_semaphores,
             .release_semaphores = release_semaphores,
-            .fences = fences,
         };
     }
 
     fn deinit(swapchain: *Swapchain, ctx: *const Context) void {
-        // NOTE think about if we need to wait for all fences and semaphores
-        for (swapchain.fences) |fence| ctx.device.destroyFence(fence, null);
-        for (swapchain.acquire_semaphores) |semaphore| ctx.device.destroySemaphore(semaphore, null);
         for (swapchain.release_semaphores) |semaphore| ctx.device.destroySemaphore(semaphore, null);
         for (swapchain.views) |view| ctx.device.destroyImageView(view, null);
-        ctx.gpa.free(swapchain.fences);
-        ctx.gpa.free(swapchain.acquire_semaphores);
         ctx.gpa.free(swapchain.release_semaphores);
         ctx.gpa.free(swapchain.views);
         ctx.gpa.free(swapchain.images);
@@ -1840,11 +1936,13 @@ const Allocator = struct {
             // buffer_create_info.size,
             buffer_memreq.memory_requirements.size,
         );
+        std.debug.print("{}\n", .{suballoc.allocation});
+        std.debug.print("{}\n", .{suballoc.allocation});
 
         try allocator.ctx.device.bindBufferMemory(
             buffer,
             suballoc.slab.memory,
-            suballoc.allocation.offset,
+            suballoc.allocation.offset * Slab.granularity,
         );
 
         const address = allocator.ctx.device.getBufferDeviceAddress(&.{
@@ -1872,7 +1970,7 @@ const Allocator = struct {
         allocation: Allocation,
         slab: *Slab,
     } {
-        const granule_size: u32 = @intCast(size / Slab.granularity);
+        const granule_size: u32 = @intCast((size + Slab.granularity - 1) / Slab.granularity);
 
         // ideally there should be some allocation policy where we try to match flags
         // and we try to allocate into the most full slab first (i think?)
@@ -2778,6 +2876,11 @@ const LayoutTransition = struct {
 };
 
 const Command = union(enum) {
+    const BlitRegion = struct {
+        bounds: [2][3]i32,
+        mip_level: u32,
+    };
+
     buffer_upload: struct {
         size: u32,
         src_offset: u32,
@@ -2813,14 +2916,22 @@ const Command = union(enum) {
                 .index_input_bit = vertex,
             };
         }
-        fn vulkanAccessFlags(barrier: @This()) vk.AccessFlags2 {
-            const src_stage_flags = barrier.src_stages;
-            const dst_stage_flags = barrier.dst_stages;
+        fn vulkanAccessFlags(barrier: @This(), which: enum { src, dst }) vk.AccessFlags2 {
+            const stage_flags = switch (which) {
+                .src => barrier.src_stages,
+                .dst => barrier.dst_stages,
+            };
+            // const src_stage_flags = barrier.src_stages;
+            // const dst_stage_flags = barrier.dst_stages;
             const access_flags = barrier.access;
-            const vertex = src_stage_flags.vertex or dst_stage_flags.vertex;
-            const fragment = src_stage_flags.fragment or dst_stage_flags.fragment;
-            const compute = src_stage_flags.compute or dst_stage_flags.compute;
-            const transfer = src_stage_flags.transfer or dst_stage_flags.transfer;
+            // const vertex = src_stage_flags.vertex or dst_stage_flags.vertex;
+            // const fragment = src_stage_flags.fragment or dst_stage_flags.fragment;
+            // const compute = src_stage_flags.compute or dst_stage_flags.compute;
+            // const transfer = src_stage_flags.transfer or dst_stage_flags.transfer;
+            const vertex = stage_flags.vertex;
+            const fragment = stage_flags.fragment;
+            const compute = stage_flags.compute;
+            const transfer = stage_flags.transfer;
             return .{
                 .indirect_command_read_bit = access_flags.indirect,
                 .index_read_bit = vertex and access_flags.storage,
@@ -2861,16 +2972,33 @@ const Command = union(enum) {
         size: u32,
         data: *const anyopaque,
     },
+    blit: struct {
+        src: *Texture,
+        dst: *Texture,
+        src_region: BlitRegion,
+        dst_region: BlitRegion,
+    },
 };
 
 const CommandBuffer = struct {
     arena: std.mem.Allocator,
     commands: std.SegmentedList(Command, 64),
 
+    swapchain: ?vk.SwapchainKHR,
+    swapchain_texture: ?*Texture,
+    swapchain_image_index: ?u32,
+    swapchain_acquire_semaphore: ?vk.Semaphore,
+    swapchain_release_semaphore: ?vk.Semaphore,
+
     fn init(arena: std.mem.Allocator) CommandBuffer {
         return .{
             .arena = arena,
             .commands = .{},
+            .swapchain = null,
+            .swapchain_texture = null,
+            .swapchain_image_index = null,
+            .swapchain_acquire_semaphore = null,
+            .swapchain_release_semaphore = null,
         };
     }
 
@@ -2912,6 +3040,11 @@ const CommandBuffer = struct {
             .dst_offset = dst_offset,
             .dst_buffer = dst_buffer.buffer,
         } });
+
+        switch (info.pointer.size) {
+            .slice => std.debug.print("{any}\n", .{src_data}),
+            else => {},
+        }
     }
 
     pub fn beginRenderPass(
@@ -2973,6 +3106,68 @@ const CommandBuffer = struct {
         try buffer.commands.append(buffer.arena, .{ .push_constant = .{
             .size = @intCast(@sizeOf(T)),
             .data = data,
+        } });
+    }
+
+    pub fn acquireSwapchain(buffer: *CommandBuffer, ctx: *Context) !*Texture {
+        std.debug.assert(buffer.swapchain == null);
+        const semaphore_value = try ctx.device.getSemaphoreCounterValue(ctx.queue_semaphore);
+        const acquire_semaphore = blk: {
+            for (ctx.image_acquire_semaphores.items) |*x| {
+                if (x.semaphore_value > semaphore_value) continue;
+                x.semaphore_value = ctx.queue_semaphore_value + 1;
+                break :blk x.semaphore;
+            }
+
+            const semaphore = try ctx.device.createSemaphore(&.{}, null);
+            try ctx.image_acquire_semaphores.append(ctx.gpa, .{
+                .semaphore = semaphore,
+                .semaphore_value = ctx.queue_semaphore_value + 1,
+            });
+            break :blk semaphore;
+        };
+
+        const image_index = (try ctx.device.acquireNextImageKHR(
+            ctx.swapchain.swapchain,
+            1_000_000_000,
+            acquire_semaphore,
+            .null_handle,
+        )).image_index;
+
+        const texture = try ctx.texture_pool.create();
+        texture.* = .{
+            .memory = .{ .swapchain = {} },
+            .image = ctx.swapchain.images[image_index],
+            .default_view = ctx.swapchain.views[image_index],
+            .size = .{ ctx.swapchain.extent.width, ctx.swapchain.extent.height, 1 },
+            .layout = .undefined,
+            .format = switch (ctx.swapchain.format.format) {
+                .b8g8r8a8_srgb => .b8g8r8a8_srgb,
+                .r8g8b8a8_srgb => .r8g8b8a8_srgb,
+                else => return error.TODOSwapchainFormatNotImplementedYet,
+            },
+            .mip_levels = 1,
+        };
+        buffer.swapchain = ctx.swapchain.swapchain;
+        buffer.swapchain_texture = texture;
+        buffer.swapchain_image_index = image_index;
+        buffer.swapchain_acquire_semaphore = acquire_semaphore;
+        buffer.swapchain_release_semaphore = ctx.swapchain.release_semaphores[image_index];
+        return texture;
+    }
+
+    pub fn blit(
+        buffer: *CommandBuffer,
+        src: *Texture,
+        src_region: Command.BlitRegion,
+        dst: *Texture,
+        dst_region: Command.BlitRegion,
+    ) !void {
+        try buffer.commands.append(buffer.arena, .{ .blit = .{
+            .src = src,
+            .src_region = src_region,
+            .dst = dst,
+            .dst_region = dst_region,
         } });
     }
 };

@@ -71,6 +71,7 @@ pub fn main() !void {
         .usage = .{
             .color_attachment = true,
             .sampled = true,
+            .transfer_src = true,
         },
         .image_type = .image_2d,
         .mip_levels = 1,
@@ -98,6 +99,8 @@ pub fn main() !void {
             .width = 640,
             .height = 480,
         },
+        .rasterization = .{ .cull_mode = .{ .back = false, .front = false } },
+        .depth_stencil = .{ .depth_test = null, .enable_depth_write = false },
     });
     defer ctx.destroyGraphicsPipeline(pipeline);
 
@@ -115,13 +118,25 @@ pub fn main() !void {
     const index_staging = try upload_allocator.alloc(u32, 6);
     index_staging[0..6].* = .{ 0, 2, 1, 2, 3, 1 };
 
+    for (0..32) |i| {
+        const bytes = upload_buffer.mapped_memory[i * 4 .. (i + 1) * 4];
+        std.debug.print("{}\t{any}\n", .{ i, bytes });
+    }
+
     {
         const command_buffer = try ctx.acquireCommandBuffer(arena);
         try command_buffer.uploadToBuffer(upload_buffer, vertex_staging, vertex_buffer, 0);
         try command_buffer.uploadToBuffer(upload_buffer, index_staging, index_buffer, 0);
+        try command_buffer.barrier(
+            .{ .transfer = true },
+            .{ .vertex = true },
+            .{ .storage = true },
+            &.{},
+        );
         _ = try ctx.submitCommandBuffer(command_buffer);
     }
 
+    var prev_submit: u64 = 0;
     var last_submit: u64 = 0;
 
     main_loop: while (true) {
@@ -136,7 +151,7 @@ pub fn main() !void {
             };
         }
 
-        std.Thread.sleep(100_000_000);
+        // std.Thread.sleep(100_000_000);
 
         // lets just aim for a hello triangle as step one
         // just to see what needs to be abstracted
@@ -153,13 +168,48 @@ pub fn main() !void {
                 .texture = color_target,
                 .load_op = .clear,
                 .store_op = .store,
-                .clear_value = .{ .color = .{ .float = .{ 0.2, 0.2, 0.2, 1.0 } } }, // FIXME UGLY!
+                .clear_value = .{ .color = .{ .float = .{ 0, 1.0, 0, 1.0 } } }, // FIXME UGLY!
             },
         }, null, null);
         try command_buffer.bindIndexBuffer(index_buffer, 0);
         try command_buffer.pushConstant(u64, vertex_buffer.buffer_device_address);
         try command_buffer.drawIndexedInstanced(6, 1, 0, 0, 0);
         try command_buffer.endRenderPass();
+
+        const swapchain = try command_buffer.acquireSwapchain(ctx);
+        try command_buffer.barrier(
+            .{ .fragment = true },
+            .{ .transfer = true },
+            .{ .attachment = true, .storage = true },
+            &.{.{ .texture = color_target, .layout = .transfer_src, .preserve_contents = true }},
+        );
+        try command_buffer.barrier(
+            .{ .transfer = true },
+            .{ .transfer = true },
+            .{ .storage = true },
+            &.{.{ .texture = swapchain, .layout = .transfer_dst, .preserve_contents = false }},
+        );
+        try command_buffer.blit(color_target, .{
+            .bounds = .{
+                .{ 0, 0, 0 },
+                .{
+                    @intCast(color_target.size[0]),
+                    @intCast(color_target.size[1]),
+                    @intCast(color_target.size[2]),
+                },
+            },
+            .mip_level = 0,
+        }, swapchain, .{
+            .bounds = .{
+                .{ 0, 0, 0 },
+                .{
+                    @intCast(swapchain.size[0]),
+                    @intCast(swapchain.size[1]),
+                    @intCast(swapchain.size[2]),
+                },
+            },
+            .mip_level = 0,
+        });
 
         // [x] bind our pipeline
         // [x] bind the off-screen texture as the render target
@@ -169,6 +219,8 @@ pub fn main() !void {
         // [ ] present
         //   - queue ownership transfer of off-screen buffer?
 
+        try ctx.wait(prev_submit);
+        prev_submit = last_submit;
         last_submit = try ctx.submitCommandBuffer(command_buffer);
     }
 
