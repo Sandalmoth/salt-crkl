@@ -1,5 +1,17 @@
 const std = @import("std");
 
+const Window = *anyopaque;
+
+// how do we abstract the platform?
+// i guess we'd have to have separate platforms for each backend?
+// const Platform = struct {
+//     getInstanceProcAddress: *const fn (vk.Instance, [*:0]const u8) vk.PfnVoidFunction,
+//     getRequiredInstanceExtensions: *const fn () anyerror![]const [*:0]const u8,
+//     createWindowSurface: *const fn (vk.Instance, window: *anyopaque) anyerror!vk.SurfaceKHR,
+//     getFramebufferSize: *const fn (window: *anyopaque) anyerror!vk.Extent2D,
+//     window: *anyopaque,
+// };
+
 pub const SwapchainComposition = enum {
     sdr,
 };
@@ -56,6 +68,7 @@ pub const TextureCreateInfo = struct {
     size: [3]u32, // x, y, z or layer_count
     samples: SampleCount = .@"1",
     views: []const TextureViewCreateInfo = &.{},
+    group: ?*const TextureGroup = null,
 };
 
 pub const TextureViewCreateInfo = struct {
@@ -91,8 +104,14 @@ pub const TextureViewCreateInfo = struct {
 };
 
 pub const Texture = struct {
-    default_view_index: u20,
-    view_indices: []u20,
+    group: *const TextureGroup,
+    // So, we wouldn't have addresses for the swapchain texture
+    // but it would be kinda awkward to have to check for null everywhere
+    // maybe we could make std.math.maxInt(u20) an invalid address?
+    default_view_device_address: u20,
+    view_device_addresses: []const u20,
+    // And when binding as a color target, we need to specify the view
+    // but not by address, by index in the list of views (or default)
 
     info: struct {
         size: [3]u32,
@@ -114,10 +133,13 @@ pub const BufferCreateInfo = struct {
         indirect: bool = false,
     },
     size: usize,
+    group: ?*const BufferGroup = null,
 };
 
 pub const Buffer = struct {
-    buffer_device_address: u64,
+    group: *const BufferGroup,
+    device_address: u64,
+
     info: struct {
         size: usize,
     },
@@ -129,6 +151,11 @@ pub const SamplerCreateInfo = struct {};
 
 pub const Sampler = struct {
     index: u12,
+};
+
+pub const ShaderCreateInfo = struct {
+    stage: Shader.Stage,
+    src: []const u8,
 };
 
 pub const Shader = struct {
@@ -315,24 +342,60 @@ pub const ComputePipeline = struct {};
 
 pub const StagingAllocatorUsage = enum { upload, download };
 
+pub const Queue = enum { graphics, compute, transfer };
+
+pub const Fence = struct {
+    graphics: u64,
+    compute: u64,
+    transfer: u64,
+};
+
 pub const Context = struct {
-    const Error = error{};
+    const Error = error{
+        OutOfHostMemory,
+        OutOfDeviceMemory,
+        Timeout,
+    };
 
     ptr: *anyopaque,
     vtable: *const VTable,
 
     pub const VTable = struct {
         createBuffer: *const fn (*anyopaque, BufferCreateInfo) Error!*const Buffer,
-        destroyBuffer: *const fn (*anyopaque, *const Buffer) void,
-
         createTexture: *const fn (*anyopaque, TextureCreateInfo) Error!*const Texture,
-        destroyTexture: *const fn (*anyopaque, *const Texture) void,
-
         createSampler: *const fn (*anyopaque, SamplerCreateInfo) Error!*const Sampler,
-        destroySampler: *const fn (*anyopaque, *const Sampler) void,
+        createBufferGroup: *const fn (*anyopaque) Error!*const BufferGroup,
+        createTextureGroup: *const fn (*anyopaque) Error!*const TextureGroup,
+        createShader: *const fn (*anyopaque, ShaderCreateInfo) Error!*const Shader,
+        createGraphicsPipeline: *const fn (*anyopaque, GraphicsPipelineCreateInfo) Error!*const GraphicsPipeline,
+        createComputePipeline: *const fn (*anyopaque, ComputePipelineCreateInfo) Error!*const ComputePipeline,
 
-        stagingAllocator: *const fn (*anyopaque, usage: StagingAllocatorUsage) std.mem.Allocator,
+        destroyBuffer: *const fn (*anyopaque, *const Buffer) void,
+        destroyTexture: *const fn (*anyopaque, *const Texture) void,
+        destroySampler: *const fn (*anyopaque, *const Sampler) void,
+        destroyBufferGroup: *const fn (*anyopaque, *const BufferGroup) void,
+        destroyTextureGroup: *const fn (*anyopaque, *const TextureGroup) void,
+        destroyShader: *const fn (*anyopaque, *const Shader) void,
+        destroyGraphicsPipeline: *const fn (*anyopaque, *const GraphicsPipeline) void,
+        destroyComputePipeline: *const fn (*anyopaque, *const ComputePipeline) void,
+
+        stagingAllocator: *const fn (*anyopaque, StagingAllocatorUsage) std.mem.Allocator,
+
+        acquireCommandBuffer: *const fn (*anyopaque, Queue) Error!*CommandBuffer,
+        submit: *const fn (*anyopaque, []CommandBuffer) Error!Fence,
+        waitQueue: *const fn (*anyopaque, Fence, Queue, u64) Error!void,
+        waitFence: *const fn (*anyopaque, Fence, u64) Error!void,
+        testQueue: *const fn (*anyopaque, Fence, Queue) bool,
+        testFence: *const fn (*anyopaque, Fence) bool,
+
+        setBufferGroup: *const fn (*anyopaque, *const Buffer, ?*const BufferGroup) void,
+        setTextureGroup: *const fn (*anyopaque, *const Texture, ?*const TextureGroup) void,
     };
+};
+
+pub const BlitRegion = struct {
+    bounds: [2][3]i32,
+    mip_level: u32,
 };
 
 pub const CommandBuffer = struct {
@@ -341,54 +404,61 @@ pub const CommandBuffer = struct {
 
     pub const VTable = struct {
         bufferUpload: *const fn (*anyopaque, *anyopaque, usize, *const Buffer, u64) void,
+        bufferDownload: *const fn (*anyopaque, *const Buffer, u64, *anyopaque, usize) void,
+        textureUpload: *const fn (*anyopaque, *anyopaque, usize, *const Texture, u64) void,
+        textureDownload: *const fn (*anyopaque, *const Texture, u64, *anyopaque, usize) void,
+
+        waitAndAcquireSwapchainTexture: *const fn (*anyopaque, Window) void,
+
+        bufferCopy: *const fn (*anyopaque, *const Buffer, u64, *const Buffer, u64, u64) void,
+        textureCopy: *const fn (*anyopaque, *const Texture, *const Texture) void, // TODO args
+        blit: *const fn (*anyopaque, *const Texture, BlitRegion, *const Texture, BlitRegion) void, // TODO args
+
+        beginRenderPass: *const fn (*anyopaque) *RenderPass, // TODO args
+        endRenderPass: *const fn (*anyopaque, *RenderPass) void,
+        beginComputePass: *const fn (*anyopaque) *RenderPass, // TODO args
+        endComputePass: *const fn (*anyopaque, *RenderPass) void,
     };
 
-    fn bufferUpload(
-        cmdbuf: *CommandBuffer,
-        src: anytype,
-        buf: *const Buffer,
-        offset: u64,
-    ) void {
-        const info = @typeInfo(@TypeOf(src));
-        std.debug.assert(info == .pointer);
-        const ptr: *anyopaque = switch (info.pointer.size) {
-            .slice => @ptrCast(src.ptr),
-            else => @ptrCast(src),
-        };
-        const len: usize = switch (info.pointer.size) {
-            .slice => @sizeOf(info.pointer.child) * src.len,
-            else => @sizeOf(info.pointer.child),
-        };
-        cmdbuf.vtable.bufferUpload(cmdbuf, ptr, len, buf, offset);
-    }
+    // genericu will have to be wrapped like this
+    // fn bufferUpload(
+    //     cmdbuf: *CommandBuffer,
+    //     src: anytype,
+    //     buf: *const Buffer,
+    //     offset: u64,
+    // ) void {
+    //     const info = @typeInfo(@TypeOf(src));
+    //     std.debug.assert(info == .pointer);
+    //     const ptr: *anyopaque = switch (info.pointer.size) {
+    //         .slice => @ptrCast(src.ptr),
+    //         else => @ptrCast(src),
+    //     };
+    //     const len: usize = switch (info.pointer.size) {
+    //         .slice => @sizeOf(info.pointer.child) * src.len,
+    //         else => @sizeOf(info.pointer.child),
+    //     };
+    //     cmdbuf.vtable.bufferUpload(cmdbuf, ptr, len, buf, offset);
+    // }
 };
 
-test "yo" {
-    const Foo = struct {
-        howdy: u32 = 0,
+pub const RenderPass = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
 
-        fn bar(foo: *anyopaque, ptr: *anyopaque, len: usize, buf: *const Buffer, offset: u64) void {
-            _ = foo;
-            std.debug.print("{*}, {}\n", .{ ptr, len });
-            _ = buf;
-            _ = offset;
-        }
+    pub const VTable = struct {
+        draw: *const fn (*anyopaque, u32, u32, u32, i32, u32) void,
+        drawIndirect: *const fn (*anyopaque, *const Buffer, u64, u32) void,
+        drawIndirectCount: *const fn (*anyopaque, *const Buffer, u64, *const Buffer, u64, u32) void,
+        pushConstant: *const fn (*anyopaque, *anyopaque, usize) void, // TODO generic wrap
     };
+};
 
-    var foo: Foo = .{};
+pub const ComputePass = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
 
-    const vtable: CommandBuffer.VTable = .{
-        .bufferUpload = &Foo.bar,
+    pub const VTable = struct {
+        dispatch: *const fn (*anyopaque, u32, u32, u32) void,
+        dispatchIndirect: *const fn (*anyopaque, *const Buffer, u64) void,
     };
-
-    var cmdbuf: CommandBuffer = .{
-        .ptr = &foo,
-        .vtable = &vtable,
-    };
-
-    var foos: [3]Foo = .{ foo, foo, foo };
-    const foo_slice: []Foo = foos[0..3];
-
-    cmdbuf.bufferUpload(&foo, undefined, 0);
-    cmdbuf.bufferUpload(foo_slice, undefined, 0);
-}
+};
