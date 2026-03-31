@@ -14,11 +14,13 @@ const Window = *anyopaque;
 
 pub const SwapchainComposition = enum {
     sdr,
+    // TODO add more options
 };
 
 pub const PresentMode = enum {
     fifo,
     mailbox,
+    // TODO add more options
 };
 
 pub const Format = enum {
@@ -34,6 +36,7 @@ pub const Format = enum {
     d24_unorm_s8_uint,
     d32_sfloat,
     d32_sfloat_s8_uint,
+    // TODO check for other particularly useful and well supported formats
 };
 
 pub const SampleCount = enum {
@@ -47,73 +50,98 @@ pub const SampleCount = enum {
 };
 
 pub const TextureType = enum {
-    image_2d,
-    image_3d,
-    image_cube,
-    image_2d_array,
-    image_cube_array,
+    texture_2d,
+    texture_3d,
+    texture_cube,
+    texture_2d_array,
+    texture_cube_array,
+};
+
+pub const ViewType = enum {
+    view_2d,
+    view_3d,
+    view_cube,
+    view_2d_array,
+    view_cube_array,
+};
+
+pub const TextureUsage = struct {
+    storage: bool = false,
+    sampled: bool = false,
+    transfer_src: bool = false,
+    transfer_dst: bool = false,
+    attachment: bool = false, // color or depth_stencil is inferred based on format
+
 };
 
 pub const TextureCreateInfo = struct {
-    usage: struct {
-        storage: bool = false,
-        sampled: bool = false,
-        transfer_src: bool = false,
-        transfer_dst: bool = false,
-        attachment: bool = false, // color or depth_stencil is inferred based on format
-    },
+    usage: TextureUsage,
     format: Format,
     texture_type: TextureType,
     mip_levels: u32,
     size: [3]u32, // x, y, z or layer_count
     samples: SampleCount = .@"1",
     views: []const TextureViewCreateInfo = &.{},
-    group: ?*const TextureGroup = null,
+    group: ?*const Group = null,
+};
+
+const ViewSwizzle = struct {
+    const Component = enum {
+        zero,
+        one,
+        r,
+        g,
+        b,
+        a,
+    };
+    r: Component = .r,
+    g: Component = .g,
+    b: Component = .b,
+    a: Component = .a,
+};
+
+const ViewRange = struct {
+    base_mip_level: u32,
+    level_count: u32,
+    base_array_layer: u32,
+    layer_count: u32,
+    mask: ?enum { depth, stencil } = null,
 };
 
 pub const TextureViewCreateInfo = struct {
-    view_type: ?enum {
-        view_2d,
-        view_3d,
-        view_cube,
-        view_2d_array,
-        view_cube_array,
-    } = null,
+    view_type: ?ViewType = null,
     format: ?Format = null,
-    swizzle: struct {
-        const Component = enum {
-            zero,
-            one,
-            r,
-            g,
-            b,
-            a,
-        };
-        r: Component = .r,
-        g: Component = .g,
-        b: Component = .b,
-        a: Component = .a,
-    } = .{},
-    range: ?struct {
-        base_mip_level: u32,
-        level_count: u32,
-        base_array_layer: u32,
-        layer_count: u32,
-        mask: ?enum { depth, stencil } = null,
-    } = null,
+    swizzle: ViewSwizzle = .{},
+    range: ?ViewRange,
+};
+
+pub const TextureView = struct {
+    // So, we wouldn't have addresses for the swapchain texture
+    // because it's just more consistent to not put them in our descriptor set i think
+    // it's fine for the swapchain texture to have pretty limited usages
+    // but it would be kinda awkward to have to check for null everywhere
+    // maybe we could make std.math.maxInt(u20) an invalid address?
+    // although, seems like basically all desktop hardware supports
+    // transfer_src/dst, color_attachment, sampled and storage bits
+    // so maybe we should just allow all those operations on the swapchain
+    // in which case it will actually have a device address
+    device_address: u20,
+
+    info: struct {
+        view_type: ViewType,
+        format: Format,
+        swizzle: ViewSwizzle,
+        range: ViewRange,
+    },
 };
 
 pub const Texture = struct {
-    group: *const TextureGroup,
-    // So, we wouldn't have addresses for the swapchain texture
-    // but it would be kinda awkward to have to check for null everywhere
-    // maybe we could make std.math.maxInt(u20) an invalid address?
-    default_view_device_address: u20,
-    view_device_addresses: []const u20,
-    // And when binding as a color target, we need to specify the view
-    // but not by address, by index in the list of views (or default)
+    group: *const Group,
+    default_view: TextureView,
+    views: TextureView,
 
     info: struct {
+        usage: TextureUsage,
         size: [3]u32,
         format: Format,
         mip_levels: u32,
@@ -122,35 +150,73 @@ pub const Texture = struct {
     },
 };
 
-pub const TextureGroup = struct {};
+pub const Group = struct {};
+
+pub const BufferUsage = struct {
+    storage: bool = false,
+    transfer_src: bool = false,
+    transfer_dst: bool = false,
+    index: bool = false,
+    indirect: bool = false,
+};
 
 pub const BufferCreateInfo = struct {
-    usage: struct {
-        storage: bool = false,
-        transfer_src: bool = false,
-        transfer_dst: bool = false,
-        index: bool = false,
-        indirect: bool = false,
-    },
+    usage: BufferUsage,
     size: usize,
-    group: ?*const BufferGroup = null,
+    group: ?*const Group = null,
 };
 
 pub const Buffer = struct {
-    group: *const BufferGroup,
+    group: *const Group,
     device_address: u64,
 
     info: struct {
+        usage: BufferUsage,
         size: usize,
     },
 };
 
-pub const BufferGroup = struct {};
+pub const Filter = enum {
+    nearest,
+    linear,
+};
 
-pub const SamplerCreateInfo = struct {};
+pub const AddressMode = enum {
+    repeat,
+    mirrored_repeat,
+    clamp_to_edge,
+};
+
+pub const SamplerCreateInfo = struct {
+    mag_filter: Filter,
+    min_filter: Filter,
+    mipmap_filter: Filter,
+    address_mode_u: AddressMode,
+    address_mode_v: AddressMode,
+    address_mode_w: AddressMode,
+    mip_lod_bias: f32 = 0.0,
+    max_anisotropy: ?f32 = null,
+    compare_op: ?CompareOp,
+    min_lod: f32 = 0.0,
+    max_lod: ?f32 = null,
+};
 
 pub const Sampler = struct {
-    index: u12,
+    device_address: u12,
+
+    info: struct {
+        mag_filter: Filter,
+        min_filter: Filter,
+        mipmap_filter: Filter,
+        address_mode_u: AddressMode,
+        address_mode_v: AddressMode,
+        address_mode_w: AddressMode,
+        mip_lod_bias: f32 = 0.0,
+        max_anisotropy: ?f32 = null,
+        compare_op: ?CompareOp,
+        min_lod: f32 = 0.0,
+        max_lod: ?f32 = null,
+    },
 };
 
 pub const ShaderCreateInfo = struct {
@@ -160,6 +226,10 @@ pub const ShaderCreateInfo = struct {
 
 pub const Shader = struct {
     const Stage = enum { vertex, fragment, shader };
+
+    info: struct {
+        stage: Stage,
+    },
 };
 
 const GraphicsPipelineCreateInfo = struct {
@@ -229,6 +299,17 @@ const GraphicsPipelineCreateInfo = struct {
     stencil_attachment_format: ?Format,
 };
 
+const CompareOp = enum {
+    never,
+    less,
+    equal,
+    less_or_equal,
+    greater,
+    not_equal,
+    greater_or_equal,
+    always,
+};
+
 pub const GraphicsPipeline = struct {
     const DynamicState = struct {
         const Viewport = extern struct {
@@ -278,16 +359,6 @@ pub const GraphicsPipeline = struct {
             depth_bias: ?DepthBias = null,
         };
         const DepthStencilState = struct {
-            const CompareOp = enum {
-                never,
-                less,
-                equal,
-                less_or_equal,
-                greater,
-                not_equal,
-                greater_or_equal,
-                always,
-            };
             const StencilState = struct {
                 const StencilOp = enum {
                     keep,
@@ -336,9 +407,16 @@ pub const GraphicsPipeline = struct {
     },
 };
 
-pub const ComputePipelineCreateInfo = struct {};
+pub const ComputePipelineCreateInfo = struct {
+    shader: *const Shader,
+    local_size: [3]u32,
+};
 
-pub const ComputePipeline = struct {};
+pub const ComputePipeline = struct {
+    info: struct {
+        local_size: [3]u32,
+    },
+};
 
 pub const StagingAllocatorUsage = enum { upload, download };
 
@@ -364,8 +442,7 @@ pub const Context = struct {
         createBuffer: *const fn (*anyopaque, BufferCreateInfo) Error!*const Buffer,
         createTexture: *const fn (*anyopaque, TextureCreateInfo) Error!*const Texture,
         createSampler: *const fn (*anyopaque, SamplerCreateInfo) Error!*const Sampler,
-        createBufferGroup: *const fn (*anyopaque) Error!*const BufferGroup,
-        createTextureGroup: *const fn (*anyopaque) Error!*const TextureGroup,
+        createGroup: *const fn (*anyopaque) Error!*const Group,
         createShader: *const fn (*anyopaque, ShaderCreateInfo) Error!*const Shader,
         createGraphicsPipeline: *const fn (*anyopaque, GraphicsPipelineCreateInfo) Error!*const GraphicsPipeline,
         createComputePipeline: *const fn (*anyopaque, ComputePipelineCreateInfo) Error!*const ComputePipeline,
@@ -373,8 +450,7 @@ pub const Context = struct {
         destroyBuffer: *const fn (*anyopaque, *const Buffer) void,
         destroyTexture: *const fn (*anyopaque, *const Texture) void,
         destroySampler: *const fn (*anyopaque, *const Sampler) void,
-        destroyBufferGroup: *const fn (*anyopaque, *const BufferGroup) void,
-        destroyTextureGroup: *const fn (*anyopaque, *const TextureGroup) void,
+        destroyGroup: *const fn (*anyopaque, *const Group) void,
         destroyShader: *const fn (*anyopaque, *const Shader) void,
         destroyGraphicsPipeline: *const fn (*anyopaque, *const GraphicsPipeline) void,
         destroyComputePipeline: *const fn (*anyopaque, *const ComputePipeline) void,
@@ -388,8 +464,10 @@ pub const Context = struct {
         testQueue: *const fn (*anyopaque, Fence, Queue) bool,
         testFence: *const fn (*anyopaque, Fence) bool,
 
-        setBufferGroup: *const fn (*anyopaque, *const Buffer, ?*const BufferGroup) void,
-        setTextureGroup: *const fn (*anyopaque, *const Texture, ?*const TextureGroup) void,
+        setGroupBuffer: *const fn (*anyopaque, *const Buffer, ?*const Group) void,
+        setGroupTexture: *const fn (*anyopaque, *const Texture, ?*const Group) void,
+
+        readTimestamp: *const fn (*anyopaque, Timestamp) ?u64,
     };
 };
 
@@ -397,6 +475,66 @@ pub const BlitRegion = struct {
     bounds: [2][3]i32,
     mip_level: u32,
 };
+
+const RenderingAttachment = struct {
+    const LoadOp = enum {
+        load,
+        clear,
+        dont_care,
+    };
+    const StoreOp = enum {
+        store,
+        dont_care,
+        none,
+    };
+    const ClearValue = union(enum) {
+        color: union(enum) {
+            float: [4]f32,
+            int: [4]i32,
+            uint: [4]u32,
+        },
+        depth_stencil: struct {
+            depth: f32,
+            stencil: u8,
+        },
+
+        pub fn float(r: f32, g: f32, b: f32, a: f32) ClearValue {
+            return .{ .color = .{ .float = .{ r, g, b, a } } };
+        }
+        pub fn int(r: i32, g: i32, b: i32, a: i32) ClearValue {
+            return .{ .color = .{ .int = .{ r, g, b, a } } };
+        }
+        pub fn uint(r: u32, g: u32, b: u32, a: u32) ClearValue {
+            return .{ .color = .{ .uint = .{ r, g, b, a } } };
+        }
+        pub fn depthStencil(depth: f32, stencil: u8) ClearValue {
+            return .{ .depth_stencil = .{ .depth = depth, .stencil = stencil } };
+        }
+    };
+
+    texture: *const Texture,
+    view: ?*const TextureView = null, // defaults to default_view
+    load_op: LoadOp,
+    store_op: StoreOp,
+    clear_value: ?ClearValue = null,
+};
+
+const RenderPassAccess = struct {
+    color_attachments: []const RenderingAttachment = &.{},
+    depth_attachment: ?RenderingAttachment = null,
+    stencil_attachment: ?RenderingAttachment = null,
+    vertex_read_groups: []const Group = &.{},
+    fragment_read_groups: []const Group = &.{},
+    vertex_write_groups: []const Group = &.{},
+    fragment_write_groups: []const Group = &.{},
+};
+
+const ComputePassAccess = struct {
+    read_groups: []const Group = &.{},
+    write_groups: []const Group = &.{},
+};
+
+const Timestamp = enum(u32) { _ };
 
 pub const CommandBuffer = struct {
     ptr: *anyopaque,
@@ -408,19 +546,21 @@ pub const CommandBuffer = struct {
         textureUpload: *const fn (*anyopaque, *anyopaque, usize, *const Texture, u64) void,
         textureDownload: *const fn (*anyopaque, *const Texture, u64, *anyopaque, usize) void,
 
-        waitAndAcquireSwapchainTexture: *const fn (*anyopaque, Window) void,
+        waitAndAcquireSwapchainTexture: *const fn (*anyopaque, Window) *const Texture,
 
         bufferCopy: *const fn (*anyopaque, *const Buffer, u64, *const Buffer, u64, u64) void,
         textureCopy: *const fn (*anyopaque, *const Texture, *const Texture) void, // TODO args
         blit: *const fn (*anyopaque, *const Texture, BlitRegion, *const Texture, BlitRegion) void, // TODO args
 
-        beginRenderPass: *const fn (*anyopaque) *RenderPass, // TODO args
+        beginRenderPass: *const fn (*anyopaque, RenderPassAccess) *RenderPass,
         endRenderPass: *const fn (*anyopaque, *RenderPass) void,
-        beginComputePass: *const fn (*anyopaque) *RenderPass, // TODO args
+        beginComputePass: *const fn (*anyopaque, ComputePassAccess) *RenderPass,
         endComputePass: *const fn (*anyopaque, *RenderPass) void,
+
+        timestamp: *const fn (*anyopaque) ?Timestamp,
     };
 
-    // genericu will have to be wrapped like this
+    // generics will have to be wrapped like this
     // fn bufferUpload(
     //     cmdbuf: *CommandBuffer,
     //     src: anytype,
@@ -446,10 +586,11 @@ pub const RenderPass = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        draw: *const fn (*anyopaque, u32, u32, u32, i32, u32) void,
-        drawIndirect: *const fn (*anyopaque, *const Buffer, u64, u32) void,
-        drawIndirectCount: *const fn (*anyopaque, *const Buffer, u64, *const Buffer, u64, u32) void,
         pushConstant: *const fn (*anyopaque, *anyopaque, usize) void, // TODO generic wrap
+        bindPipeline: *const fn (*anyopaque, *const GraphicsPipeline, GraphicsPipeline.DynamicState) void,
+        drawIndexed: *const fn (*anyopaque, u32, u32, u32, i32, u32) void,
+        drawIndexedIndirect: *const fn (*anyopaque, *const Buffer, u64, u32) void,
+        drawIndexedIndirectCount: *const fn (*anyopaque, *const Buffer, u64, *const Buffer, u64, u32) void,
     };
 };
 
@@ -458,6 +599,8 @@ pub const ComputePass = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
+        pushConstant: *const fn (*anyopaque, *anyopaque, usize) void, // TODO generic wrap
+        bindPipeline: *const fn (*anyopaque, *const ComputePipeline) void,
         dispatch: *const fn (*anyopaque, u32, u32, u32) void,
         dispatchIndirect: *const fn (*anyopaque, *const Buffer, u64) void,
     };
