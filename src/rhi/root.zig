@@ -2,16 +2,6 @@ const std = @import("std");
 
 const Window = *anyopaque;
 
-// how do we abstract the platform?
-// i guess we'd have to have separate platforms for each backend?
-// const Platform = struct {
-//     getInstanceProcAddress: *const fn (vk.Instance, [*:0]const u8) vk.PfnVoidFunction,
-//     getRequiredInstanceExtensions: *const fn () anyerror![]const [*:0]const u8,
-//     createWindowSurface: *const fn (vk.Instance, window: *anyopaque) anyerror!vk.SurfaceKHR,
-//     getFramebufferSize: *const fn (window: *anyopaque) anyerror!vk.Extent2D,
-//     window: *anyopaque,
-// };
-
 pub const SwapchainComposition = enum {
     sdr,
     // TODO add more options
@@ -439,6 +429,9 @@ pub const Context = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
+        claimWindow: *const fn (*anyopaque, Window) Error!void,
+        releaseWindow: *const fn (*anyopaque, Window) Error!void,
+
         createBuffer: *const fn (*anyopaque, BufferCreateInfo) Error!*const Buffer,
         createTexture: *const fn (*anyopaque, TextureCreateInfo) Error!*const Texture,
         createSampler: *const fn (*anyopaque, SamplerCreateInfo) Error!*const Sampler,
