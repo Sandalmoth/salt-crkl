@@ -476,6 +476,14 @@ pub const BlitRegion = struct {
     mip_level: u32,
 };
 
+pub const ResolveRegion = struct {
+    src_offset: [3]i32,
+    src_mip_level: u32,
+    dst_offset: [3]i32,
+    dst_mip_level: u32,
+    extent: [3]u32,
+};
+
 const RenderingAttachment = struct {
     const LoadOp = enum {
         load,
@@ -550,7 +558,8 @@ pub const CommandBuffer = struct {
 
         bufferCopy: *const fn (*anyopaque, *const Buffer, u64, *const Buffer, u64, u64) void,
         textureCopy: *const fn (*anyopaque, *const Texture, *const Texture) void, // TODO args
-        blit: *const fn (*anyopaque, *const Texture, BlitRegion, *const Texture, BlitRegion) void, // TODO args
+        blit: *const fn (*anyopaque, *const Texture, BlitRegion, *const Texture, BlitRegion, Filter) void,
+        resolve: *const fn (*anyopaque, *const Texture, *const Texture, ResolveRegion) void,
 
         beginRenderPass: *const fn (*anyopaque, RenderPassAccess) *RenderPass,
         endRenderPass: *const fn (*anyopaque, *RenderPass) void,
@@ -581,6 +590,14 @@ pub const CommandBuffer = struct {
     // }
 };
 
+pub const DrawIndexedIndirectCommand = extern struct {
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    vertex_offset: i32,
+    first_instance: u32,
+};
+
 pub const RenderPass = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -592,6 +609,12 @@ pub const RenderPass = struct {
         drawIndexedIndirect: *const fn (*anyopaque, *const Buffer, u64, u32) void,
         drawIndexedIndirectCount: *const fn (*anyopaque, *const Buffer, u64, *const Buffer, u64, u32) void,
     };
+};
+
+pub const DispatchIndirectCommand = extern struct {
+    x: u32,
+    y: u32,
+    z: u32,
 };
 
 pub const ComputePass = struct {
