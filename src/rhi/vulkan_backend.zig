@@ -159,6 +159,8 @@ const Context = struct {
     pipeline_layout: vk.PipelineLayout,
     descriptor_pool: vk.DescriptorPool,
     descriptor_set: vk.DescriptorSet,
+    texture_view_slots: SlotPool,
+    sampler_slots: SlotPool,
 
     // pools are for resources that are recreated, not reused
     shader_pool: MemoryPool(Shader),
@@ -543,14 +545,14 @@ const Context = struct {
             .descriptor_set_count = 1,
             .p_set_layouts = @ptrCast(&ctx.descriptor_set_layout),
         }, @ptrCast(&ctx.descriptor_set));
-        errdefer ctx.device.freeDescriptorSets(
-            ctx.descriptor_pool,
-            1,
-            @ptrCast(&ctx.descriptor_set),
-        );
+
+        ctx.texture_view_slots = try .init(ctx.gpa, 128 * 1024);
+        ctx.sampler_slots = try .init(ctx.gpa, 1024);
     }
 
     fn deinitPipelineLayout(ctx: *Context) void {
+        ctx.sampler_slots.deinit(ctx.gpa);
+        ctx.texture_view_slots.deinit(ctx.gpa);
         // NOTE freeing the pool frees the set
         ctx.device.destroyDescriptorPool(ctx.descriptor_pool, null);
         ctx.device.destroyPipelineLayout(ctx.pipeline_layout, null);
@@ -785,3 +787,35 @@ fn Depot(comptime T: type) type {
         }
     };
 }
+
+const SlotPool = struct {
+    top: u32,
+    slots: []u32,
+
+    fn init(gpa: std.mem.Allocator, capacity: u32) !SlotPool {
+        const slots = try gpa.alloc(u32, capacity);
+        for (0..capacity) |i| slots[i] = @intCast(i);
+        return .{ .top = capacity, .slots = slots };
+    }
+
+    fn deinit(pool: *SlotPool, gpa: std.mem.Allocator) void {
+        if (pool.top != @as(u32, @intCast(pool.slots.len))) log.debug(
+            "SlotPool not empty on deinit expected {} actual {}",
+            .{ pool.slots.len, pool.top },
+        );
+        gpa.free(pool.slots);
+        pool.* = undefined;
+    }
+
+    fn acquire(pool: *SlotPool) !u32 {
+        if (pool.top == 0) return error.OutOfSlots;
+        pool.top -= 1;
+        return pool.slots[pool.top];
+    }
+
+    fn release(pool: *SlotPool, slot: u32) void {
+        std.debug.assert(pool.top < @as(u32, @intCast(pool.slots.len)));
+        pool.slots[pool.top] = slot;
+        pool.top += 1;
+    }
+};
