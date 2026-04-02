@@ -145,6 +145,7 @@ const Context = struct {
 
     physical_device: vk.PhysicalDevice,
     physical_device_properties: vk.PhysicalDeviceProperties,
+    physical_device_descriptor_indexing_properties: vk.PhysicalDeviceDescriptorIndexingProperties,
     physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
 
     swapchains: std.AutoHashMap(rhi.Window, struct {
@@ -156,6 +157,8 @@ const Context = struct {
 
     descriptor_set_layout: vk.DescriptorSetLayout,
     pipeline_layout: vk.PipelineLayout,
+    descriptor_pool: vk.DescriptorPool,
+    descriptor_set: vk.DescriptorSet,
 
     // pools are for resources that are recreated, not reused
     shader_pool: MemoryPool(Shader),
@@ -194,6 +197,8 @@ const Context = struct {
         const physical_device_candidate = try ctx.pickPhysicalDevice(arena);
         try ctx.initDevice(arena, physical_device_candidate);
         errdefer ctx.deinitDevice();
+        try ctx.initPipelineLayout();
+        errdefer ctx.deinitPipelineLayout();
 
         ctx.gpa = gpa;
         ctx.platform = platform;
@@ -205,12 +210,14 @@ const Context = struct {
         ctx.command_buffer_depots = .initFill(.init(gpa));
         ctx.image_acquire_semaphore_depot = .init(gpa);
 
+        // TODO init allocators
+
         return ctx;
     }
 
     fn deinit(ctx: *Context) void {
         ctx.device.deviceWaitIdle() catch |e| {
-            log.warn("Failed deviceWaitIdle in vulkan_context deinit: {}", .{e});
+            log.warn("Failed deviceWaitIdle in deinit: {}", .{e});
         };
 
         var physical_queues: [4]?*PhysicalQueue = .{null} ** 4;
@@ -231,6 +238,7 @@ const Context = struct {
             ctx.gpa.destroy(queue);
         }
 
+        ctx.deinitPipelineLayout();
         ctx.deinitDevice();
         ctx.deinitInstance();
 
@@ -451,6 +459,7 @@ const Context = struct {
 
         ctx.physical_device = candidate.device;
         ctx.physical_device_properties = candidate.properties;
+        ctx.physical_device_descriptor_indexing_properties = candidate.descriptor_indexing_properties;
         ctx.physical_device_memory_properties = candidate.memory_properties;
     }
 
@@ -461,20 +470,22 @@ const Context = struct {
     }
 
     fn initPipelineLayout(ctx: *Context) !void {
+        // TODO we should maybe check the limits just in case and limit further if broken
+        // however, these are within the minimum required, so safe if the driver is compliant
         const bindings: [3]vk.DescriptorSetLayoutBinding = .{ .{
             .binding = 0,
             .descriptor_type = .sampled_image,
-            .descriptor_count = 1048576,
+            .descriptor_count = 128 * 1024,
             .stage_flags = .{ .vertex_bit = true, .fragment_bit = true, .compute_bit = true },
         }, .{
             .binding = 1,
             .descriptor_type = .storage_image,
-            .descriptor_count = 1048576,
+            .descriptor_count = 128 * 1024,
             .stage_flags = .{ .vertex_bit = true, .fragment_bit = true, .compute_bit = true },
         }, .{
             .binding = 2,
             .descriptor_type = .sampler,
-            .descriptor_count = 1048576,
+            .descriptor_count = 1024,
             .stage_flags = .{ .vertex_bit = true, .fragment_bit = true, .compute_bit = true },
         } };
         const binding_flags: [3]vk.DescriptorBindingFlags = .{ .{
@@ -485,7 +496,11 @@ const Context = struct {
             .update_after_bind_bit = true,
             .update_unused_while_pending_bit = true,
             .partially_bound_bit = true,
-        }, .{} };
+        }, .{
+            .update_after_bind_bit = true,
+            .update_unused_while_pending_bit = true,
+            .partially_bound_bit = true,
+        } };
 
         ctx.descriptor_set_layout = try ctx.device.createDescriptorSetLayout(&.{
             .binding_count = 3,
@@ -508,9 +523,36 @@ const Context = struct {
             }),
         }, null);
         errdefer ctx.device.destroyPipelineLayout(ctx.pipeline_layout, null);
+
+        const pool_sizes = [3]vk.DescriptorPoolSize{
+            .{ .type = .sampled_image, .descriptor_count = 128 * 1024 },
+            .{ .type = .storage_image, .descriptor_count = 128 * 1024 },
+            .{ .type = .sampler, .descriptor_count = 1024 },
+        };
+        ctx.descriptor_pool = try ctx.device.createDescriptorPool(&.{
+            .flags = .{ .update_after_bind_bit = true },
+            .max_sets = 1,
+            .pool_size_count = @intCast(pool_sizes.len),
+            .p_pool_sizes = &pool_sizes,
+        }, null);
+        errdefer ctx.device.destroyDescriptorPool(ctx.descriptor_pool, null);
+
+        ctx.descriptor_set = .null_handle;
+        try ctx.device.allocateDescriptorSets(&.{
+            .descriptor_pool = ctx.descriptor_pool,
+            .descriptor_set_count = 1,
+            .p_set_layouts = @ptrCast(&ctx.descriptor_set_layout),
+        }, @ptrCast(&ctx.descriptor_set));
+        errdefer ctx.device.freeDescriptorSets(
+            ctx.descriptor_pool,
+            1,
+            @ptrCast(&ctx.descriptor_set),
+        );
     }
 
     fn deinitPipelineLayout(ctx: *Context) void {
+        // NOTE freeing the pool frees the set
+        ctx.device.destroyDescriptorPool(ctx.descriptor_pool, null);
         ctx.device.destroyPipelineLayout(ctx.pipeline_layout, null);
         ctx.device.destroyDescriptorSetLayout(ctx.descriptor_set_layout, null);
     }
@@ -520,6 +562,7 @@ const PhysicalDeviceCandidate = struct {
     device: vk.PhysicalDevice,
 
     properties: vk.PhysicalDeviceProperties,
+    descriptor_indexing_properties: vk.PhysicalDeviceDescriptorIndexingProperties,
     memory_properties: vk.PhysicalDeviceMemoryProperties,
     features: vk.PhysicalDeviceFeatures,
     features_1_1: vk.PhysicalDeviceVulkan11Features,
@@ -536,6 +579,7 @@ const PhysicalDeviceCandidate = struct {
         var candidate = PhysicalDeviceCandidate{
             .device = dev,
             .properties = undefined,
+            .descriptor_indexing_properties = undefined,
             .memory_properties = instance.getPhysicalDeviceMemoryProperties(dev),
             .features = undefined,
             .features_1_1 = .{},
@@ -544,9 +588,16 @@ const PhysicalDeviceCandidate = struct {
             .queue_families = .{},
         };
 
-        var properties2: vk.PhysicalDeviceProperties2 = .{ .properties = undefined };
+        var descriptor_indexing_properties: vk.PhysicalDeviceDescriptorIndexingProperties = undefined;
+        descriptor_indexing_properties.s_type = .physical_device_descriptor_indexing_properties;
+        descriptor_indexing_properties.p_next = null;
+        var properties2: vk.PhysicalDeviceProperties2 = .{
+            .p_next = &descriptor_indexing_properties,
+            .properties = undefined,
+        };
         instance.getPhysicalDeviceProperties2(dev, &properties2);
         candidate.properties = properties2.properties;
+        candidate.descriptor_indexing_properties = descriptor_indexing_properties;
 
         candidate.features_1_2.p_next = &candidate.features_1_3;
         candidate.features_1_1.p_next = &candidate.features_1_2;

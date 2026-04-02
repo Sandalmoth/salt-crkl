@@ -426,9 +426,11 @@ pub const Fence = struct {
 
 pub const Context = struct {
     const Error = error{
-        OutOfHostMemory,
+        OutOfMemory,
         OutOfDeviceMemory,
         Timeout,
+        DeviceLost,
+        Unknown,
     };
 
     ptr: *anyopaque,
