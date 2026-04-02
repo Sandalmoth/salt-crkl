@@ -1,6 +1,8 @@
 const std = @import("std");
 
-const Window = *anyopaque;
+pub const Vulkan = @import("vulkan_backend.zig");
+
+pub const Window = *anyopaque;
 
 pub const SwapchainComposition = enum {
     sdr,
@@ -73,6 +75,7 @@ pub const TextureCreateInfo = struct {
     samples: SampleCount = .@"1",
     views: []const TextureViewCreateInfo = &.{},
     group: ?*const Group = null,
+    name: [:0]const u8 = &.{},
 };
 
 const ViewSwizzle = struct {
@@ -137,6 +140,7 @@ pub const Texture = struct {
         mip_levels: u32,
         sample_count: SampleCount,
         texture_type: TextureType,
+        name: [:0]const u8,
     },
 };
 
@@ -154,6 +158,7 @@ pub const BufferCreateInfo = struct {
     usage: BufferUsage,
     size: usize,
     group: ?*const Group = null,
+    name: [:0]const u8 = &.{},
 };
 
 pub const Buffer = struct {
@@ -163,6 +168,7 @@ pub const Buffer = struct {
     info: struct {
         usage: BufferUsage,
         size: usize,
+        name: [:0]const u8,
     },
 };
 
@@ -526,7 +532,6 @@ const RenderPassAccess = struct {
     stencil_attachment: ?RenderingAttachment = null,
     vertex_read_groups: []const Group = &.{},
     fragment_read_groups: []const Group = &.{},
-    vertex_write_groups: []const Group = &.{},
     fragment_write_groups: []const Group = &.{},
 };
 
