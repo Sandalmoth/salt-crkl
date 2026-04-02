@@ -148,7 +148,7 @@ const Context = struct {
     physical_device_descriptor_indexing_properties: vk.PhysicalDeviceDescriptorIndexingProperties,
     physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
 
-    swapchains: std.AutoHashMap(rhi.Window, struct {
+    swapchains: std.AutoHashMapUnmanaged(rhi.Window, struct {
         surface: vk.SurfaceKHR,
         composition: rhi.SwapchainComposition,
         present_mode: rhi.PresentMode,
@@ -179,7 +179,6 @@ const Context = struct {
     upload_allocator: UploadAllocator,
     download_allocator: DownloadAllocator,
 
-    present_is_initialized: bool,
     queues: std.EnumArray(Queue, *PhysicalQueue),
 
     fn init(gpa: std.mem.Allocator, platform: Platform, config: Config) !Context {
@@ -193,6 +192,8 @@ const Context = struct {
         ctx.platform = platform;
         ctx.config = config;
         ctx.base = .load(platform.getInstanceProcAddress);
+
+        ctx.swapchains = .empty;
 
         try ctx.initInstance(arena, platform, config.name);
         errdefer ctx.deinitInstance();
@@ -227,7 +228,7 @@ const Context = struct {
             for (0..4) |i| if (physical_queues[i] == ctx.queues.get(queue)) continue :outer;
             physical_queues[j] = ctx.queues.get(queue);
         }
-        if (ctx.present_is_initialized) {
+        if (ctx.swapchains.metadata != null) {
             for (0..4) |i| {
                 if (physical_queues[i] == ctx.queues.get(.present)) break;
             } else {
@@ -457,7 +458,6 @@ const Context = struct {
             }
         }
         // present gets done when we create the first swapchain
-        ctx.present_is_initialized = false;
 
         ctx.physical_device = candidate.device;
         ctx.physical_device_properties = candidate.properties;
