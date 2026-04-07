@@ -38,6 +38,9 @@ pub fn main() !void {
     });
     defer rhi.Vulkan.deinit(ctx);
 
+    const swapchain = try ctx.createSwapchain(window);
+    defer ctx.destroySwapchain(swapchain);
+
     // const ctx: *rhi.Context = try .create(gpa, .{
     //     .getInstanceProcAddress = &getInstanceProcAddress,
     //     .getRequiredInstanceExtensions = &getRequiredInstanceExtensions,

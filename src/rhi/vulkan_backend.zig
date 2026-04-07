@@ -122,11 +122,51 @@ const Sampler = struct {
     public: rhi.Sampler,
 };
 
+const Swapchain = struct {
+    public: rhi.Swapchain,
+    window: rhi.Window,
+    surface: vk.SurfaceKHR,
+    composition: rhi.SwapchainComposition,
+    present_mode: rhi.PresentMode,
+    next: ?*Swapchain,
+};
+
 // NOTE i think we should bake the passes into here with just separate vtables
 const CommandBuffer = struct {};
 
 const Context = struct {
-    const vtable: rhi.Context.VTable = undefined;
+    const vtable: rhi.Context.VTable = .{
+        .createSwapchain = createSwapchain,
+        .destroySwapchain = destroySwapchain,
+        .setSwapchainComposition = undefined,
+        .setSwapchainPresentMode = undefined,
+        .waitAndAcquireSwapchainTexture = undefined,
+        .recreateSwapchain = undefined,
+        .createBuffer = undefined,
+        .createTexture = undefined,
+        .createSampler = undefined,
+        .createShader = undefined,
+        .createGroup = undefined,
+        .createGraphicsPipeline = undefined,
+        .createComputePipeline = undefined,
+        .destroyBuffer = undefined,
+        .destroyTexture = undefined,
+        .destroySampler = undefined,
+        .destroyShader = undefined,
+        .destroyGroup = undefined,
+        .destroyGraphicsPipeline = undefined,
+        .destroyComputePipeline = undefined,
+        .stagingAllocator = undefined,
+        .acquireCommandBuffer = undefined,
+        .submit = undefined,
+        .waitQueue = undefined,
+        .waitFence = undefined,
+        .testQueue = undefined,
+        .testFence = undefined,
+        .setBufferGroup = undefined,
+        .setTextureGroup = undefined,
+        .readTimestamp = undefined,
+    };
 
     const PhysicalQueue = struct {
         queue: vk.QueueProxy,
@@ -148,13 +188,6 @@ const Context = struct {
     physical_device_descriptor_indexing_properties: vk.PhysicalDeviceDescriptorIndexingProperties,
     physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
 
-    swapchains: std.AutoHashMapUnmanaged(rhi.Window, struct {
-        surface: vk.SurfaceKHR,
-        composition: rhi.SwapchainComposition,
-        present_mode: rhi.PresentMode,
-        swapchain: *Swapchain,
-    }),
-
     descriptor_set_layout: vk.DescriptorSetLayout,
     pipeline_layout: vk.PipelineLayout,
     descriptor_pool: vk.DescriptorPool,
@@ -163,6 +196,7 @@ const Context = struct {
     sampler_slots: SlotPool,
 
     // pools are for resources that are recreated, not reused
+    swapchain_pool: MemoryPool(Swapchain),
     shader_pool: MemoryPool(Shader),
     graphics_pipeline_pool: MemoryPool(GraphicsPipeline),
     compute_pipeline_pool: MemoryPool(ComputePipeline),
@@ -180,6 +214,7 @@ const Context = struct {
     download_allocator: DownloadAllocator,
 
     queues: std.EnumArray(Queue, *PhysicalQueue),
+    present_queue_initialized: bool,
 
     fn init(gpa: std.mem.Allocator, platform: Platform, config: Config) !Context {
         var arena_impl: std.heap.ArenaAllocator = .init(gpa);
@@ -193,8 +228,6 @@ const Context = struct {
         ctx.config = config;
         ctx.base = .load(platform.getInstanceProcAddress);
 
-        ctx.swapchains = .empty;
-
         try ctx.initInstance(arena, platform, config.name);
         errdefer ctx.deinitInstance();
         const physical_device_candidate = try ctx.pickPhysicalDevice(arena);
@@ -203,13 +236,14 @@ const Context = struct {
         try ctx.initPipelineLayout();
         errdefer ctx.deinitPipelineLayout();
 
-        ctx.gpa = gpa;
-        ctx.platform = platform;
         ctx.shader_pool = .init(gpa);
         ctx.graphics_pipeline_pool = .init(gpa);
         ctx.compute_pipeline_pool = .init(gpa);
         ctx.buffer_pool = .init(gpa);
         ctx.texture_pool = .init(gpa);
+        ctx.sampler_pool = .init(gpa);
+        ctx.swapchain_pool = .init(gpa);
+
         ctx.command_buffer_depots = .initFill(.init(gpa));
         ctx.image_acquire_semaphore_depot = .init(gpa);
 
@@ -223,12 +257,20 @@ const Context = struct {
             log.warn("Failed deviceWaitIdle in deinit: {}", .{e});
         };
 
+        ctx.swapchain_pool.deinit();
+        ctx.shader_pool.deinit();
+        ctx.graphics_pipeline_pool.deinit();
+        ctx.compute_pipeline_pool.deinit();
+        ctx.buffer_pool.deinit();
+        ctx.texture_pool.deinit();
+        ctx.sampler_pool.deinit();
+
         var physical_queues: [4]?*PhysicalQueue = .{null} ** 4;
         outer: for ([_]Queue{ .graphics, .compute, .transfer }, 0..) |queue, j| {
             for (0..4) |i| if (physical_queues[i] == ctx.queues.get(queue)) continue :outer;
             physical_queues[j] = ctx.queues.get(queue);
         }
-        if (ctx.swapchains.metadata != null) {
+        if (ctx.present_queue_initialized) {
             for (0..4) |i| {
                 if (physical_queues[i] == ctx.queues.get(.present)) break;
             } else {
@@ -246,6 +288,27 @@ const Context = struct {
         ctx.deinitInstance();
 
         ctx.* = undefined;
+    }
+
+    fn createSwapchain(ptr: *anyopaque, window: rhi.Window) rhi.Context.Error!*const rhi.Swapchain {
+        const ctx: *Context = @ptrCast(@alignCast(ptr));
+        const swapchain: *Swapchain = try ctx.swapchain_pool.create();
+        // TODO init
+        swapchain.* = Swapchain{
+            .next = null,
+            .composition = undefined,
+            .present_mode = undefined,
+            .public = undefined,
+            .surface = undefined,
+            .window = window,
+        };
+        return &swapchain.public;
+    }
+    fn destroySwapchain(ptr: *anyopaque, rhi_swapchain: *const rhi.Swapchain) void {
+        const ctx: *Context = @ptrCast(@alignCast(ptr));
+        const swapchain: *Swapchain = @alignCast(@constCast(@fieldParentPtr("public", rhi_swapchain)));
+        // TODO deinit
+        ctx.swapchain_pool.destroy(swapchain);
     }
 
     fn initInstance(
@@ -458,6 +521,7 @@ const Context = struct {
             }
         }
         // present gets done when we create the first swapchain
+        ctx.present_queue_initialized = false;
 
         ctx.physical_device = candidate.device;
         ctx.physical_device_properties = candidate.properties;
@@ -755,10 +819,6 @@ const PhysicalDeviceCandidate = struct {
         if (ha == hb) return null;
         return hb > ha;
     }
-};
-
-const Swapchain = struct {
-    next: ?*Swapchain,
 };
 
 const BufferAllocator = struct {};

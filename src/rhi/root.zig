@@ -414,6 +414,14 @@ pub const ComputePipeline = struct {
     },
 };
 
+pub const Swapchain = struct {
+    info: struct {
+        size: [3]u32,
+        present_mode: PresentMode,
+        composition: SwapchainComposition,
+    },
+};
+
 pub const StagingAllocatorUsage = enum { upload, download };
 
 pub const Queue = enum { graphics, compute, transfer };
@@ -425,7 +433,7 @@ pub const Fence = struct {
 };
 
 pub const Context = struct {
-    const Error = error{
+    pub const Error = error{
         OutOfMemory,
         OutOfDeviceMemory,
         Timeout,
@@ -437,8 +445,12 @@ pub const Context = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        claimWindow: *const fn (*anyopaque, Window) Error!void,
-        releaseWindow: *const fn (*anyopaque, Window) Error!void,
+        createSwapchain: *const fn (*anyopaque, Window) Error!*const Swapchain,
+        destroySwapchain: *const fn (*anyopaque, *const Swapchain) void,
+        setSwapchainComposition: *const fn (*anyopaque, *const Swapchain, SwapchainComposition) void,
+        setSwapchainPresentMode: *const fn (*anyopaque, *const Swapchain, PresentMode) void,
+        waitAndAcquireSwapchainTexture: *const fn (*anyopaque, *const Swapchain) Error!*const Texture,
+        recreateSwapchain: *const fn (*anyopaque, *const Swapchain) Error!void,
 
         createBuffer: *const fn (*anyopaque, BufferCreateInfo) Error!*const Buffer,
         createTexture: *const fn (*anyopaque, TextureCreateInfo) Error!*const Texture,
@@ -465,11 +477,18 @@ pub const Context = struct {
         testQueue: *const fn (*anyopaque, Fence, Queue) bool,
         testFence: *const fn (*anyopaque, Fence) bool,
 
-        setGroupBuffer: *const fn (*anyopaque, *const Buffer, ?*const Group) void,
-        setGroupTexture: *const fn (*anyopaque, *const Texture, ?*const Group) void,
+        setBufferGroup: *const fn (*anyopaque, *const Buffer, ?*const Group) void,
+        setTextureGroup: *const fn (*anyopaque, *const Texture, ?*const Group) void,
 
         readTimestamp: *const fn (*anyopaque, Timestamp) ?u64,
     };
+
+    pub fn createSwapchain(ctx: Context, window: Window) Error!*const Swapchain {
+        return ctx.vtable.createSwapchain(ctx.ptr, window);
+    }
+    pub fn destroySwapchain(ctx: Context, swapchain: *const Swapchain) void {
+        return ctx.vtable.destroySwapchain(ctx.ptr, swapchain);
+    }
 };
 
 pub const BlitRegion = struct {
@@ -553,8 +572,6 @@ pub const CommandBuffer = struct {
         bufferDownload: *const fn (*anyopaque, *const Buffer, u64, *anyopaque, usize) void,
         textureUpload: *const fn (*anyopaque, *anyopaque, usize, *const Texture, u64) void,
         textureDownload: *const fn (*anyopaque, *const Texture, u64, *anyopaque, usize) void,
-
-        waitAndAcquireSwapchainTexture: *const fn (*anyopaque, Window) *const Texture,
 
         bufferCopy: *const fn (*anyopaque, *const Buffer, u64, *const Buffer, u64, u64) void,
         textureCopy: *const fn (*anyopaque, *const Texture, *const Texture) void, // TODO args
