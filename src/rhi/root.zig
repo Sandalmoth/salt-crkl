@@ -434,11 +434,14 @@ pub const Fence = struct {
 
 pub const Context = struct {
     pub const Error = error{
+        Platform,
         OutOfMemory,
         OutOfDeviceMemory,
+        Unsupported,
         Timeout,
         DeviceLost,
         Unknown,
+        Minimized,
     };
 
     ptr: *anyopaque,
@@ -470,8 +473,8 @@ pub const Context = struct {
 
         stagingAllocator: *const fn (*anyopaque, StagingAllocatorUsage) std.mem.Allocator,
 
-        acquireCommandBuffer: *const fn (*anyopaque, Queue) Error!*CommandBuffer,
-        submit: *const fn (*anyopaque, []CommandBuffer) Error!Fence,
+        acquireCommandBuffer: *const fn (*anyopaque, Queue) Error!CommandBuffer,
+        submit: *const fn (*anyopaque, []const CommandBuffer) Error!Fence,
         waitQueue: *const fn (*anyopaque, Fence, Queue, u64) Error!void,
         waitFence: *const fn (*anyopaque, Fence, u64) Error!void,
         testQueue: *const fn (*anyopaque, Fence, Queue) bool,
@@ -488,6 +491,15 @@ pub const Context = struct {
     }
     pub fn destroySwapchain(ctx: Context, swapchain: *const Swapchain) void {
         return ctx.vtable.destroySwapchain(ctx.ptr, swapchain);
+    }
+    pub fn recreateSwapchain(ctx: Context, swapchain: *const Swapchain) Error!void {
+        return ctx.vtable.recreateSwapchain(ctx.ptr, swapchain);
+    }
+    pub fn acquireCommandBuffer(ctx: Context, queue: Queue) Error!CommandBuffer {
+        return ctx.vtable.acquireCommandBuffer(ctx.ptr, queue);
+    }
+    pub fn submit(ctx: Context, command_buffers: []const CommandBuffer) Error!Fence {
+        return ctx.vtable.submit(ctx.ptr, command_buffers);
     }
 };
 
@@ -583,8 +595,14 @@ pub const CommandBuffer = struct {
         beginComputePass: *const fn (*anyopaque, ComputePassAccess) *RenderPass,
         endComputePass: *const fn (*anyopaque, *RenderPass) void,
 
+        present: *const fn (*anyopaque, *const Swapchain) void,
+
         timestamp: *const fn (*anyopaque) ?Timestamp,
     };
+
+    pub fn present(command_buffer: CommandBuffer, swapchain: *const Swapchain) void {
+        return command_buffer.vtable.present(command_buffer.ptr, swapchain);
+    }
 
     // generics will have to be wrapped like this
     // fn bufferUpload(

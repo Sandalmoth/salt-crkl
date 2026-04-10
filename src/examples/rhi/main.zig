@@ -41,6 +41,23 @@ pub fn main() !void {
     const swapchain = try ctx.createSwapchain(window);
     defer ctx.destroySwapchain(swapchain);
 
+    try ctx.recreateSwapchain(swapchain);
+
+    main_loop: while (true) {
+        var event: sdl.Event = undefined;
+        while (sdl.pollEvent(&event)) {
+            if (event.type == sdl.c.SDL_EVENT_QUIT) break :main_loop;
+            if (event.type == sdl.c.SDL_EVENT_KEY_DOWN) switch (event.key.key) {
+                sdl.c.SDLK_ESCAPE => break :main_loop,
+                else => {},
+            };
+        }
+
+        const command_buffer = try ctx.acquireCommandBuffer(.graphics);
+        command_buffer.present(swapchain);
+        _ = try ctx.submit(&.{command_buffer});
+    }
+
     // const ctx: *rhi.Context = try .create(gpa, .{
     //     .getInstanceProcAddress = &getInstanceProcAddress,
     //     .getRequiredInstanceExtensions = &getRequiredInstanceExtensions,
@@ -259,7 +276,7 @@ fn getRequiredInstanceExtensions() ![]const [*:0]const u8 {
     const exts = sdl.c.SDL_Vulkan_GetInstanceExtensions(&n);
     if (exts == null) {
         std.log.err("SDL_Vulkan_GetInstanceExtensions: {s}", .{sdl.getError()});
-        return error.Sdl;
+        return error.Platform;
     }
     if (n == 0) return &.{};
     return @ptrCast(exts[0..n]);
@@ -270,7 +287,7 @@ fn createWindowSurface(instance: rhi.Vulkan.vk.Instance, window: *anyopaque) !rh
     var surface_ptr: ?*sdl.c.struct_VkSurfaceKHR_T = null;
     if (!sdl.c.SDL_Vulkan_CreateSurface(@ptrCast(window), instance_ptr, null, &surface_ptr)) {
         std.log.err("SDL_Vulkan_CreateSurface: {s}", .{sdl.getError()});
-        return error.Sdl;
+        return error.Platform;
     }
     return @enumFromInt(@intFromPtr(surface_ptr));
 }
@@ -283,7 +300,7 @@ fn getFramebufferSize(window: *anyopaque) !rhi.Vulkan.vk.Extent2D {
     var height: c_int = undefined;
     if (!sdl.c.SDL_GetWindowSizeInPixels(@ptrCast(window), &width, &height)) {
         std.log.err("SDL_GetWindowSizeInPixels: {s}", .{sdl.getError()});
-        return error.Sdl;
+        return error.Platform;
     }
     return .{
         .width = @intCast(width),

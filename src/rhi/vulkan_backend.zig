@@ -10,12 +10,13 @@ const MemoryPool = std.heap.MemoryPool;
 const enable_debug = @import("builtin").mode == .Debug;
 const enable_validation = @import("builtin").mode == .Debug;
 
+pub const PlatformError = error{Platform};
 pub const Platform = struct {
     // TODO not sure what the best function signatures are here
     getInstanceProcAddress: *const fn (vk.Instance, [*:0]const u8) vk.PfnVoidFunction,
-    getRequiredInstanceExtensions: *const fn () anyerror![]const [*:0]const u8,
-    createWindowSurface: *const fn (vk.Instance, window: *anyopaque) anyerror!vk.SurfaceKHR,
-    getFramebufferSize: *const fn (window: *anyopaque) anyerror!vk.Extent2D,
+    getRequiredInstanceExtensions: *const fn () PlatformError![]const [*:0]const u8,
+    createWindowSurface: *const fn (vk.Instance, window: *anyopaque) PlatformError!vk.SurfaceKHR,
+    getFramebufferSize: *const fn (window: *anyopaque) PlatformError!vk.Extent2D,
 };
 
 pub const Config = struct {
@@ -126,13 +127,39 @@ const Swapchain = struct {
     public: rhi.Swapchain,
     window: rhi.Window,
     surface: vk.SurfaceKHR,
+    swapchain: vk.SwapchainKHR,
     composition: rhi.SwapchainComposition,
     present_mode: rhi.PresentMode,
     next: ?*Swapchain,
 };
 
 // NOTE i think we should bake the passes into here with just separate vtables
-const CommandBuffer = struct {};
+const CommandBuffer = struct {
+    const command_buffer_vtable: rhi.CommandBuffer.VTable = .{
+        .bufferUpload = undefined,
+        .bufferDownload = undefined,
+        .textureUpload = undefined,
+        .textureDownload = undefined,
+        .bufferCopy = undefined,
+        .textureCopy = undefined,
+        .blit = undefined,
+        .resolve = undefined,
+        .beginRenderPass = undefined,
+        .endRenderPass = undefined,
+        .beginComputePass = undefined,
+        .endComputePass = undefined,
+        .present = present,
+        .timestamp = undefined,
+    };
+
+    pool: vk.CommandPool,
+
+    fn present(ptr: *anyopaque, swapchain: *const rhi.Swapchain) void {
+        _ = ptr;
+        _ = swapchain;
+        std.debug.print("we presentin\n", .{});
+    }
+};
 
 const Context = struct {
     const vtable: rhi.Context.VTable = .{
@@ -141,7 +168,7 @@ const Context = struct {
         .setSwapchainComposition = undefined,
         .setSwapchainPresentMode = undefined,
         .waitAndAcquireSwapchainTexture = undefined,
-        .recreateSwapchain = undefined,
+        .recreateSwapchain = recreateSwapchain,
         .createBuffer = undefined,
         .createTexture = undefined,
         .createSampler = undefined,
@@ -157,8 +184,8 @@ const Context = struct {
         .destroyGraphicsPipeline = undefined,
         .destroyComputePipeline = undefined,
         .stagingAllocator = undefined,
-        .acquireCommandBuffer = undefined,
-        .submit = undefined,
+        .acquireCommandBuffer = acquireCommandBuffer,
+        .submit = submit,
         .waitQueue = undefined,
         .waitFence = undefined,
         .testQueue = undefined,
@@ -205,7 +232,7 @@ const Context = struct {
     sampler_pool: MemoryPool(Sampler),
 
     // depots are for resources that are reused once available
-    command_buffer_depots: std.EnumArray(Queue, Depot(CommandBuffer)),
+    command_buffer_depots: std.EnumArray(Queue, Depot(*CommandBuffer)),
     image_acquire_semaphore_depot: Depot(vk.Semaphore),
 
     buffer_allocator: BufferAllocator,
@@ -290,25 +317,126 @@ const Context = struct {
         ctx.* = undefined;
     }
 
-    fn createSwapchain(ptr: *anyopaque, window: rhi.Window) rhi.Context.Error!*const rhi.Swapchain {
+    fn createSwapchain(
+        ptr: *anyopaque,
+        window: rhi.Window,
+    ) rhi.Context.Error!*const rhi.Swapchain {
         const ctx: *Context = @ptrCast(@alignCast(ptr));
         const swapchain: *Swapchain = try ctx.swapchain_pool.create();
+
+        const surface = try ctx.platform.createWindowSurface(ctx.instance.handle, window);
+        errdefer ctx.instance.destroySurfaceKHR(surface, null);
+
         // TODO init
         swapchain.* = Swapchain{
             .next = null,
-            .composition = undefined,
-            .present_mode = undefined,
-            .public = undefined,
-            .surface = undefined,
+            .composition = .sdr,
+            .present_mode = .fifo,
+            .public = .{ .info = .{
+                .composition = .sdr,
+                .present_mode = .fifo,
+                .size = .{ 0, 0, 0 },
+            } },
+            .surface = surface,
             .window = window,
+            .swapchain = .null_handle,
         };
         return &swapchain.public;
     }
+
     fn destroySwapchain(ptr: *anyopaque, rhi_swapchain: *const rhi.Swapchain) void {
         const ctx: *Context = @ptrCast(@alignCast(ptr));
-        const swapchain: *Swapchain = @alignCast(@constCast(@fieldParentPtr("public", rhi_swapchain)));
-        // TODO deinit
+        const swapchain: *Swapchain = @alignCast(@constCast(
+            @fieldParentPtr("public", rhi_swapchain),
+        ));
+
+        ctx.instance.destroySurfaceKHR(swapchain.surface, null);
+
         ctx.swapchain_pool.destroy(swapchain);
+    }
+
+    fn recreateSwapchain(
+        ptr: *anyopaque,
+        rhi_swapchain: *const rhi.Swapchain,
+    ) rhi.Context.Error!void {
+        const ctx: *Context = @ptrCast(@alignCast(ptr));
+        const swapchain: *Swapchain = @alignCast(@constCast(
+            @fieldParentPtr("public", rhi_swapchain),
+        ));
+
+        var arena_impl = std.heap.ArenaAllocator.init(ctx.gpa);
+        defer _ = arena_impl.deinit();
+        const arena = arena_impl.allocator();
+
+        // FIXME errors
+        const capabilities = ctx.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(
+            ctx.physical_device,
+            swapchain.surface,
+        ) catch return error.Unknown;
+        const formats = ctx.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(
+            ctx.physical_device,
+            swapchain.surface,
+            arena,
+        ) catch return error.Unknown;
+        const present_modes = ctx.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(
+            ctx.physical_device,
+            swapchain.surface,
+            arena,
+        ) catch return error.Unknown;
+
+        std.debug.print("{}\n", .{capabilities});
+        std.debug.print("{any}\n", .{formats});
+        std.debug.print("{any}\n", .{present_modes});
+
+        log.debug("(re)creating swapchain", .{});
+        const format = pickSwapchainFormat(.sdr, formats) orelse formats[0];
+        log.debug("- format:       {} {}", .{ format.format, format.color_space });
+        const present_mode = pickSwapchainPresentMode(.fifo, present_modes) orelse .fifo_khr;
+        log.debug("- present_mode: {}", .{present_mode});
+        // TODO we should probably handle the minimized case by creating a swapchain object
+        // but making it invalid s.t. it'll force a recreate on first use
+        // maybe we should even not create anything here, and always force a recreate on first use?
+        const extent = try getSwapchainExtent(ctx.platform, capabilities, swapchain.window);
+        log.debug("- extent:       {}", .{extent});
+        const count = getSwapchainImageCount(capabilities);
+        log.debug("- image count:  {}", .{count});
+
+        log.err("TODO actually recreate the swapchain\n", .{});
+    }
+
+    fn acquireCommandBuffer(
+        ptr: *anyopaque,
+        rhi_queue: rhi.Queue,
+    ) rhi.Context.Error!rhi.CommandBuffer {
+        const ctx: *Context = @ptrCast(@alignCast(ptr));
+        const queue: Queue = switch (rhi_queue) {
+            .graphics => .graphics,
+            .compute => .compute,
+            .transfer => .transfer,
+        };
+
+        const semaphore_value = ctx.device.getSemaphoreCounterValue(
+            ctx.queues.get(queue).semaphore,
+        ) catch return error.Unknown;
+        const command_buffer = ctx.command_buffer_depots.getPtr(queue).pop(semaphore_value) orelse blk: {
+            break :blk undefined;
+        };
+
+        std.debug.print("yo\n", .{});
+        return .{
+            .ptr = command_buffer,
+            .vtable = &CommandBuffer.command_buffer_vtable,
+        };
+    }
+
+    fn submit(
+        ptr: *anyopaque,
+        command_buffers: []const rhi.CommandBuffer,
+    ) rhi.Context.Error!rhi.Fence {
+        _ = ptr;
+        _ = command_buffers;
+        std.debug.print("dawg\n", .{});
+        return undefined;
     }
 
     fn initInstance(
@@ -624,6 +752,75 @@ const Context = struct {
     }
 };
 
+fn pickSwapchainFormat(
+    swapchain_composition: rhi.SwapchainComposition,
+    available_formats: []vk.SurfaceFormatKHR,
+) ?vk.SurfaceFormatKHR {
+    std.debug.assert(available_formats.len > 0);
+
+    const requested_formats: []const vk.SurfaceFormatKHR = switch (swapchain_composition) {
+        .sdr => &.{
+            .{ .format = .b8g8r8a8_srgb, .color_space = .srgb_nonlinear_khr },
+            .{ .format = .r8g8b8a8_srgb, .color_space = .srgb_nonlinear_khr },
+        },
+    };
+
+    for (requested_formats) |req| {
+        for (available_formats) |ava| {
+            if (std.meta.eql(req, ava)) return req;
+        }
+    }
+
+    log.warn("None of the requested swapchain surface formats were found", .{});
+    return null;
+}
+
+fn pickSwapchainPresentMode(
+    present_mode: rhi.PresentMode,
+    available_modes: []vk.PresentModeKHR,
+) ?vk.PresentModeKHR {
+    const requested_mode: vk.PresentModeKHR = switch (present_mode) {
+        .fifo => .fifo_khr,
+        .mailbox => .mailbox_khr,
+    };
+
+    for (available_modes) |ava| {
+        if (requested_mode == ava) return requested_mode;
+    }
+    return null;
+}
+
+fn getSwapchainExtent(
+    platform: Platform,
+    capabilities: vk.SurfaceCapabilitiesKHR,
+    window: rhi.Window,
+) !vk.Extent2D {
+    if (capabilities.current_extent.width != 0xFFFFFFFF and
+        capabilities.current_extent.height != 0xFFFFFFFF)
+    {
+        return capabilities.current_extent;
+    }
+    var extent = try platform.getFramebufferSize(window);
+    if (extent.width == 0 and extent.height == 0) return error.Minimized;
+    extent.width = std.math.clamp(
+        extent.width,
+        capabilities.min_image_extent.width,
+        capabilities.max_image_extent.width,
+    );
+    extent.height = std.math.clamp(
+        extent.height,
+        capabilities.min_image_extent.height,
+        capabilities.max_image_extent.height,
+    );
+    return extent;
+}
+
+fn getSwapchainImageCount(capabilities: vk.SurfaceCapabilitiesKHR) u32 {
+    var count = @max(capabilities.min_image_count, 2); // avoid having any extras, minimize delays
+    if (capabilities.max_image_count > 0) count = @min(count, capabilities.max_image_count);
+    return count;
+}
+
 const PhysicalDeviceCandidate = struct {
     device: vk.PhysicalDevice,
 
@@ -830,20 +1027,39 @@ const UploadAllocator = struct {};
 const DownloadAllocator = struct {};
 
 fn Depot(comptime T: type) type {
-    _ = T;
     return struct {
         const Self = @This();
 
-        gpa: std.mem.Allocator,
+        const Node = struct {
+            data: T,
+            semaphore_value: u64,
+
+            fn order(_: void, a: Node, b: Node) std.math.Order {
+                return std.math.order(a.semaphore_value, b.semaphore_value);
+            }
+        };
+
+        heap: std.PriorityQueue(Node, void, Node.order),
 
         fn init(gpa: std.mem.Allocator) Self {
             return .{
-                .gpa = gpa,
+                .heap = .init(gpa, {}),
             };
         }
 
         fn deinit(depot: *Self) void {
+            depot.heap.deinit();
             depot.* = undefined;
+        }
+
+        fn push(depot: *Self, data: T, semaphore_value: u64) !void {
+            try depot.heap.add(.{ .data = data, .semaphore_value = semaphore_value });
+        }
+
+        fn pop(depot: *Self, semaphore_value: u64) ?T {
+            const top = depot.heap.peek() orelse return null;
+            if (top.semaphore_value > semaphore_value) return null;
+            return depot.heap.remove().data;
         }
     };
 }
