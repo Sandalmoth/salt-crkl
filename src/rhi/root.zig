@@ -442,6 +442,7 @@ pub const Context = struct {
         DeviceLost,
         Unknown,
         Minimized,
+        OutOfDate,
     };
 
     ptr: *anyopaque,
@@ -450,10 +451,13 @@ pub const Context = struct {
     pub const VTable = struct {
         createSwapchain: *const fn (*anyopaque, Window) Error!*const Swapchain,
         destroySwapchain: *const fn (*anyopaque, *const Swapchain) void,
+        // maybe get rid of recreateSwapchain and do it internally
+        // its raison d'être is just to save a call to recreate
+        // if we don't want to start with sdr/fifo
+        recreateSwapchain: *const fn (*anyopaque, *const Swapchain) Error!void,
         setSwapchainComposition: *const fn (*anyopaque, *const Swapchain, SwapchainComposition) void,
         setSwapchainPresentMode: *const fn (*anyopaque, *const Swapchain, PresentMode) void,
         waitAndAcquireSwapchainTexture: *const fn (*anyopaque, *const Swapchain) Error!*const Texture,
-        recreateSwapchain: *const fn (*anyopaque, *const Swapchain) Error!void,
 
         createBuffer: *const fn (*anyopaque, BufferCreateInfo) Error!*const Buffer,
         createTexture: *const fn (*anyopaque, TextureCreateInfo) Error!*const Texture,
@@ -494,6 +498,9 @@ pub const Context = struct {
     }
     pub fn recreateSwapchain(ctx: Context, swapchain: *const Swapchain) Error!void {
         return ctx.vtable.recreateSwapchain(ctx.ptr, swapchain);
+    }
+    pub fn waitAndAcquireSwapchainTexture(ctx: Context, swapchain: *const Swapchain) Error!*const Texture {
+        return ctx.vtable.waitAndAcquireSwapchainTexture(ctx.ptr, swapchain);
     }
     pub fn acquireCommandBuffer(ctx: Context, queue: Queue) Error!CommandBuffer {
         return ctx.vtable.acquireCommandBuffer(ctx.ptr, queue);

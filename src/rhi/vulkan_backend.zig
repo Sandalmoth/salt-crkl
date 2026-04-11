@@ -152,11 +152,65 @@ const CommandBuffer = struct {
         .timestamp = undefined,
     };
 
+    ctx: *Context,
+    queue: Queue,
     pool: vk.CommandPool,
 
-    fn present(ptr: *anyopaque, swapchain: *const rhi.Swapchain) void {
-        _ = ptr;
-        _ = swapchain;
+    prefix: vk.CommandBuffer,
+    body: vk.CommandBuffer,
+    suffix: vk.CommandBuffer,
+
+    // command buffer captures errors by just becoming invalid
+    // and errors on submit instead, allowing for a try-free api
+    valid: bool,
+
+    fn init(ctx: *Context, queue: Queue) !CommandBuffer {
+        const pool = ctx.device.createCommandPool(&.{
+            .flags = .{},
+            .queue_family_index = ctx.queues.get(queue).family,
+        }, null) catch return error.Unknown;
+        errdefer ctx.device.destroyCommandPool(pool, null);
+        var buffers: [3]vk.CommandBuffer = .{.null_handle} ** 3;
+        ctx.device.allocateCommandBuffers(&.{
+            .command_pool = pool,
+            .level = .primary,
+            .command_buffer_count = 3,
+        }, @ptrCast(&buffers[0])) catch return error.Unknown;
+        errdefer ctx.device.freeCommandBuffers(pool, 3, @ptrCast(&buffers[0]));
+
+        return .{
+            .ctx = ctx,
+            .queue = queue,
+            .pool = pool,
+            .prefix = buffers[0],
+            .body = buffers[1],
+            .suffix = buffers[2],
+            .valid = false,
+        };
+    }
+
+    fn deinit(command_buffer: *CommandBuffer) void {
+        const buffers: [3]vk.CommandBuffer = .{
+            command_buffer.prefix,
+            command_buffer.body,
+            command_buffer.suffix,
+        };
+        command_buffer.ctx.device.freeCommandBuffers(command_buffer.pool, 3, @ptrCast(&buffers[0]));
+        command_buffer.ctx.device.destroyCommandPool(command_buffer.pool, null);
+    }
+
+    fn reset(command_buffer: *CommandBuffer) void {
+        command_buffer.valid = false;
+        command_buffer.ctx.device.resetCommandPool(command_buffer.pool, .{}) catch return;
+        command_buffer.valid = true;
+    }
+
+    fn present(ptr: *anyopaque, rhi_swapchain: *const rhi.Swapchain) void {
+        const command_buffer: *CommandBuffer = @ptrCast(@alignCast(ptr));
+        if (!command_buffer.valid) return;
+        std.debug.assert(command_buffer.ctx.present_queue_initialized);
+
+        _ = rhi_swapchain;
         std.debug.print("we presentin\n", .{});
     }
 };
@@ -167,7 +221,7 @@ const Context = struct {
         .destroySwapchain = destroySwapchain,
         .setSwapchainComposition = undefined,
         .setSwapchainPresentMode = undefined,
-        .waitAndAcquireSwapchainTexture = undefined,
+        .waitAndAcquireSwapchainTexture = waitAndAcquireSwapchainTexture,
         .recreateSwapchain = recreateSwapchain,
         .createBuffer = undefined,
         .createTexture = undefined,
@@ -292,6 +346,16 @@ const Context = struct {
         ctx.texture_pool.deinit();
         ctx.sampler_pool.deinit();
 
+        for ([_]Queue{ .graphics, .compute, .transfer, .present }) |queue| {
+            const depot = ctx.command_buffer_depots.getPtr(queue);
+            var it = depot.heap.iterator();
+            while (it.next()) |item| {
+                item.data.deinit();
+                ctx.gpa.destroy(item.data);
+            }
+            depot.deinit();
+        }
+
         var physical_queues: [4]?*PhysicalQueue = .{null} ** 4;
         outer: for ([_]Queue{ .graphics, .compute, .transfer }, 0..) |queue, j| {
             for (0..4) |i| if (physical_queues[i] == ctx.queues.get(queue)) continue :outer;
@@ -327,6 +391,25 @@ const Context = struct {
         const surface = try ctx.platform.createWindowSurface(ctx.instance.handle, window);
         errdefer ctx.instance.destroySurfaceKHR(surface, null);
 
+        if (!ctx.present_queue_initialized) {
+            // first time we create a swapchain we need to find the present queue
+            // ideally it should be the same as the graphics queue but could be different
+            // it's done here because it requires a surface
+
+            if ((ctx.instance.getPhysicalDeviceSurfaceSupportKHR(
+                ctx.physical_device,
+                ctx.queues.get(.graphics).family,
+                surface,
+            ) catch return error.Unknown) == .true) {
+                ctx.queues.set(.present, ctx.queues.get(.graphics));
+                ctx.present_queue_initialized = true;
+            } else {
+                // TODO search through all the queues to find one that can present
+                log.warn("Graphics queue does not present, separate queue not yet implemented", .{});
+                return error.Unsupported;
+            }
+        }
+
         // TODO init
         swapchain.* = Swapchain{
             .next = null,
@@ -350,6 +433,8 @@ const Context = struct {
             @fieldParentPtr("public", rhi_swapchain),
         ));
 
+        std.debug.assert(ctx.present_queue_initialized);
+
         ctx.instance.destroySurfaceKHR(swapchain.surface, null);
 
         ctx.swapchain_pool.destroy(swapchain);
@@ -363,6 +448,8 @@ const Context = struct {
         const swapchain: *Swapchain = @alignCast(@constCast(
             @fieldParentPtr("public", rhi_swapchain),
         ));
+
+        std.debug.assert(ctx.present_queue_initialized);
 
         var arena_impl = std.heap.ArenaAllocator.init(ctx.gpa);
         defer _ = arena_impl.deinit();
@@ -404,6 +491,22 @@ const Context = struct {
         log.err("TODO actually recreate the swapchain\n", .{});
     }
 
+    fn waitAndAcquireSwapchainTexture(
+        ptr: *anyopaque,
+        rhi_swapchain: *const rhi.Swapchain,
+    ) rhi.Context.Error!*const rhi.Texture {
+        const ctx: *Context = @ptrCast(@alignCast(ptr));
+        const swapchain: *Swapchain = @alignCast(@constCast(
+            @fieldParentPtr("public", rhi_swapchain),
+        ));
+
+        std.debug.assert(ctx.present_queue_initialized);
+
+        _ = swapchain;
+        std.debug.print("waiting for texture", .{});
+        return undefined;
+    }
+
     fn acquireCommandBuffer(
         ptr: *anyopaque,
         rhi_queue: rhi.Queue,
@@ -419,8 +522,12 @@ const Context = struct {
             ctx.queues.get(queue).semaphore,
         ) catch return error.Unknown;
         const command_buffer = ctx.command_buffer_depots.getPtr(queue).pop(semaphore_value) orelse blk: {
-            break :blk undefined;
+            const command_buffer = try ctx.gpa.create(CommandBuffer);
+            errdefer ctx.gpa.destroy(command_buffer);
+            command_buffer.* = try .init(ctx, queue);
+            break :blk command_buffer;
         };
+        command_buffer.reset();
 
         std.debug.print("yo\n", .{});
         return .{
@@ -431,11 +538,18 @@ const Context = struct {
 
     fn submit(
         ptr: *anyopaque,
-        command_buffers: []const rhi.CommandBuffer,
+        rhi_command_buffers: []const rhi.CommandBuffer,
     ) rhi.Context.Error!rhi.Fence {
-        _ = ptr;
-        _ = command_buffers;
+        const ctx: *Context = @ptrCast(@alignCast(ptr));
+
         std.debug.print("dawg\n", .{});
+
+        for (rhi_command_buffers) |rhi_command_buffer| {
+            // FIXME use real semaphore value
+            const command_buffer: *CommandBuffer = @ptrCast(@alignCast(rhi_command_buffer.ptr));
+            try (ctx.command_buffer_depots.getPtr(command_buffer.queue)).push(command_buffer, 0);
+        }
+
         return undefined;
     }
 

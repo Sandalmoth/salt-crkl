@@ -53,6 +53,16 @@ pub fn main() !void {
             };
         }
 
+        std.Thread.sleep(10_000_000);
+
+        const swapchain_image = ctx.waitAndAcquireSwapchainTexture(swapchain) catch |e| switch (e) {
+            error.OutOfDate => {
+                try ctx.recreateSwapchain(swapchain); // TODO handle minimized
+                continue :main_loop;
+            },
+            else => return e,
+        };
+        _ = swapchain_image;
         const command_buffer = try ctx.acquireCommandBuffer(.graphics);
         command_buffer.present(swapchain);
         _ = try ctx.submit(&.{command_buffer});
