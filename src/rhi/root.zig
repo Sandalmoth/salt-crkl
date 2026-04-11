@@ -452,8 +452,9 @@ pub const Context = struct {
         createSwapchain: *const fn (*anyopaque, Window) Error!*const Swapchain,
         destroySwapchain: *const fn (*anyopaque, *const Swapchain) void,
         // maybe get rid of recreateSwapchain and do it internally
-        // its raison d'être is just to save a call to recreate
-        // if we don't want to start with sdr/fifo
+        // its raison d'être is just
+        // - to save a call to recreate if we don't want to start with sdr/fifo
+        // - handle the case where we try to create but the window is minimized
         recreateSwapchain: *const fn (*anyopaque, *const Swapchain) Error!void,
         setSwapchainComposition: *const fn (*anyopaque, *const Swapchain, SwapchainComposition) void,
         setSwapchainPresentMode: *const fn (*anyopaque, *const Swapchain, PresentMode) void,

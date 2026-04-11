@@ -57,6 +57,7 @@ pub fn main() !void {
 
         const swapchain_image = ctx.waitAndAcquireSwapchainTexture(swapchain) catch |e| switch (e) {
             error.OutOfDate => {
+                std.debug.print("hit out of date\n", .{});
                 try ctx.recreateSwapchain(swapchain); // TODO handle minimized
                 continue :main_loop;
             },

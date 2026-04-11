@@ -128,9 +128,12 @@ const Swapchain = struct {
     window: rhi.Window,
     surface: vk.SurfaceKHR,
     swapchain: vk.SwapchainKHR,
-    composition: rhi.SwapchainComposition,
-    present_mode: rhi.PresentMode,
-    next: ?*Swapchain,
+    images: []vk.Image,
+    views: []vk.ImageView,
+    release_semaphores: []vk.Semaphore,
+    // composition: rhi.SwapchainComposition,
+    // present_mode: rhi.PresentMode,
+    // next: ?*Swapchain,
 };
 
 // NOTE i think we should bake the passes into here with just separate vtables
@@ -412,9 +415,7 @@ const Context = struct {
 
         // TODO init
         swapchain.* = Swapchain{
-            .next = null,
-            .composition = .sdr,
-            .present_mode = .fifo,
+            // .next = null,
             .public = .{ .info = .{
                 .composition = .sdr,
                 .present_mode = .fifo,
@@ -423,6 +424,9 @@ const Context = struct {
             .surface = surface,
             .window = window,
             .swapchain = .null_handle,
+            .images = &.{},
+            .views = &.{},
+            .release_semaphores = &.{},
         };
         return &swapchain.public;
     }
@@ -434,6 +438,19 @@ const Context = struct {
         ));
 
         std.debug.assert(ctx.present_queue_initialized);
+
+        if (swapchain.swapchain != .null_handle) {
+            std.debug.print("{}\n", .{swapchain});
+            const count = swapchain.images.len;
+            for (0..count) |i| {
+                ctx.device.destroySemaphore(swapchain.release_semaphores[i], null);
+                ctx.device.destroyImageView(swapchain.views[i], null);
+            }
+            ctx.device.destroySwapchainKHR(swapchain.swapchain, null);
+            ctx.gpa.free(swapchain.release_semaphores);
+            ctx.gpa.free(swapchain.views);
+            ctx.gpa.free(swapchain.images);
+        }
 
         ctx.instance.destroySurfaceKHR(swapchain.surface, null);
 
@@ -451,11 +468,14 @@ const Context = struct {
 
         std.debug.assert(ctx.present_queue_initialized);
 
+        ctx.device.deviceWaitIdle() catch return error.Unknown;
+
         var arena_impl = std.heap.ArenaAllocator.init(ctx.gpa);
         defer _ = arena_impl.deinit();
         const arena = arena_impl.allocator();
 
-        // FIXME errors
+        // FIXME convert errors instead of passing unknown
+
         const capabilities = ctx.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(
             ctx.physical_device,
             swapchain.surface,
@@ -471,24 +491,100 @@ const Context = struct {
             arena,
         ) catch return error.Unknown;
 
-        std.debug.print("{}\n", .{capabilities});
-        std.debug.print("{any}\n", .{formats});
-        std.debug.print("{any}\n", .{present_modes});
-
         log.debug("(re)creating swapchain", .{});
         const format = pickSwapchainFormat(.sdr, formats) orelse formats[0];
         log.debug("- format:       {} {}", .{ format.format, format.color_space });
         const present_mode = pickSwapchainPresentMode(.fifo, present_modes) orelse .fifo_khr;
         log.debug("- present_mode: {}", .{present_mode});
-        // TODO we should probably handle the minimized case by creating a swapchain object
-        // but making it invalid s.t. it'll force a recreate on first use
-        // maybe we should even not create anything here, and always force a recreate on first use?
         const extent = try getSwapchainExtent(ctx.platform, capabilities, swapchain.window);
         log.debug("- extent:       {}", .{extent});
         const count = getSwapchainImageCount(capabilities);
         log.debug("- image count:  {}", .{count});
 
-        log.err("TODO actually recreate the swapchain\n", .{});
+        swapchain.public.info.size = .{ extent.width, extent.height, 1 };
+
+        const old_swapchain = swapchain.swapchain;
+
+        var create_info = vk.SwapchainCreateInfoKHR{
+            .surface = swapchain.surface,
+            .min_image_count = count,
+            .image_format = format.format,
+            .image_color_space = format.color_space,
+            .image_extent = extent,
+            .image_array_layers = 1,
+            .image_usage = .{
+                .color_attachment_bit = true,
+                .transfer_dst_bit = capabilities.supported_usage_flags.transfer_dst_bit,
+            },
+            .image_sharing_mode = .exclusive,
+            .pre_transform = capabilities.current_transform,
+            .composite_alpha = .{ .opaque_bit_khr = true },
+            .present_mode = present_mode,
+            .clipped = .true,
+            .old_swapchain = old_swapchain,
+        };
+        // std.debug.print("{}\n", .{create_info});
+        swapchain.swapchain = ctx.device.createSwapchainKHR(
+            &create_info,
+            null,
+        ) catch return error.Unknown;
+        errdefer ctx.device.destroySwapchainKHR(swapchain.swapchain, null);
+
+        if (old_swapchain != .null_handle) {
+            for (0..count) |i| {
+                ctx.device.destroySemaphore(swapchain.release_semaphores[i], null);
+                ctx.device.destroyImageView(swapchain.views[i], null);
+            }
+            ctx.device.destroySwapchainKHR(old_swapchain, null);
+            ctx.gpa.free(swapchain.release_semaphores);
+            ctx.gpa.free(swapchain.views);
+            ctx.gpa.free(swapchain.images);
+        }
+
+        swapchain.images = ctx.device.getSwapchainImagesAllocKHR(
+            swapchain.swapchain,
+            ctx.gpa,
+        ) catch return error.Unknown;
+        errdefer ctx.gpa.free(swapchain.images);
+        std.debug.assert(swapchain.images.len == count);
+
+        swapchain.views = try ctx.gpa.alloc(vk.ImageView, count);
+        errdefer ctx.gpa.free(swapchain.views);
+        for (swapchain.images, 0..) |image, i| {
+            const view_create_info = vk.ImageViewCreateInfo{
+                .image = image,
+                .view_type = .@"2d",
+                .format = format.format,
+                .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
+                .subresource_range = .{
+                    .aspect_mask = .{ .color_bit = true },
+                    .base_mip_level = 0,
+                    .level_count = 1,
+                    .base_array_layer = 0,
+                    .layer_count = 1,
+                },
+            };
+            swapchain.views[i] = ctx.device.createImageView(&view_create_info, null) catch {
+                // cleanup pattern
+                var j = i;
+                while (j > 0) : (j -= 1) ctx.device.destroyImageView(swapchain.views[j - 1], null);
+                return error.Unknown;
+            };
+        }
+
+        swapchain.release_semaphores = try ctx.gpa.alloc(vk.Semaphore, count);
+        errdefer ctx.gpa.free(swapchain.release_semaphores);
+        for (0..count) |i| {
+            swapchain.release_semaphores[i] = ctx.device.createSemaphore(&.{}, null) catch {
+                var j = i;
+                while (j > 0) : (j -= 1) ctx.device.destroySemaphore(swapchain.release_semaphores[j - 1], null);
+                return error.Unknown;
+            };
+        }
+
+        // FIXME FIXME if we fail at any point here we'll get a very hard to recover state
+        // we should probably first put the swapchain struct in some safe state
+        // and then only overwrite it if everything succeeds
     }
 
     fn waitAndAcquireSwapchainTexture(
@@ -502,8 +598,9 @@ const Context = struct {
 
         std.debug.assert(ctx.present_queue_initialized);
 
-        _ = swapchain;
-        std.debug.print("waiting for texture", .{});
+        if (swapchain.swapchain == .null_handle) return error.OutOfDate;
+
+        std.debug.print("waiting for texture\n", .{});
         return undefined;
     }
 
