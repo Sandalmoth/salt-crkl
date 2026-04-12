@@ -90,7 +90,7 @@ const device_features_1_3 = vk.PhysicalDeviceVulkan13Features{
     .synchronization_2 = .true,
 };
 
-const Queue = enum { graphics, compute, transfer, present };
+const Queue = enum(u16) { graphics, compute, transfer, present };
 
 const Shader = struct {
     public: rhi.Shader,
@@ -101,6 +101,24 @@ const Shader = struct {
 const GraphicsPipeline = struct {};
 
 const ComputePipeline = struct {};
+
+const Group = struct {
+    const TextureState = packed struct(u64) {
+        owned: bool,
+        owner: Queue,
+        layout: vk.ImageLayout,
+        _padding: u15 = 0,
+    };
+
+    public: rhi.Group,
+
+    texture_state: TextureState,
+    texture_overrides: std.AutoArrayHashMapUnmanaged(*const Texture, TextureState),
+
+    // does this contain any unused swapchain images?
+    // if so, the first command buffer using this group needs to wait on the acquire semaphore(s)
+    acquire_semaphores: std.ArrayList(vk.Semaphore),
+};
 
 const Buffer = struct {
     public: rhi.Buffer,
@@ -117,6 +135,7 @@ const Buffer = struct {
 const Texture = struct {
     public: rhi.Texture,
     image: vk.Image,
+    swapchain: bool, // is this a swapchain texture?
 };
 
 const Sampler = struct {
@@ -208,12 +227,12 @@ const CommandBuffer = struct {
         command_buffer.valid = true;
     }
 
-    fn present(ptr: *anyopaque, rhi_swapchain: *const rhi.Swapchain) void {
+    fn present(ptr: *anyopaque, rhi_texture: *const rhi.Texture) void {
         const command_buffer: *CommandBuffer = @ptrCast(@alignCast(ptr));
         if (!command_buffer.valid) return;
         std.debug.assert(command_buffer.ctx.present_queue_initialized);
 
-        _ = rhi_swapchain;
+        _ = rhi_texture;
         std.debug.print("we presentin\n", .{});
     }
 };
@@ -280,6 +299,7 @@ const Context = struct {
     sampler_slots: SlotPool,
 
     // pools are for resources that are recreated, not reused
+    group_pool: MemoryPool(Group),
     swapchain_pool: MemoryPool(Swapchain),
     shader_pool: MemoryPool(Shader),
     graphics_pipeline_pool: MemoryPool(GraphicsPipeline),
@@ -290,7 +310,7 @@ const Context = struct {
 
     // depots are for resources that are reused once available
     command_buffer_depots: std.EnumArray(Queue, Depot(*CommandBuffer)),
-    image_acquire_semaphore_depot: Depot(vk.Semaphore),
+    acquire_semaphore_depot: Depot(vk.Semaphore),
 
     buffer_allocator: BufferAllocator,
     texture_allocator: TextureAllocator,
@@ -320,6 +340,7 @@ const Context = struct {
         try ctx.initPipelineLayout();
         errdefer ctx.deinitPipelineLayout();
 
+        ctx.group_pool = .init(gpa);
         ctx.shader_pool = .init(gpa);
         ctx.graphics_pipeline_pool = .init(gpa);
         ctx.compute_pipeline_pool = .init(gpa);
@@ -329,7 +350,7 @@ const Context = struct {
         ctx.swapchain_pool = .init(gpa);
 
         ctx.command_buffer_depots = .initFill(.init(gpa));
-        ctx.image_acquire_semaphore_depot = .init(gpa);
+        ctx.acquire_semaphore_depot = .init(gpa);
 
         // TODO init allocators
 
@@ -348,11 +369,11 @@ const Context = struct {
         ctx.buffer_pool.deinit();
         ctx.texture_pool.deinit();
         ctx.sampler_pool.deinit();
+        ctx.group_pool.deinit();
 
         for ([_]Queue{ .graphics, .compute, .transfer, .present }) |queue| {
             const depot = ctx.command_buffer_depots.getPtr(queue);
-            var it = depot.heap.iterator();
-            while (it.next()) |item| {
+            for (depot.data.items) |item| {
                 item.data.deinit();
                 ctx.gpa.destroy(item.data);
             }
@@ -440,9 +461,7 @@ const Context = struct {
         std.debug.assert(ctx.present_queue_initialized);
 
         if (swapchain.swapchain != .null_handle) {
-            std.debug.print("{}\n", .{swapchain});
-            const count = swapchain.images.len;
-            for (0..count) |i| {
+            for (0..swapchain.images.len) |i| {
                 ctx.device.destroySemaphore(swapchain.release_semaphores[i], null);
                 ctx.device.destroyImageView(swapchain.views[i], null);
             }
@@ -531,7 +550,7 @@ const Context = struct {
         errdefer ctx.device.destroySwapchainKHR(swapchain.swapchain, null);
 
         if (old_swapchain != .null_handle) {
-            for (0..count) |i| {
+            for (0..swapchain.images.len) |i| {
                 ctx.device.destroySemaphore(swapchain.release_semaphores[i], null);
                 ctx.device.destroyImageView(swapchain.views[i], null);
             }
@@ -600,8 +619,82 @@ const Context = struct {
 
         if (swapchain.swapchain == .null_handle) return error.OutOfDate;
 
+        // we have to wait for whatever queue was the first to use the texture
+        // and hence had to wait for the acquire semaphore to be signalled
+        // but that means the depot must also store what queue the semaphore value is from
+        // and waiting on it means we need to check the value for all the queues
+        const acquire_semaphore = ctx.acquire_semaphore_depot.pop(.{
+            .graphics = ctx.device.getSemaphoreCounterValue(ctx.queues.get(.graphics).semaphore) catch return error.Unknown,
+            .compute = ctx.device.getSemaphoreCounterValue(ctx.queues.get(.compute).semaphore) catch return error.Unknown,
+            .transfer = ctx.device.getSemaphoreCounterValue(ctx.queues.get(.transfer).semaphore) catch return error.Unknown,
+            .present = ctx.device.getSemaphoreCounterValue(ctx.queues.get(.present).semaphore) catch return error.Unknown,
+        }) orelse
+            ctx.device.createSemaphore(&.{}, null) catch return error.Unknown;
+
+        // TODO check whether all the result info is also encoded into the error as assumed
+        // const image_index = (ctx.device.acquireNextImageKHR(
+        //     swapchain.swapchain,
+        //     1_000_000_000,
+        //     acquire_semaphore,
+        //     .null_handle,
+        // ) catch return error.Unknown).image_index;
+
+        const result = ctx.device.acquireNextImageKHR(
+            swapchain.swapchain,
+            1_000_000_000,
+            acquire_semaphore,
+            .null_handle,
+        ) catch return error.Unknown;
+
+        if (result.result == .timeout) return error.Timeout;
+        std.debug.print("{}\n", .{result});
+        const image_index = result.image_index;
+
+        const texture: *Texture = try ctx.texture_pool.create();
+        errdefer ctx.texture_pool.destroy(texture);
+        const group: *Group = try ctx.group_pool.create();
+        errdefer ctx.group_pool.destroy(group);
+
+        group.texture_state = .{
+            .owned = false,
+            .owner = undefined,
+            .layout = .undefined,
+        };
+        group.texture_overrides = .{};
+        group.acquire_semaphores = .empty;
+        try group.acquire_semaphores.append(ctx.gpa, acquire_semaphore);
+
+        texture.* = .{
+            .image = swapchain.images[image_index],
+            .swapchain = true,
+            .public = .{
+                .group = &group.public,
+                .default_view = .{ .device_address = undefined, .info = .{
+                    .view_type = .view_2d,
+                    .format = .swapchain,
+                    .swizzle = .{},
+                    .range = .{
+                        .base_mip_level = 0,
+                        .level_count = 1,
+                        .base_array_layer = 0,
+                        .layer_count = 1,
+                    },
+                } },
+                .views = &.{},
+                .info = .{
+                    .usage = .{ .transfer_dst = true, .attachment = true }, // FIXME use actual values
+                    .size = swapchain.public.info.size,
+                    .format = .swapchain,
+                    .mip_levels = 1,
+                    .sample_count = .@"1",
+                    .texture_type = .texture_2d,
+                    .name = "",
+                },
+            },
+        };
+
         std.debug.print("waiting for texture\n", .{});
-        return undefined;
+        return &texture.public;
     }
 
     fn acquireCommandBuffer(
@@ -615,10 +708,12 @@ const Context = struct {
             .transfer => .transfer,
         };
 
-        const semaphore_value = ctx.device.getSemaphoreCounterValue(
-            ctx.queues.get(queue).semaphore,
-        ) catch return error.Unknown;
-        const command_buffer = ctx.command_buffer_depots.getPtr(queue).pop(semaphore_value) orelse blk: {
+        const command_buffer = ctx.command_buffer_depots.getPtr(queue).pop(.{
+            .graphics = ctx.device.getSemaphoreCounterValue(ctx.queues.get(.graphics).semaphore) catch return error.Unknown,
+            .compute = ctx.device.getSemaphoreCounterValue(ctx.queues.get(.compute).semaphore) catch return error.Unknown,
+            .transfer = ctx.device.getSemaphoreCounterValue(ctx.queues.get(.transfer).semaphore) catch return error.Unknown,
+            .present = ctx.device.getSemaphoreCounterValue(ctx.queues.get(.present).semaphore) catch return error.Unknown,
+        }) orelse blk: {
             const command_buffer = try ctx.gpa.create(CommandBuffer);
             errdefer ctx.gpa.destroy(command_buffer);
             command_buffer.* = try .init(ctx, queue);
@@ -644,7 +739,11 @@ const Context = struct {
         for (rhi_command_buffers) |rhi_command_buffer| {
             // FIXME use real semaphore value
             const command_buffer: *CommandBuffer = @ptrCast(@alignCast(rhi_command_buffer.ptr));
-            try (ctx.command_buffer_depots.getPtr(command_buffer.queue)).push(command_buffer, 0);
+            try (ctx.command_buffer_depots.getPtr(command_buffer.queue)).push(
+                command_buffer,
+                command_buffer.queue,
+                0,
+            );
         }
 
         return undefined;
@@ -845,12 +944,12 @@ const Context = struct {
                 ctx.device.wrapper,
             );
             physical_queue.value = 0;
-            physical_queue.semaphore = try ctx.device.createSemaphore(&.{
+            physical_queue.semaphore = ctx.device.createSemaphore(&.{
                 .p_next = &vk.SemaphoreTypeCreateInfo{
                     .semaphore_type = .timeline,
                     .initial_value = 0,
                 },
-            }, null);
+            }, null) catch return error.Unknown;
 
             // then assign it to all queues that share that family
             for ([3]Queue{ .graphics, .compute, .transfer }) |queue| {
@@ -1243,34 +1342,51 @@ fn Depot(comptime T: type) type {
 
         const Node = struct {
             data: T,
+            queue: Queue,
             semaphore_value: u64,
-
-            fn order(_: void, a: Node, b: Node) std.math.Order {
-                return std.math.order(a.semaphore_value, b.semaphore_value);
-            }
         };
 
-        heap: std.PriorityQueue(Node, void, Node.order),
+        const SyncPoint = struct {
+            graphics: u64,
+            compute: u64,
+            transfer: u64,
+            present: u64,
+        };
+
+        gpa: std.mem.Allocator,
+        data: std.ArrayList(Node),
 
         fn init(gpa: std.mem.Allocator) Self {
             return .{
-                .heap = .init(gpa, {}),
+                .gpa = gpa,
+                .data = .empty,
             };
         }
 
         fn deinit(depot: *Self) void {
-            depot.heap.deinit();
+            depot.data.deinit(depot.gpa);
             depot.* = undefined;
         }
 
-        fn push(depot: *Self, data: T, semaphore_value: u64) !void {
-            try depot.heap.add(.{ .data = data, .semaphore_value = semaphore_value });
+        fn push(depot: *Self, data: T, queue: Queue, semaphore_value: u64) !void {
+            try depot.data.append(depot.gpa, .{
+                .data = data,
+                .queue = queue,
+                .semaphore_value = semaphore_value,
+            });
         }
 
-        fn pop(depot: *Self, semaphore_value: u64) ?T {
-            const top = depot.heap.peek() orelse return null;
-            if (top.semaphore_value > semaphore_value) return null;
-            return depot.heap.remove().data;
+        fn pop(depot: *Self, sync_point: SyncPoint) ?T {
+            for (depot.data.items, 0..) |data, i| {
+                switch (data.queue) {
+                    .graphics => if (data.semaphore_value > sync_point.graphics) continue,
+                    .compute => if (data.semaphore_value > sync_point.compute) continue,
+                    .transfer => if (data.semaphore_value > sync_point.transfer) continue,
+                    .present => if (data.semaphore_value > sync_point.present) continue,
+                }
+                return depot.data.swapRemove(i).data;
+            }
+            return null;
         }
     };
 }

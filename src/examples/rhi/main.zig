@@ -61,11 +61,11 @@ pub fn main() !void {
                 try ctx.recreateSwapchain(swapchain); // TODO handle minimized
                 continue :main_loop;
             },
+            error.Timeout => continue :main_loop,
             else => return e,
         };
-        _ = swapchain_image;
         const command_buffer = try ctx.acquireCommandBuffer(.graphics);
-        command_buffer.present(swapchain);
+        command_buffer.present(swapchain_image);
         _ = try ctx.submit(&.{command_buffer});
     }
 

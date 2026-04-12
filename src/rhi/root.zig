@@ -16,6 +16,7 @@ pub const PresentMode = enum {
 };
 
 pub const Format = enum {
+    swapchain, // undefined format of the swapchain, however, we should just reverse map instead
     r8g8b8a8_unorm,
     r8g8b8a8_srgb,
     b8g8r8a8_unorm,
@@ -131,7 +132,7 @@ pub const TextureView = struct {
 pub const Texture = struct {
     group: *const Group,
     default_view: TextureView,
-    views: TextureView,
+    views: []const TextureView,
 
     info: struct {
         usage: TextureUsage,
@@ -603,12 +604,12 @@ pub const CommandBuffer = struct {
         beginComputePass: *const fn (*anyopaque, ComputePassAccess) *RenderPass,
         endComputePass: *const fn (*anyopaque, *RenderPass) void,
 
-        present: *const fn (*anyopaque, *const Swapchain) void,
+        present: *const fn (*anyopaque, *const Texture) void,
 
         timestamp: *const fn (*anyopaque) ?Timestamp,
     };
 
-    pub fn present(command_buffer: CommandBuffer, swapchain: *const Swapchain) void {
+    pub fn present(command_buffer: CommandBuffer, swapchain: *const Texture) void {
         return command_buffer.vtable.present(command_buffer.ptr, swapchain);
     }
 
