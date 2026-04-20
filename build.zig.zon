@@ -62,17 +62,25 @@
         //    .lazy = false,
         //},
         //
-        .vulkan_zig = .{
-            .url = "https://github.com/Snektron/vulkan-zig/archive/1446b0b994c2362264cc24513d7c7ec31b469c50.tar.gz",
-            .hash = "vulkan-0.0.0-r7Ytx_VDAwAiMl0YSu2UOkVMIGJN7CeIQaxJR-hUSfD6",
-        },
+        // .vulkan_zig = .{
+        //     .url = "https://github.com/Snektron/vulkan-zig/archive/1446b0b994c2362264cc24513d7c7ec31b469c50.tar.gz",
+        //     .hash = "vulkan-0.0.0-r7Ytx_VDAwAiMl0YSu2UOkVMIGJN7CeIQaxJR-hUSfD6",
+        // },
         .vulkan_headers = .{
-            .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/v1.3.283.tar.gz",
-            .hash = "N-V-__8AAAkkoQGn5z1yoNVrwqZfnYmZp8AZ5CJgoHRMQI0c",
+            .url = "git+https://github.com/KhronosGroup/Vulkan-Headers#f6a6f7ab165cedbfa2a7d0c93fe27a2d01ce09c8",
+            .hash = "N-V-__8AAC1ZbAIG2kVq3iPpAWaOlDTQ3MOyOyQQR0o_-9ez",
         },
         .sdl = .{
-            .url = "git+https://github.com/castholm/SDL.git#887fa805e40d5c7bb3955ae69b89ed566c6a0471",
-            .hash = "sdl-0.4.0+3.4.0-SDL--rq2owEZsySGuHCuVJ9naEvH3i3e_pyUIjziBtJ-",
+            .url = "git+https://github.com/castholm/SDL.git#c5ba24c694b5d520cdc1d029d8def398690d6894",
+            .hash = "sdl-0.4.2+3.4.4-SDL--kB3pQHKG_4zWG-pH04ZcZZj_IRF7dwMpxNVGwd6",
+        },
+        // .vulkan = .{
+        //     .url = "git+https://github.com/Snektron/vulkan-zig#be16fc99f7f794cba90334978c6c5aadeda8094f",
+        //     .hash = "vulkan-0.0.0-r7Ytx-V9AwCwHxS2TaZ-KJCp_3axidu3ASZUg3B512-k",
+        // },
+        .vulkan = .{
+            .url = "git+https://github.com/Snektron/vulkan-zig#be16fc99f7f794cba90334978c6c5aadeda8094f",
+            .hash = "vulkan-0.0.0-r7Ytx-V9AwCwHxS2TaZ-KJCp_3axidu3ASZUg3B512-k",
         },
     },
     // Specifies the set of files and directories that are included in this package.

@@ -13,6 +13,10 @@ pub fn main() !void {
     defer _ = gpa_struct.deinit();
     const gpa = gpa_struct.allocator();
 
+    var io_struct: std.Io.Threaded = .init(gpa, .{});
+    defer _ = io_struct.deinit();
+    const io = io_struct.io();
+
     // var arena_struct: std.heap.ArenaAllocator = .init(gpa);
     // defer _ = arena_struct.deinit();
     // const arena = arena_struct.allocator();
@@ -41,7 +45,7 @@ pub fn main() !void {
     const swapchain = try ctx.createSwapchain(window);
     defer ctx.destroySwapchain(swapchain);
 
-    try ctx.recreateSwapchain(swapchain);
+    // try ctx.recreateSwapchain(swapchain);
 
     main_loop: while (true) {
         var event: sdl.Event = undefined;
@@ -53,19 +57,14 @@ pub fn main() !void {
             };
         }
 
-        std.Thread.sleep(10_000_000);
+        try io.sleep(.fromMilliseconds(1), .real);
 
-        const swapchain_image = ctx.waitAndAcquireSwapchainTexture(swapchain) catch |e| switch (e) {
-            error.OutOfDate => {
-                std.debug.print("hit out of date\n", .{});
-                try ctx.recreateSwapchain(swapchain); // TODO handle minimized
-                continue :main_loop;
-            },
-            error.Timeout => continue :main_loop,
-            else => return e,
-        };
         const command_buffer = try ctx.acquireCommandBuffer(.graphics);
-        command_buffer.present(swapchain_image);
+        const swapchain_texture = command_buffer.waitAndAcquireSwapchainTexture(swapchain) orelse {
+            command_buffer.cancel();
+            continue :main_loop;
+        };
+        _ = swapchain_texture;
         _ = try ctx.submit(&.{command_buffer});
     }
 

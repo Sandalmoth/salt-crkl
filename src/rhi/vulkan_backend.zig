@@ -103,6 +103,9 @@ const GraphicsPipeline = struct {};
 const ComputePipeline = struct {};
 
 const Group = struct {
+    // NOTE this could be packed into a u32, or even smaller
+    // but we'd have to either do some ugly masking on the layout
+    // or map the layout to a continuous range
     const TextureState = packed struct(u64) {
         owned: bool,
         owner: Queue,
@@ -112,12 +115,24 @@ const Group = struct {
 
     public: rhi.Group,
 
+    // resource may not be put in new group and other resources may not be put in this group
+    // this is used for swapchain images to greatly simplify their special tracking
+    immutable_assignment: bool,
+
     texture_state: TextureState,
     texture_overrides: std.AutoArrayHashMapUnmanaged(*const Texture, TextureState),
 
-    // does this contain any unused swapchain images?
-    // if so, the first command buffer using this group needs to wait on the acquire semaphore(s)
-    acquire_semaphores: std.ArrayList(vk.Semaphore),
+    // // does this contain any unused swapchain images?
+    // // if so, the first command buffer using this group needs to wait on the acquire semaphore(s)
+    // acquire_semaphores: std.ArrayList(vk.Semaphore),
+
+    // private: union(enum) {
+    //     common: struct {},
+    //     swapchain: struct {
+    //         texture_state: TextureState,
+    //         acquire_semaphore: vk.Semaphore,
+    //     },
+    // },
 };
 
 const Buffer = struct {
@@ -158,6 +173,7 @@ const Swapchain = struct {
 // NOTE i think we should bake the passes into here with just separate vtables
 const CommandBuffer = struct {
     const command_buffer_vtable: rhi.CommandBuffer.VTable = .{
+        .cancel = cancel,
         .bufferUpload = undefined,
         .bufferDownload = undefined,
         .textureUpload = undefined,
@@ -170,7 +186,7 @@ const CommandBuffer = struct {
         .endRenderPass = undefined,
         .beginComputePass = undefined,
         .endComputePass = undefined,
-        .present = present,
+        .waitAndAcquireSwapchainTexture = waitAndAcquireSwapchainTexture,
         .timestamp = undefined,
     };
 
@@ -186,6 +202,13 @@ const CommandBuffer = struct {
     // and errors on submit instead, allowing for a try-free api
     valid: bool,
 
+    // command buffers may acquire swapchain images (max one per swapchain)
+    // they are automatically queued for presentation on submit
+    acquired_swapchains: std.AutoArrayHashMapUnmanaged(*const Swapchain, struct {
+        texture: *const Texture,
+        acquire_semaphore: *const vk.Semaphore,
+    }),
+
     fn init(ctx: *Context, queue: Queue) !CommandBuffer {
         const pool = ctx.device.createCommandPool(&.{
             .flags = .{},
@@ -198,7 +221,7 @@ const CommandBuffer = struct {
             .level = .primary,
             .command_buffer_count = 3,
         }, @ptrCast(&buffers[0])) catch return error.Unknown;
-        errdefer ctx.device.freeCommandBuffers(pool, 3, @ptrCast(&buffers[0]));
+        errdefer ctx.device.freeCommandBuffers(pool, 3, &buffers);
 
         return .{
             .ctx = ctx,
@@ -208,6 +231,7 @@ const CommandBuffer = struct {
             .body = buffers[1],
             .suffix = buffers[2],
             .valid = false,
+            .acquired_swapchains = .{},
         };
     }
 
@@ -217,7 +241,7 @@ const CommandBuffer = struct {
             command_buffer.body,
             command_buffer.suffix,
         };
-        command_buffer.ctx.device.freeCommandBuffers(command_buffer.pool, 3, @ptrCast(&buffers[0]));
+        command_buffer.ctx.device.freeCommandBuffers(command_buffer.pool, &buffers);
         command_buffer.ctx.device.destroyCommandPool(command_buffer.pool, null);
     }
 
@@ -227,13 +251,120 @@ const CommandBuffer = struct {
         command_buffer.valid = true;
     }
 
-    fn present(ptr: *anyopaque, rhi_texture: *const rhi.Texture) void {
+    fn cancel(ptr: *anyopaque) void {
         const command_buffer: *CommandBuffer = @ptrCast(@alignCast(ptr));
-        if (!command_buffer.valid) return;
-        std.debug.assert(command_buffer.ctx.present_queue_initialized);
+        const ctx = command_buffer.ctx;
 
-        _ = rhi_texture;
-        std.debug.print("we presentin\n", .{});
+        if (!command_buffer.valid) {
+            log.debug("invalid command buffer", .{});
+            return;
+        }
+
+        command_buffer.valid = false;
+        ctx.command_buffer_depots.getPtr(command_buffer.queue).push(
+            command_buffer,
+            command_buffer.queue,
+            0, // NOTE can be used again right away
+        ) catch unreachable;
+    }
+
+    fn waitAndAcquireSwapchainTexture(
+        ptr: *anyopaque,
+        rhi_swapchain: *const rhi.Swapchain,
+    ) ?*const rhi.Texture {
+        const command_buffer: *CommandBuffer = @ptrCast(@alignCast(ptr));
+        const swapchain: *Swapchain = @alignCast(@constCast(
+            @fieldParentPtr("public", rhi_swapchain),
+        ));
+        const ctx = command_buffer.ctx;
+
+        if (!command_buffer.valid) {
+            log.debug("invalid command buffer", .{});
+            return null;
+        }
+
+        std.debug.assert(ctx.present_queue_initialized);
+
+        if (swapchain.swapchain == .null_handle) {
+            std.debug.print("TODO recreate\n", .{});
+            return null;
+        }
+
+        // we have to wait for whatever queue was the first to use the texture
+        // and hence had to wait for the acquire semaphore to be signalled
+        // but that means the depot must also store what queue the semaphore value is from
+        // and waiting on it means we need to check the value for all the queues
+        const acquire_semaphore = ctx.acquire_semaphore_depot.pop(.{
+            .graphics = ctx.device.getSemaphoreCounterValue(ctx.queues.get(.graphics).semaphore) catch return null,
+            .compute = ctx.device.getSemaphoreCounterValue(ctx.queues.get(.compute).semaphore) catch return null,
+            .transfer = ctx.device.getSemaphoreCounterValue(ctx.queues.get(.transfer).semaphore) catch return null,
+            .present = ctx.device.getSemaphoreCounterValue(ctx.queues.get(.present).semaphore) catch return null,
+        }) orelse
+            ctx.device.createSemaphore(&.{}, null) catch return null;
+
+        // TODO check whether all the result info is also encoded into the error as assumed
+        // const image_index = (ctx.device.acquireNextImageKHR(
+        //     swapchain.swapchain,
+        //     1_000_000_000,
+        //     acquire_semaphore,
+        //     .null_handle,
+        // ) catch return null).image_index;
+
+        const result = ctx.device.acquireNextImageKHR(
+            swapchain.swapchain,
+            1_000_000_000,
+            acquire_semaphore,
+            .null_handle,
+        ) catch return null;
+
+        if (result.result == .timeout) return null;
+        std.debug.print("{}\n", .{result});
+        const image_index = result.image_index;
+
+        const texture: *Texture = ctx.texture_pool.create(ctx.gpa) catch return null;
+        errdefer ctx.texture_pool.destroy(texture);
+        const group: *Group = ctx.group_pool.create(ctx.gpa) catch return null;
+        errdefer ctx.group_pool.destroy(group);
+
+        group.texture_state = .{
+            .owned = false,
+            .owner = undefined,
+            .layout = .undefined,
+        };
+        group.texture_overrides = .{};
+        group.immutable_assignment = true;
+
+        texture.* = .{
+            .image = swapchain.images[image_index],
+            .swapchain = true,
+            .public = .{
+                .group = &group.public,
+                .default_view = .{ .device_address = undefined, .info = .{
+                    .view_type = .view_2d,
+                    .format = .swapchain,
+                    .swizzle = .{},
+                    .range = .{
+                        .base_mip_level = 0,
+                        .level_count = 1,
+                        .base_array_layer = 0,
+                        .layer_count = 1,
+                    },
+                } },
+                .views = &.{},
+                .info = .{
+                    .usage = .{ .transfer_dst = true, .attachment = true }, // FIXME use actual values
+                    .size = swapchain.public.info.size,
+                    .format = .swapchain,
+                    .mip_levels = 1,
+                    .sample_count = .@"1",
+                    .texture_type = .texture_2d,
+                    .name = "",
+                },
+            },
+        };
+
+        std.debug.print("waiting for texture\n", .{});
+        return &texture.public;
     }
 };
 
@@ -243,8 +374,6 @@ const Context = struct {
         .destroySwapchain = destroySwapchain,
         .setSwapchainComposition = undefined,
         .setSwapchainPresentMode = undefined,
-        .waitAndAcquireSwapchainTexture = waitAndAcquireSwapchainTexture,
-        .recreateSwapchain = recreateSwapchain,
         .createBuffer = undefined,
         .createTexture = undefined,
         .createSampler = undefined,
@@ -340,14 +469,14 @@ const Context = struct {
         try ctx.initPipelineLayout();
         errdefer ctx.deinitPipelineLayout();
 
-        ctx.group_pool = .init(gpa);
-        ctx.shader_pool = .init(gpa);
-        ctx.graphics_pipeline_pool = .init(gpa);
-        ctx.compute_pipeline_pool = .init(gpa);
-        ctx.buffer_pool = .init(gpa);
-        ctx.texture_pool = .init(gpa);
-        ctx.sampler_pool = .init(gpa);
-        ctx.swapchain_pool = .init(gpa);
+        ctx.group_pool = .empty;
+        ctx.shader_pool = .empty;
+        ctx.graphics_pipeline_pool = .empty;
+        ctx.compute_pipeline_pool = .empty;
+        ctx.buffer_pool = .empty;
+        ctx.texture_pool = .empty;
+        ctx.sampler_pool = .empty;
+        ctx.swapchain_pool = .empty;
 
         ctx.command_buffer_depots = .initFill(.init(gpa));
         ctx.acquire_semaphore_depot = .init(gpa);
@@ -362,14 +491,14 @@ const Context = struct {
             log.warn("Failed deviceWaitIdle in deinit: {}", .{e});
         };
 
-        ctx.swapchain_pool.deinit();
-        ctx.shader_pool.deinit();
-        ctx.graphics_pipeline_pool.deinit();
-        ctx.compute_pipeline_pool.deinit();
-        ctx.buffer_pool.deinit();
-        ctx.texture_pool.deinit();
-        ctx.sampler_pool.deinit();
-        ctx.group_pool.deinit();
+        ctx.swapchain_pool.deinit(ctx.gpa);
+        ctx.shader_pool.deinit(ctx.gpa);
+        ctx.graphics_pipeline_pool.deinit(ctx.gpa);
+        ctx.compute_pipeline_pool.deinit(ctx.gpa);
+        ctx.buffer_pool.deinit(ctx.gpa);
+        ctx.texture_pool.deinit(ctx.gpa);
+        ctx.sampler_pool.deinit(ctx.gpa);
+        ctx.group_pool.deinit(ctx.gpa);
 
         for ([_]Queue{ .graphics, .compute, .transfer, .present }) |queue| {
             const depot = ctx.command_buffer_depots.getPtr(queue);
@@ -410,7 +539,7 @@ const Context = struct {
         window: rhi.Window,
     ) rhi.Context.Error!*const rhi.Swapchain {
         const ctx: *Context = @ptrCast(@alignCast(ptr));
-        const swapchain: *Swapchain = try ctx.swapchain_pool.create();
+        const swapchain: *Swapchain = try ctx.swapchain_pool.create(ctx.gpa);
 
         const surface = try ctx.platform.createWindowSurface(ctx.instance.handle, window);
         errdefer ctx.instance.destroySurfaceKHR(surface, null);
@@ -429,14 +558,13 @@ const Context = struct {
                 ctx.present_queue_initialized = true;
             } else {
                 // TODO search through all the queues to find one that can present
-                log.warn("Graphics queue does not present, separate queue not yet implemented", .{});
+                log.warn("Graphics queue cannot present, separate queue not yet implemented", .{});
                 return error.Unsupported;
             }
         }
 
         // TODO init
         swapchain.* = Swapchain{
-            // .next = null,
             .public = .{ .info = .{
                 .composition = .sdr,
                 .present_mode = .fifo,
@@ -604,97 +732,6 @@ const Context = struct {
         // FIXME FIXME if we fail at any point here we'll get a very hard to recover state
         // we should probably first put the swapchain struct in some safe state
         // and then only overwrite it if everything succeeds
-    }
-
-    fn waitAndAcquireSwapchainTexture(
-        ptr: *anyopaque,
-        rhi_swapchain: *const rhi.Swapchain,
-    ) rhi.Context.Error!*const rhi.Texture {
-        const ctx: *Context = @ptrCast(@alignCast(ptr));
-        const swapchain: *Swapchain = @alignCast(@constCast(
-            @fieldParentPtr("public", rhi_swapchain),
-        ));
-
-        std.debug.assert(ctx.present_queue_initialized);
-
-        if (swapchain.swapchain == .null_handle) return error.OutOfDate;
-
-        // we have to wait for whatever queue was the first to use the texture
-        // and hence had to wait for the acquire semaphore to be signalled
-        // but that means the depot must also store what queue the semaphore value is from
-        // and waiting on it means we need to check the value for all the queues
-        const acquire_semaphore = ctx.acquire_semaphore_depot.pop(.{
-            .graphics = ctx.device.getSemaphoreCounterValue(ctx.queues.get(.graphics).semaphore) catch return error.Unknown,
-            .compute = ctx.device.getSemaphoreCounterValue(ctx.queues.get(.compute).semaphore) catch return error.Unknown,
-            .transfer = ctx.device.getSemaphoreCounterValue(ctx.queues.get(.transfer).semaphore) catch return error.Unknown,
-            .present = ctx.device.getSemaphoreCounterValue(ctx.queues.get(.present).semaphore) catch return error.Unknown,
-        }) orelse
-            ctx.device.createSemaphore(&.{}, null) catch return error.Unknown;
-
-        // TODO check whether all the result info is also encoded into the error as assumed
-        // const image_index = (ctx.device.acquireNextImageKHR(
-        //     swapchain.swapchain,
-        //     1_000_000_000,
-        //     acquire_semaphore,
-        //     .null_handle,
-        // ) catch return error.Unknown).image_index;
-
-        const result = ctx.device.acquireNextImageKHR(
-            swapchain.swapchain,
-            1_000_000_000,
-            acquire_semaphore,
-            .null_handle,
-        ) catch return error.Unknown;
-
-        if (result.result == .timeout) return error.Timeout;
-        std.debug.print("{}\n", .{result});
-        const image_index = result.image_index;
-
-        const texture: *Texture = try ctx.texture_pool.create();
-        errdefer ctx.texture_pool.destroy(texture);
-        const group: *Group = try ctx.group_pool.create();
-        errdefer ctx.group_pool.destroy(group);
-
-        group.texture_state = .{
-            .owned = false,
-            .owner = undefined,
-            .layout = .undefined,
-        };
-        group.texture_overrides = .{};
-        group.acquire_semaphores = .empty;
-        try group.acquire_semaphores.append(ctx.gpa, acquire_semaphore);
-
-        texture.* = .{
-            .image = swapchain.images[image_index],
-            .swapchain = true,
-            .public = .{
-                .group = &group.public,
-                .default_view = .{ .device_address = undefined, .info = .{
-                    .view_type = .view_2d,
-                    .format = .swapchain,
-                    .swizzle = .{},
-                    .range = .{
-                        .base_mip_level = 0,
-                        .level_count = 1,
-                        .base_array_layer = 0,
-                        .layer_count = 1,
-                    },
-                } },
-                .views = &.{},
-                .info = .{
-                    .usage = .{ .transfer_dst = true, .attachment = true }, // FIXME use actual values
-                    .size = swapchain.public.info.size,
-                    .format = .swapchain,
-                    .mip_levels = 1,
-                    .sample_count = .@"1",
-                    .texture_type = .texture_2d,
-                    .name = "",
-                },
-            },
-        };
-
-        std.debug.print("waiting for texture\n", .{});
-        return &texture.public;
     }
 
     fn acquireCommandBuffer(

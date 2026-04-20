@@ -452,14 +452,8 @@ pub const Context = struct {
     pub const VTable = struct {
         createSwapchain: *const fn (*anyopaque, Window) Error!*const Swapchain,
         destroySwapchain: *const fn (*anyopaque, *const Swapchain) void,
-        // maybe get rid of recreateSwapchain and do it internally
-        // its raison d'être is just
-        // - to save a call to recreate if we don't want to start with sdr/fifo
-        // - handle the case where we try to create but the window is minimized
-        recreateSwapchain: *const fn (*anyopaque, *const Swapchain) Error!void,
         setSwapchainComposition: *const fn (*anyopaque, *const Swapchain, SwapchainComposition) void,
         setSwapchainPresentMode: *const fn (*anyopaque, *const Swapchain, PresentMode) void,
-        waitAndAcquireSwapchainTexture: *const fn (*anyopaque, *const Swapchain) Error!*const Texture,
 
         createBuffer: *const fn (*anyopaque, BufferCreateInfo) Error!*const Buffer,
         createTexture: *const fn (*anyopaque, TextureCreateInfo) Error!*const Texture,
@@ -497,12 +491,6 @@ pub const Context = struct {
     }
     pub fn destroySwapchain(ctx: Context, swapchain: *const Swapchain) void {
         return ctx.vtable.destroySwapchain(ctx.ptr, swapchain);
-    }
-    pub fn recreateSwapchain(ctx: Context, swapchain: *const Swapchain) Error!void {
-        return ctx.vtable.recreateSwapchain(ctx.ptr, swapchain);
-    }
-    pub fn waitAndAcquireSwapchainTexture(ctx: Context, swapchain: *const Swapchain) Error!*const Texture {
-        return ctx.vtable.waitAndAcquireSwapchainTexture(ctx.ptr, swapchain);
     }
     pub fn acquireCommandBuffer(ctx: Context, queue: Queue) Error!CommandBuffer {
         return ctx.vtable.acquireCommandBuffer(ctx.ptr, queue);
@@ -589,6 +577,8 @@ pub const CommandBuffer = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
+        cancel: *const fn (*anyopaque) void,
+
         bufferUpload: *const fn (*anyopaque, *anyopaque, usize, *const Buffer, u64) void,
         bufferDownload: *const fn (*anyopaque, *const Buffer, u64, *anyopaque, usize) void,
         textureUpload: *const fn (*anyopaque, *anyopaque, usize, *const Texture, u64) void,
@@ -604,13 +594,21 @@ pub const CommandBuffer = struct {
         beginComputePass: *const fn (*anyopaque, ComputePassAccess) *RenderPass,
         endComputePass: *const fn (*anyopaque, *RenderPass) void,
 
-        present: *const fn (*anyopaque, *const Texture) void,
+        waitAndAcquireSwapchainTexture: *const fn (*anyopaque, *const Swapchain) ?*const Texture,
 
         timestamp: *const fn (*anyopaque) ?Timestamp,
     };
 
-    pub fn present(command_buffer: CommandBuffer, swapchain: *const Texture) void {
-        return command_buffer.vtable.present(command_buffer.ptr, swapchain);
+    pub fn cancel(
+        command_buffer: CommandBuffer,
+    ) void {
+        return command_buffer.vtable.cancel(command_buffer.ptr);
+    }
+    pub fn waitAndAcquireSwapchainTexture(
+        command_buffer: CommandBuffer,
+        swapchain: *const Swapchain,
+    ) ?*const Texture {
+        return command_buffer.vtable.waitAndAcquireSwapchainTexture(command_buffer.ptr, swapchain);
     }
 
     // generics will have to be wrapped like this
