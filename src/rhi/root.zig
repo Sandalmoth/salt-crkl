@@ -444,6 +444,13 @@ pub const Context = struct {
         Unknown,
         Minimized,
         OutOfDate,
+        // TODO remove these ?
+        OutOfHostMemory,
+        ValidationFailed,
+        SurfaceLostKHR,
+        OutOfDateKHR,
+        FullScreenExclusiveModeLostEXT,
+        PresentTimingQueueFullEXT,
     };
 
     ptr: *anyopaque,

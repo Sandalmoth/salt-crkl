@@ -201,12 +201,16 @@ const CommandBuffer = struct {
     // command buffer captures errors by just becoming invalid
     // and errors on submit instead, allowing for a try-free api
     valid: bool,
+    // did we ever record any commands onto the body?
+    used: bool,
 
     // command buffers may acquire swapchain images (max one per swapchain)
     // they are automatically queued for presentation on submit
     acquired_swapchains: std.AutoArrayHashMapUnmanaged(*const Swapchain, struct {
-        texture: *const Texture,
+        texture: *Texture,
         acquire_semaphore: vk.Semaphore,
+        release_semaphore: vk.Semaphore,
+        index: u32,
     }),
 
     fn init(ctx: *Context, queue: Queue) !CommandBuffer {
@@ -231,6 +235,7 @@ const CommandBuffer = struct {
             .body = buffers[1],
             .suffix = buffers[2],
             .valid = false,
+            .used = false,
             .acquired_swapchains = .{},
         };
     }
@@ -385,6 +390,8 @@ const CommandBuffer = struct {
             .{
                 .texture = texture,
                 .acquire_semaphore = acquire_semaphore,
+                .release_semaphore = swapchain.release_semaphores[image_index],
+                .index = image_index,
             },
         ) catch return null;
 
@@ -819,6 +826,12 @@ const Context = struct {
         );
         defer signal_semaphore_infos.deinit(ctx.gpa);
 
+        var image_indices: std.ArrayList(u32) = .empty;
+        defer image_indices.deinit(ctx.gpa);
+        var swapchains: std.ArrayList(vk.SwapchainKHR) = .empty;
+        defer swapchains.deinit(ctx.gpa);
+        var release_semaphores: std.ArrayList(vk.Semaphore) = .empty;
+
         for (rhi_command_buffers) |rhi_command_buffer| {
 
             // for now, just run each command buffer serially with full wait
@@ -829,27 +842,101 @@ const Context = struct {
             command_buffer_infos.clearRetainingCapacity();
             wait_semaphore_infos.clearRetainingCapacity();
             signal_semaphore_infos.clearRetainingCapacity();
+            image_indices.clearRetainingCapacity();
+            swapchains.clearRetainingCapacity();
+            release_semaphores.clearRetainingCapacity();
 
-            // FIXME use real semaphore value
             const command_buffer: *CommandBuffer = @ptrCast(@alignCast(rhi_command_buffer.ptr));
+
+            const queue = ctx.queues.get(command_buffer.queue);
+            signal_semaphore_infos.appendAssumeCapacity(.{
+                .semaphore = queue.semaphore,
+                .value = queue.value + 1,
+                .stage_mask = .{ .all_commands_bit = true },
+                .device_index = 0,
+            });
+            for ([_]Queue{ .graphics, .compute, .transfer, .present }) |other_queue| {
+                const other = ctx.queues.get(other_queue);
+                wait_semaphore_infos.appendAssumeCapacity(.{
+                    .semaphore = other.semaphore,
+                    .value = other.value,
+                    .stage_mask = .{ .all_commands_bit = true },
+                    .device_index = 0,
+                });
+            }
+            for (
+                command_buffer.acquired_swapchains.keys(),
+                command_buffer.acquired_swapchains.values(),
+            ) |key, item| {
+                try wait_semaphore_infos.append(ctx.gpa, .{
+                    .semaphore = item.acquire_semaphore,
+                    .value = undefined, // binary semaphore
+                    .stage_mask = .{ .all_commands_bit = true },
+                    .device_index = 0,
+                });
+                try signal_semaphore_infos.append(ctx.gpa, .{
+                    .semaphore = item.release_semaphore,
+                    .value = undefined, // binary semaphore
+                    .stage_mask = .{ .all_commands_bit = true },
+                    .device_index = 0,
+                });
+                try image_indices.append(ctx.gpa, item.index);
+                try swapchains.append(ctx.gpa, key.swapchain);
+                try release_semaphores.append(ctx.gpa, item.release_semaphore);
+            }
+            // TODO only submit prefix if it was recorded to
+            // command_buffer_infos.appendAssumeCapacity(.{
+            //     .command_buffer = command_buffer.prefix,
+            //     .device_mask = 0,
+            // });
+            if (command_buffer.used) command_buffer_infos.appendAssumeCapacity(.{
+                .command_buffer = command_buffer.body,
+                .device_mask = 0,
+            });
+            // TODO only submit suffix if it was recorded to
+            // command_buffer_infos.appendAssumeCapacity(.{
+            //     .command_buffer = command_buffer.suffix,
+            //     .device_mask = 0,
+            // });
+
+            // TODO actually, we can batch all submitinfos into one submit
+            try queue.queue.submit2(&[_]vk.SubmitInfo2{.{
+                .command_buffer_info_count = @intCast(command_buffer_infos.items.len),
+                .p_command_buffer_infos = command_buffer_infos.items.ptr,
+                .wait_semaphore_info_count = @intCast(wait_semaphore_infos.items.len),
+                .p_wait_semaphore_infos = wait_semaphore_infos.items.ptr,
+                .signal_semaphore_info_count = @intCast(signal_semaphore_infos.items.len),
+                .p_signal_semaphore_infos = signal_semaphore_infos.items.ptr,
+            }}, .null_handle);
+            _ = try queue.queue.presentKHR(&.{
+                .wait_semaphore_count = @intCast(release_semaphores.items.len),
+                .p_wait_semaphores = release_semaphores.items.ptr,
+                .swapchain_count = @intCast(swapchains.items.len),
+                .p_swapchains = swapchains.items.ptr,
+                .p_image_indices = image_indices.items.ptr,
+            });
+
+            queue.value += 1;
             for (command_buffer.acquired_swapchains.values()) |item| {
+                ctx.texture_pool.destroy(item.texture);
                 try ctx.acquire_semaphore_depot.push(
                     item.acquire_semaphore,
                     command_buffer.queue,
-                    0, // FIXME
+                    queue.value,
                 );
             }
             try (ctx.command_buffer_depots.getPtr(command_buffer.queue)).push(
                 command_buffer,
                 command_buffer.queue,
-                0, // FIXME
+                queue.value,
             );
         }
 
+        // should probably return 0 if the queue wasn't touched by this submit
         return .{
-            .graphics = 0,
-            .compute = 0,
-            .transfer = 0,
+            .graphics = ctx.queues.get(.graphics).value,
+            .compute = ctx.queues.get(.compute).value,
+            .transfer = ctx.queues.get(.transfer).value,
         };
     }
 
