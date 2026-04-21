@@ -206,7 +206,7 @@ const CommandBuffer = struct {
     // they are automatically queued for presentation on submit
     acquired_swapchains: std.AutoArrayHashMapUnmanaged(*const Swapchain, struct {
         texture: *const Texture,
-        acquire_semaphore: *const vk.Semaphore,
+        acquire_semaphore: vk.Semaphore,
     }),
 
     fn init(ctx: *Context, queue: Queue) !CommandBuffer {
@@ -248,6 +248,7 @@ const CommandBuffer = struct {
     fn reset(command_buffer: *CommandBuffer) void {
         command_buffer.valid = false;
         command_buffer.ctx.device.resetCommandPool(command_buffer.pool, .{}) catch return;
+        command_buffer.acquired_swapchains.clearRetainingCapacity();
         command_buffer.valid = true;
     }
 
@@ -259,6 +260,8 @@ const CommandBuffer = struct {
             log.debug("invalid command buffer", .{});
             return;
         }
+
+        std.debug.print("cancel\n", .{});
 
         command_buffer.valid = false;
         ctx.command_buffer_depots.getPtr(command_buffer.queue).push(
@@ -285,15 +288,23 @@ const CommandBuffer = struct {
 
         std.debug.assert(ctx.present_queue_initialized);
 
-        if (swapchain.swapchain == .null_handle) {
-            std.debug.print("TODO recreate\n", .{});
+        if (command_buffer.acquired_swapchains.contains(swapchain)) {
+            log.debug("multiple acquires on one swapchain in the same command buffer", .{});
             return null;
+        }
+
+        if (swapchain.swapchain == .null_handle) {
+            ctx.recreateSwapchain(swapchain) catch {
+                log.debug("failed to recreate swapchain", .{});
+                return null;
+            };
         }
 
         // we have to wait for whatever queue was the first to use the texture
         // and hence had to wait for the acquire semaphore to be signalled
         // but that means the depot must also store what queue the semaphore value is from
         // and waiting on it means we need to check the value for all the queues
+        ctx.acquire_semaphore_depot.debugPrint();
         const acquire_semaphore = ctx.acquire_semaphore_depot.pop(.{
             .graphics = ctx.device.getSemaphoreCounterValue(ctx.queues.get(.graphics).semaphore) catch return null,
             .compute = ctx.device.getSemaphoreCounterValue(ctx.queues.get(.compute).semaphore) catch return null,
@@ -301,23 +312,28 @@ const CommandBuffer = struct {
             .present = ctx.device.getSemaphoreCounterValue(ctx.queues.get(.present).semaphore) catch return null,
         }) orelse
             ctx.device.createSemaphore(&.{}, null) catch return null;
-
-        // TODO check whether all the result info is also encoded into the error as assumed
-        // const image_index = (ctx.device.acquireNextImageKHR(
-        //     swapchain.swapchain,
-        //     1_000_000_000,
-        //     acquire_semaphore,
-        //     .null_handle,
-        // ) catch return null).image_index;
+        // FIXME if we return early, this needs to be pushed
 
         const result = ctx.device.acquireNextImageKHR(
             swapchain.swapchain,
             1_000_000_000,
             acquire_semaphore,
             .null_handle,
-        ) catch return null;
-
-        if (result.result == .timeout) return null;
+        ) catch return null; // FIXME so out of date will actually hit this
+        std.debug.print("{}\n", .{result});
+        switch (result.result) {
+            .success => {},
+            .timeout => return null,
+            .suboptimal_khr, .error_out_of_date_khr => {
+                ctx.recreateSwapchain(swapchain) catch {
+                    log.debug("failed to recreate swapchain", .{});
+                    return null;
+                };
+                // TODO we should retry the acquire once instead of always failing
+                return null;
+            },
+            else => return null,
+        }
         std.debug.print("{}\n", .{result});
         const image_index = result.image_index;
 
@@ -362,6 +378,15 @@ const CommandBuffer = struct {
                 },
             },
         };
+
+        command_buffer.acquired_swapchains.putNoClobber(
+            ctx.gpa,
+            swapchain,
+            .{
+                .texture = texture,
+                .acquire_semaphore = acquire_semaphore,
+            },
+        ) catch return null;
 
         std.debug.print("waiting for texture\n", .{});
         return &texture.public;
@@ -502,12 +527,22 @@ const Context = struct {
 
         for ([_]Queue{ .graphics, .compute, .transfer, .present }) |queue| {
             const depot = ctx.command_buffer_depots.getPtr(queue);
+            log.debug("destroying {} {} queue command buffers", .{ depot.data.items.len, queue });
             for (depot.data.items) |item| {
                 item.data.deinit();
                 ctx.gpa.destroy(item.data);
             }
             depot.deinit();
         }
+
+        log.debug(
+            "destroying {} queue acquire semaphores",
+            .{ctx.acquire_semaphore_depot.data.items.len},
+        );
+        for (ctx.acquire_semaphore_depot.data.items) |item| {
+            ctx.device.destroySemaphore(item.data, null);
+        }
+        ctx.acquire_semaphore_depot.deinit();
 
         var physical_queues: [4]?*PhysicalQueue = .{null} ** 4;
         outer: for ([_]Queue{ .graphics, .compute, .transfer }, 0..) |queue, j| {
@@ -605,14 +640,9 @@ const Context = struct {
     }
 
     fn recreateSwapchain(
-        ptr: *anyopaque,
-        rhi_swapchain: *const rhi.Swapchain,
+        ctx: *Context,
+        swapchain: *Swapchain,
     ) rhi.Context.Error!void {
-        const ctx: *Context = @ptrCast(@alignCast(ptr));
-        const swapchain: *Swapchain = @alignCast(@constCast(
-            @fieldParentPtr("public", rhi_swapchain),
-        ));
-
         std.debug.assert(ctx.present_queue_initialized);
 
         ctx.device.deviceWaitIdle() catch return error.Unknown;
@@ -773,17 +803,54 @@ const Context = struct {
 
         std.debug.print("dawg\n", .{});
 
+        var command_buffer_infos: std.ArrayList(vk.CommandBufferSubmitInfo) = try .initCapacity(
+            ctx.gpa,
+            3,
+        );
+        defer command_buffer_infos.deinit(ctx.gpa);
+        var wait_semaphore_infos: std.ArrayList(vk.SemaphoreSubmitInfo) = try .initCapacity(
+            ctx.gpa,
+            4,
+        );
+        defer wait_semaphore_infos.deinit(ctx.gpa);
+        var signal_semaphore_infos: std.ArrayList(vk.SemaphoreSubmitInfo) = try .initCapacity(
+            ctx.gpa,
+            1,
+        );
+        defer signal_semaphore_infos.deinit(ctx.gpa);
+
         for (rhi_command_buffers) |rhi_command_buffer| {
+
+            // for now, just run each command buffer serially with full wait
+            // but in principle we should batch command buffers
+            // and only wait on semaphores when needed
+            // TODO don't oversynchronize and batch same-queue submits
+
+            command_buffer_infos.clearRetainingCapacity();
+            wait_semaphore_infos.clearRetainingCapacity();
+            signal_semaphore_infos.clearRetainingCapacity();
+
             // FIXME use real semaphore value
             const command_buffer: *CommandBuffer = @ptrCast(@alignCast(rhi_command_buffer.ptr));
+            for (command_buffer.acquired_swapchains.values()) |item| {
+                try ctx.acquire_semaphore_depot.push(
+                    item.acquire_semaphore,
+                    command_buffer.queue,
+                    0, // FIXME
+                );
+            }
             try (ctx.command_buffer_depots.getPtr(command_buffer.queue)).push(
                 command_buffer,
                 command_buffer.queue,
-                0,
+                0, // FIXME
             );
         }
 
-        return undefined;
+        return .{
+            .graphics = 0,
+            .compute = 0,
+            .transfer = 0,
+        };
     }
 
     fn initInstance(
@@ -1424,6 +1491,15 @@ fn Depot(comptime T: type) type {
                 return depot.data.swapRemove(i).data;
             }
             return null;
+        }
+
+        fn debugPrint(depot: *Self) void {
+            std.debug.print("Depot <{s}> [ ", .{@typeName(T)});
+
+            for (depot.data.items) |item| {
+                std.debug.print("{} ", .{item});
+            }
+            std.debug.print("]\n", .{});
         }
     };
 }

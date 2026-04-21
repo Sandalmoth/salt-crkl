@@ -57,7 +57,7 @@ pub fn main() !void {
             };
         }
 
-        try io.sleep(.fromMilliseconds(1), .real);
+        try io.sleep(.fromMilliseconds(100), .real);
 
         const command_buffer = try ctx.acquireCommandBuffer(.graphics);
         const swapchain_texture = command_buffer.waitAndAcquireSwapchainTexture(swapchain) orelse {
