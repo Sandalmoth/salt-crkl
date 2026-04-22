@@ -151,6 +151,10 @@ const Texture = struct {
     public: rhi.Texture,
     image: vk.Image,
     swapchain: bool, // is this a swapchain texture?
+
+    fn group(texture: *Texture) *Group {
+        return @ptrCast(@alignCast(@constCast(texture.public.group)));
+    }
 };
 
 const Sampler = struct {
@@ -349,9 +353,10 @@ const CommandBuffer = struct {
 
         group.texture_state = .{
             .owned = false,
-            .owner = undefined,
+            .owner = .graphics, // TODO we should have a none state, to skip an ownership transfer
             .layout = .undefined,
         };
+        std.debug.print("{}\n", .{group.texture_state});
         group.texture_overrides = .{};
         group.immutable_assignment = true;
 
@@ -383,6 +388,7 @@ const CommandBuffer = struct {
                 },
             },
         };
+        std.debug.print("{*} {}\n", .{ texture, group });
 
         command_buffer.acquired_swapchains.putNoClobber(
             ctx.gpa,
@@ -831,6 +837,9 @@ const Context = struct {
         var swapchains: std.ArrayList(vk.SwapchainKHR) = .empty;
         defer swapchains.deinit(ctx.gpa);
         var release_semaphores: std.ArrayList(vk.Semaphore) = .empty;
+        defer release_semaphores.deinit(ctx.gpa);
+        var swapchain_barriers: std.ArrayList(vk.ImageMemoryBarrier2) = .empty;
+        defer swapchain_barriers.deinit(ctx.gpa);
 
         for (rhi_command_buffers) |rhi_command_buffer| {
 
@@ -868,6 +877,7 @@ const Context = struct {
                 command_buffer.acquired_swapchains.keys(),
                 command_buffer.acquired_swapchains.values(),
             ) |key, item| {
+                std.debug.print("{*} {}\n", .{ item.texture, item.texture.* });
                 try wait_semaphore_infos.append(ctx.gpa, .{
                     .semaphore = item.acquire_semaphore,
                     .value = undefined, // binary semaphore
@@ -883,7 +893,37 @@ const Context = struct {
                 try image_indices.append(ctx.gpa, item.index);
                 try swapchains.append(ctx.gpa, key.swapchain);
                 try release_semaphores.append(ctx.gpa, item.release_semaphore);
+                std.debug.print("{}\n", .{item.texture.group().texture_state});
+                try swapchain_barriers.append(ctx.gpa, .{
+                    .src_stage_mask = .{ .all_commands_bit = true },
+                    .src_access_mask = .{ .memory_write_bit = true },
+                    .dst_stage_mask = .{ .all_commands_bit = true },
+                    .dst_access_mask = .{ .memory_read_bit = true },
+                    .image = item.texture.image,
+                    .old_layout = item.texture.group().texture_state.layout,
+                    .new_layout = .present_src_khr,
+                    .src_queue_family_index = queue.family,
+                    .dst_queue_family_index = queue.family,
+                    .subresource_range = .{
+                        .aspect_mask = .{ .color_bit = true },
+                        .base_array_layer = 0,
+                        .base_mip_level = 0,
+                        .layer_count = 1,
+                        .level_count = 1,
+                    },
+                });
             }
+
+            var suffix_used: bool = false;
+            if (swapchain_barriers.items.len > 0) {
+                // add the layout transitions to the suffix
+                ctx.device.cmdPipelineBarrier2(command_buffer.suffix, &.{
+                    .image_memory_barrier_count = @intCast(swapchain_barriers.items.len),
+                    .p_image_memory_barriers = swapchain_barriers.items.ptr,
+                });
+                suffix_used = true;
+            }
+
             // TODO only submit prefix if it was recorded to
             // command_buffer_infos.appendAssumeCapacity(.{
             //     .command_buffer = command_buffer.prefix,
@@ -893,11 +933,10 @@ const Context = struct {
                 .command_buffer = command_buffer.body,
                 .device_mask = 0,
             });
-            // TODO only submit suffix if it was recorded to
-            // command_buffer_infos.appendAssumeCapacity(.{
-            //     .command_buffer = command_buffer.suffix,
-            //     .device_mask = 0,
-            // });
+            if (suffix_used) command_buffer_infos.appendAssumeCapacity(.{
+                .command_buffer = command_buffer.suffix,
+                .device_mask = 0,
+            });
 
             // TODO actually, we can batch all submitinfos into one submit
             try queue.queue.submit2(&[_]vk.SubmitInfo2{.{
