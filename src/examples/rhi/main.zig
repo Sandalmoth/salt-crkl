@@ -39,13 +39,13 @@ pub fn main() !void {
         .getFramebufferSize = &getFramebufferSize,
     }, .{
         .name = "example_rhi",
-    });
+    }, window);
     defer rhi.Vulkan.deinit(ctx);
 
-    const swapchain = try ctx.createSwapchain(window);
-    defer ctx.destroySwapchain(swapchain);
+    // const swapchain = try ctx.createSwapchain(window);
+    // defer ctx.destroySwapchain(swapchain);
 
-    // try ctx.recreateSwapchain(swapchain);
+    // // try ctx.recreateSwapchain(swapchain);
 
     main_loop: while (true) {
         var event: sdl.Event = undefined;
@@ -59,13 +59,13 @@ pub fn main() !void {
 
         try io.sleep(.fromMilliseconds(100), .real);
 
-        const command_buffer = try ctx.acquireCommandBuffer(.graphics);
-        const swapchain_texture = command_buffer.waitAndAcquireSwapchainTexture(swapchain) orelse {
-            command_buffer.cancel();
-            continue :main_loop;
-        };
-        _ = swapchain_texture;
-        _ = try ctx.submit(&.{command_buffer});
+        //     const command_buffer = try ctx.acquireCommandBuffer(.graphics);
+        //     const swapchain_texture = command_buffer.waitAndAcquireSwapchainTexture(swapchain) orelse {
+        //         command_buffer.cancel();
+        //         continue :main_loop;
+        //     };
+        //     _ = swapchain_texture;
+        //     _ = try ctx.submit(&.{command_buffer});
     }
 
     // const ctx: *rhi.Context = try .create(gpa, .{

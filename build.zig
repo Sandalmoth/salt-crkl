@@ -59,9 +59,13 @@ pub fn build(b: *std.Build) void {
             .{ .name = "vulkan", .module = vulkan },
         },
     });
-    rhi.addIncludePath(b.path("lib"));
 
     // examples
+    const example_rhi_translate_c = b.addTranslateC(.{
+        .root_source_file = b.path("src/examples/rhi/c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
     const example_rhi_exe = b.addExecutable(.{
         .name = "example_rhi",
         .root_module = b.createModule(.{
@@ -70,6 +74,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "rhi", .module = rhi },
+                .{ .name = "c", .module = example_rhi_translate_c.createModule() },
             },
         }),
     });

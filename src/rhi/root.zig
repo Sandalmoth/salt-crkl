@@ -1,10 +1,10 @@
 const std = @import("std");
 
-pub const Vulkan = @import("vulkan_backend.zig");
+pub const Vulkan = @import("VulkanContext.zig");
 
 pub const Window = *anyopaque;
 
-// enums and config structs
+// enums and config/helper structs
 
 pub const PresentMode = enum {
     fifo,
@@ -363,7 +363,34 @@ pub const DispatchIndirectCommand = extern struct {
     z: u32,
 };
 
+const TimestampStage = enum {
+    top,
+    bottom,
+};
+
+pub const Fence = struct {
+    graphics: ?u64,
+    compute: ?u64,
+    transfer: ?u64,
+};
+
+pub const FenceMask = struct {
+    graphics: bool = true,
+    compute: bool = true,
+    transfer: bool = true,
+};
+
 // objects
+
+pub const GroupCreateInfo = struct {
+    name: [:0]const u8 = &.{},
+};
+
+pub const Group = struct {
+    info: struct {
+        name: [:0]const u8,
+    },
+};
 
 pub const TextureCreateInfo = struct {
     usage: TextureUsage,
@@ -409,16 +436,6 @@ pub const View = struct {
         format: Format,
         swizzle: ViewSwizzle,
         range: ViewRange,
-        name: [:0]const u8,
-    },
-};
-
-pub const GroupCreateInfo = struct {
-    name: [:0]const u8 = &.{},
-};
-
-pub const Group = struct {
-    info: struct {
         name: [:0]const u8,
     },
 };
@@ -544,23 +561,6 @@ pub const Swapchain = struct {
     },
 };
 
-const TimestampStage = enum {
-    top,
-    bottom,
-};
-
-pub const Fence = struct {
-    graphics: ?u64,
-    compute: ?u64,
-    transfer: ?u64,
-};
-
-pub const FenceMask = struct {
-    graphics: bool = true,
-    compute: bool = true,
-    transfer: bool = true,
-};
-
 pub const Context = struct {
     pub const Error = error{
         Platform,
@@ -587,7 +587,7 @@ pub const Context = struct {
         destroySwapchain: *const fn (*anyopaque, *const Swapchain) void,
         setSwapchainPresentMode: *const fn (*anyopaque, *const Swapchain, PresentMode) void,
         setSwapchainComposition: *const fn (*anyopaque, *const Swapchain, Composition) void,
-        acquireSwapchain: *const fn (*anyopaque, *const Swapchain) AcquireSwapchainResult,
+        acquireSwapchain: *const fn (*anyopaque, *const Swapchain, u64) AcquireSwapchainResult,
 
         createBuffer: *const fn (*anyopaque, BufferCreateInfo) Error!*const Buffer,
         createTexture: *const fn (*anyopaque, TextureCreateInfo) Error!*const Texture,
@@ -613,7 +613,7 @@ pub const Context = struct {
         setBufferGroup: *const fn (*anyopaque, *const Buffer, ?*const Group) void,
         setTextureGroup: *const fn (*anyopaque, *const Texture, ?*const Group) void,
 
-        readTimestamp: *const fn (*anyopaque, []const u8) ?u64,
+        // readTimestamps: *const fn (*anyopaque, []const u8) ?u64, // could maybe happen on wait?
     };
 
     pub fn createSwapchain(ctx: Context, window: Window) Error!*const Swapchain {
@@ -627,7 +627,13 @@ pub const Context = struct {
     }
 };
 
+// NOTE could we design some kind of compile time safety for this
+// where calling functions incompatible with the queue
+// and where calling illegal functions inside the passes is a compile error
+// for now, just have runtime asserts
 pub const CommandBuffer = struct {
+    // TODO add definitions and functions
+
     const Command = union(enum) {
         buffer_upload: struct {},
         buffer_download: struct {},
@@ -644,12 +650,10 @@ pub const CommandBuffer = struct {
             filter: Filter,
         },
 
-        push_label: [:0]u8,
-        pop_label: void,
-        timestamp: [:0]u8,
+        // push_label: [:0]u8,
+        // pop_label: void,
+        // timestamp: [:0]u8,
 
-        render_pass: RenderPass,
-        compute_pass: ComputePass,
         push_constant: []u8,
 
         begin_render_pass: struct {},
@@ -667,14 +671,17 @@ pub const CommandBuffer = struct {
     };
 
     arena: std.mem.Allocator,
-    active_pass: ?enum { render, compute },
     commands: std.ArrayList(Command), // TODO reimplement segmentedlist (rip as of 0.16) or better
 
-    pub fn init(arena: std.mem.Allocator) CommandBuffer {
+    queue: Queue,
+    active_pass: ?enum { render, compute },
+
+    pub fn init(arena: std.mem.Allocator, queue: Queue) CommandBuffer {
         return .{
             .arena = arena,
-            .active_pass = null,
             .commands = .empty,
+            .queue = queue,
+            .active_pass = null,
         };
     }
 
@@ -693,14 +700,6 @@ pub const CommandBuffer = struct {
         _ = dst_region;
         _ = filter;
     }
-};
-
-pub const RenderPass = struct {
-    command_buffer: *CommandBuffer,
-};
-
-pub const ComputePass = struct {
-    command_buffer: *CommandBuffer,
 };
 
 // pub const CommandBuffer = struct {
