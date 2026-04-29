@@ -42,10 +42,8 @@ pub fn main() !void {
     }, window);
     defer rhi.Vulkan.deinit(ctx);
 
-    // const swapchain = try ctx.createSwapchain(window);
-    // defer ctx.destroySwapchain(swapchain);
-
-    // // try ctx.recreateSwapchain(swapchain);
+    const swapchain = try ctx.createSwapchain(.{ .window = window });
+    defer ctx.destroySwapchain(swapchain);
 
     main_loop: while (true) {
         var event: sdl.Event = undefined;
@@ -57,7 +55,12 @@ pub fn main() !void {
             };
         }
 
-        try io.sleep(.fromMilliseconds(100), .real);
+        try io.sleep(.fromMilliseconds(10), .real);
+
+        if (!try ctx.acquireSwapchain(swapchain, 100_000_000)) continue :main_loop;
+        _ = try ctx.submit(io, &.{}, &.{
+            .{ .swapchain = swapchain, .texture = undefined },
+        });
 
         //     const command_buffer = try ctx.acquireCommandBuffer(.graphics);
         //     const swapchain_texture = command_buffer.waitAndAcquireSwapchainTexture(swapchain) orelse {

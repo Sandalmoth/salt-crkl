@@ -15,12 +15,6 @@ pub const Composition = enum {
     sdr,
 };
 
-pub const AcquireSwapchainResult = enum {
-    success,
-    recreation,
-    failure,
-};
-
 pub const Format = enum {
     r8g8b8a8_unorm,
     r8g8b8a8_srgb,
@@ -71,7 +65,7 @@ pub const TextureUsage = struct {
     attachment: bool = false, // color or depth_stencil is inferred based on format
 };
 
-const ViewSwizzle = struct {
+pub const ViewSwizzle = struct {
     const Component = enum {
         zero,
         one,
@@ -86,7 +80,7 @@ const ViewSwizzle = struct {
     a: Component = .a,
 };
 
-const ViewRange = struct {
+pub const ViewRange = struct {
     base_mip_level: u32,
     level_count: u32,
     base_array_layer: u32,
@@ -113,25 +107,25 @@ pub const AddressMode = enum {
     clamp_to_edge,
 };
 
-const PolygonMode = enum {
+pub const PolygonMode = enum {
     fill,
     line,
     point,
 };
 
-const MultisampleState = struct {
+pub const MultisampleState = struct {
     sample_count: SampleCount = .@"1",
     enable_alpha_to_coverage: bool = false,
 };
 
-const ColorWriteMask = struct {
+pub const ColorWriteMask = struct {
     r: bool = true,
     g: bool = true,
     b: bool = true,
     a: bool = true,
 };
 
-const BlendFactor = enum {
+pub const BlendFactor = enum {
     zero,
     one,
     src_color,
@@ -149,7 +143,7 @@ const BlendFactor = enum {
     src_alpha_saturate,
 };
 
-const BlendOp = enum {
+pub const BlendOp = enum {
     add,
     subtract,
     reverse_subtract,
@@ -157,7 +151,7 @@ const BlendOp = enum {
     max,
 };
 
-const BlendState = struct {
+pub const BlendState = struct {
     src_color_blend_factor: BlendFactor,
     dst_color_blend_factor: BlendFactor,
     color_blend_op: BlendOp,
@@ -166,13 +160,13 @@ const BlendState = struct {
     alpha_blend_op: BlendOp,
 };
 
-const ColorAttachment = struct {
+pub const ColorAttachment = struct {
     format: Format,
     color_write_mask: ColorWriteMask = .{},
     blend_state: ?BlendState = null,
 };
 
-const CompareOp = enum {
+pub const CompareOp = enum {
     never,
     less,
     equal,
@@ -183,7 +177,7 @@ const CompareOp = enum {
     always,
 };
 
-const Viewport = extern struct {
+pub const Viewport = extern struct {
     x: f32 = 0.0,
     y: f32 = 0.0,
     width: f32,
@@ -192,14 +186,14 @@ const Viewport = extern struct {
     max_depth: f32,
 };
 
-const Scissor = extern struct {
+pub const Scissor = extern struct {
     x: i32 = 0,
     y: i32 = 0,
     width: u32,
     height: u32,
 };
 
-const PrimitiveTopology = enum {
+pub const PrimitiveTopology = enum {
     point_list,
     line_list,
     line_strip,
@@ -208,34 +202,34 @@ const PrimitiveTopology = enum {
     triangle_fan,
 };
 
-const InputAssemblyState = struct {
+pub const InputAssemblyState = struct {
     primitive_topology: PrimitiveTopology = .triangle_list,
     enable_primitive_restart: bool = false,
 };
 
-const CullMode = struct {
+pub const CullMode = struct {
     front: bool = false,
     back: bool = false,
 };
 
-const FrontFace = enum {
+pub const FrontFace = enum {
     counter_clockwise,
     clockwise,
 };
 
-const DepthBias = struct {
+pub const DepthBias = struct {
     constant_factor: f32,
     clamp: f32,
     slope_factor: f32,
 };
 
-const RasterizationState = struct {
+pub const RasterizationState = struct {
     cull_mode: CullMode = .{ .back = true },
     front_face: FrontFace = .counter_clockwise,
     depth_bias: ?DepthBias = null,
 };
 
-const StencilOp = enum {
+pub const StencilOp = enum {
     keep,
     zero,
     replace,
@@ -246,7 +240,7 @@ const StencilOp = enum {
     decrement_and_wrap,
 };
 
-const StencilOpState = struct {
+pub const StencilOpState = struct {
     fail_op: StencilOp,
     pass_op: StencilOp,
     depth_fail_op: StencilOp,
@@ -256,18 +250,18 @@ const StencilOpState = struct {
     reference: u32 = 0x00000000,
 };
 
-const StencilState = struct {
+pub const StencilState = struct {
     front: StencilOpState,
     back: StencilOpState,
 };
 
-const DepthStencilState = struct {
+pub const DepthStencilState = struct {
     depth_test: ?CompareOp = .greater,
     enable_depth_write: bool = true,
     stencil_test: ?StencilState = null,
 };
 
-const DynamicState = struct {
+pub const DynamicState = struct {
     viewport: Viewport,
     scissor: Scissor,
     input_assembly: InputAssemblyState = .{},
@@ -285,19 +279,19 @@ pub const BlitRegion = struct {
     mip_level: u32,
 };
 
-const LoadOp = enum {
+pub const LoadOp = enum {
     load,
     clear,
     dont_care,
 };
 
-const StoreOp = enum {
+pub const StoreOp = enum {
     store,
     dont_care,
     none,
 };
 
-const ClearValue = union(enum) {
+pub const ClearValue = union(enum) {
     color: union(enum) {
         float: [4]f32,
         int: [4]i32,
@@ -322,7 +316,7 @@ const ClearValue = union(enum) {
     }
 };
 
-const RenderingAttachment = struct {
+pub const RenderingAttachment = struct {
     texture: *const Texture,
     view: ?*const View = null, // defaults to default_view
     load_op: LoadOp,
@@ -330,7 +324,7 @@ const RenderingAttachment = struct {
     clear_value: ?ClearValue = null,
 };
 
-const RenderPassAccess = struct {
+pub const RenderPassAccess = struct {
     color_attachments: []const RenderingAttachment = &.{},
     depth_attachment: ?RenderingAttachment = null,
     stencil_attachment: ?RenderingAttachment = null,
@@ -339,12 +333,12 @@ const RenderPassAccess = struct {
     fragment_write_groups: []const Group = &.{},
 };
 
-const ComputePassAccess = struct {
+pub const ComputePassAccess = struct {
     read_groups: []const Group = &.{},
     write_groups: []const Group = &.{},
 };
 
-const Presentation = struct {
+pub const Present = struct {
     swapchain: *const Swapchain,
     texture: *const Texture,
 };
@@ -363,7 +357,7 @@ pub const DispatchIndirectCommand = extern struct {
     z: u32,
 };
 
-const TimestampStage = enum {
+pub const TimestampStage = enum {
     top,
     bottom,
 };
@@ -507,7 +501,7 @@ pub const Shader = struct {
     },
 };
 
-const GraphicsPipelineCreateInfo = struct {
+pub const GraphicsPipelineCreateInfo = struct {
     vertex_shader: *const Shader,
     fragment_shader: ?*const Shader,
     polygon_mode: PolygonMode = .fill,
@@ -544,9 +538,9 @@ pub const ComputePipeline = struct {
 };
 
 pub const SwapchainCreateInfo = struct {
-    present_mode: PresentMode,
-    composition: Composition,
+    // NOTE swapchains always start as fifo sdr
     name: [:0]const u8 = &.{},
+    window: Window,
 };
 
 pub const Swapchain = struct {
@@ -554,10 +548,10 @@ pub const Swapchain = struct {
         name: [:0]const u8,
     },
     state: struct {
-        acquired: bool,
-        size: [3]u32,
         present_mode: PresentMode,
         composition: Composition,
+        size: [3]u32,
+        acquired: bool,
     },
 };
 
@@ -577,17 +571,19 @@ pub const Context = struct {
         OutOfDateKHR,
         FullScreenExclusiveModeLostEXT,
         PresentTimingQueueFullEXT,
+        Minimized,
+        InvalidVideoStdParametersKHR,
     };
 
     ptr: *anyopaque,
     vtable: *const VTable,
 
     pub const VTable = struct {
-        createSwapchain: *const fn (*anyopaque, Window) Error!*const Swapchain,
+        createSwapchain: *const fn (*anyopaque, SwapchainCreateInfo) Error!*const Swapchain,
         destroySwapchain: *const fn (*anyopaque, *const Swapchain) void,
-        setSwapchainPresentMode: *const fn (*anyopaque, *const Swapchain, PresentMode) void,
-        setSwapchainComposition: *const fn (*anyopaque, *const Swapchain, Composition) void,
-        acquireSwapchain: *const fn (*anyopaque, *const Swapchain, u64) AcquireSwapchainResult,
+        setSwapchainPresentMode: *const fn (*anyopaque, *const Swapchain, PresentMode) Error!void,
+        setSwapchainComposition: *const fn (*anyopaque, *const Swapchain, Composition) Error!void,
+        acquireSwapchain: *const fn (*anyopaque, *const Swapchain, u64) Error!bool,
 
         createBuffer: *const fn (*anyopaque, BufferCreateInfo) Error!*const Buffer,
         createTexture: *const fn (*anyopaque, TextureCreateInfo) Error!*const Texture,
@@ -607,7 +603,7 @@ pub const Context = struct {
 
         stagingAllocator: *const fn (*anyopaque, StagingAllocatorUsage) std.mem.Allocator,
 
-        submit: *const fn (*anyopaque, io: std.Io, []const CommandBuffer, []const Presentation) Error!Fence,
+        submit: *const fn (*anyopaque, io: std.Io, []const CommandBuffer, []const Present) Error!Fence,
         wait: *const fn (*anyopaque, Fence, FenceMask, u64) Error!void,
 
         setBufferGroup: *const fn (*anyopaque, *const Buffer, ?*const Group) void,
@@ -616,14 +612,22 @@ pub const Context = struct {
         // readTimestamps: *const fn (*anyopaque, []const u8) ?u64, // could maybe happen on wait?
     };
 
-    pub fn createSwapchain(ctx: Context, window: Window) Error!*const Swapchain {
-        return ctx.vtable.createSwapchain(ctx.ptr, window);
+    pub fn createSwapchain(ctx: Context, create_info: SwapchainCreateInfo) Error!*const Swapchain {
+        return ctx.vtable.createSwapchain(ctx.ptr, create_info);
     }
     pub fn destroySwapchain(ctx: Context, swapchain: *const Swapchain) void {
         return ctx.vtable.destroySwapchain(ctx.ptr, swapchain);
     }
-    pub fn submit(ctx: Context, command_buffers: []const CommandBuffer) Error!Fence {
-        return ctx.vtable.submit(ctx.ptr, command_buffers);
+    pub fn acquireSwapchain(ctx: Context, swapchain: *const Swapchain, timeout: u64) Error!bool {
+        return ctx.vtable.acquireSwapchain(ctx.ptr, swapchain, timeout);
+    }
+    pub fn submit(
+        ctx: Context,
+        io: std.Io,
+        command_buffers: []const CommandBuffer,
+        presents: []const Present,
+    ) Error!Fence {
+        return ctx.vtable.submit(ctx.ptr, io, command_buffers, presents);
     }
 };
 

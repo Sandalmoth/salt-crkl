@@ -6,6 +6,13 @@ const log = std.log.scoped(.rhi_vulkan);
 
 const MemoryPool = std.heap.MemoryPool;
 
+const SyncPoint = struct {
+    graphics: u64,
+    compute: u64,
+    transfer: u64,
+    present: u64,
+};
+
 fn Depot(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -14,13 +21,6 @@ fn Depot(comptime T: type) type {
             data: T,
             queue: Queue,
             semaphore_value: u64,
-        };
-
-        const SyncPoint = struct {
-            graphics: u64,
-            compute: u64,
-            transfer: u64,
-            present: u64,
         };
 
         gpa: std.mem.Allocator,
@@ -194,6 +194,13 @@ const Fence = struct {
     present: ?u64,
 };
 
+const CommandPool = struct {
+    pool: vk.CommandPool,
+    prefix: vk.CommandBuffer,
+    body: vk.CommandBuffer,
+    suffix: vk.CommandBuffer,
+};
+
 const Group = struct {
     // NOTE this could be packed into a u32, or even smaller
     // but we'd have to either do some ugly masking on the layout
@@ -263,19 +270,18 @@ const Swapchain = struct {
     images: []vk.Image,
     views: []vk.ImageView,
     release_semaphores: []vk.Semaphore,
-    // composition: rhi.SwapchainComposition,
-    // present_mode: rhi.PresentMode,
-    // next: ?*Swapchain,
+    image_index: ?u32,
+    acquire_semaphore: vk.Semaphore,
 };
 
 const Context = @This();
 
 const vtable: rhi.Context.VTable = .{
-    .createSwapchain = undefined,
-    .destroySwapchain = undefined,
+    .createSwapchain = createSwapchain,
+    .destroySwapchain = destroySwapchain,
     .setSwapchainComposition = undefined,
     .setSwapchainPresentMode = undefined,
-    .acquireSwapchain = undefined,
+    .acquireSwapchain = acquireSwapchain,
     .createBuffer = undefined,
     .createTexture = undefined,
     .createSampler = undefined,
@@ -291,7 +297,7 @@ const vtable: rhi.Context.VTable = .{
     .destroyGraphicsPipeline = undefined,
     .destroyComputePipeline = undefined,
     .stagingAllocator = undefined,
-    .submit = undefined,
+    .submit = submit,
     .wait = undefined,
     .setBufferGroup = undefined,
     .setTextureGroup = undefined,
@@ -328,7 +334,7 @@ texture_pool: MemoryPool(Texture),
 sampler_pool: MemoryPool(Sampler),
 
 // depots are for resources that are reused, not recreated
-// command_buffer_depots: std.EnumArray(Queue, Depot(void)),
+command_pool_depots: std.EnumArray(Queue, Depot(CommandPool)),
 acquire_semaphore_depot: Depot(vk.Semaphore),
 
 queues: std.EnumArray(Queue, *PhysicalQueue),
@@ -368,7 +374,7 @@ pub fn init(
     ctx.sampler_pool = .empty;
     ctx.swapchain_pool = .empty;
 
-    // ctx.command_buffer_depots = .initFill(.init(gpa));
+    ctx.command_pool_depots = .initFill(.init(gpa));
     ctx.acquire_semaphore_depot = .init(gpa);
 
     // TODO init allocators
@@ -432,12 +438,411 @@ pub fn deinit(rhi_ctx: rhi.Context) void {
     ctx.gpa.destroy(ctx);
 }
 
+fn createSwapchain(
+    ptr: *anyopaque,
+    create_info: rhi.SwapchainCreateInfo,
+) rhi.Context.Error!*const rhi.Swapchain {
+    const ctx: *Context = @ptrCast(@alignCast(ptr));
+    const swapchain: *Swapchain = try ctx.swapchain_pool.create(ctx.gpa);
+
+    const surface = try ctx.platform.createWindowSurface(ctx.instance.handle, create_info.window);
+    errdefer ctx.instance.destroySurfaceKHR(surface, null);
+
+    swapchain.* = Swapchain{
+        .public = .{ .info = .{
+            .name = try ctx.gpa.dupeZ(u8, create_info.name),
+        }, .state = .{
+            .acquired = false,
+            .composition = .sdr,
+            .present_mode = .fifo,
+            .size = .{ 0, 0, 0 },
+        } },
+        .surface = surface,
+        .window = create_info.window,
+        .swapchain = .null_handle,
+        .images = &.{},
+        .views = &.{},
+        .release_semaphores = &.{},
+        .image_index = null,
+        .acquire_semaphore = .null_handle,
+    };
+
+    return &swapchain.public;
+}
+
+fn destroySwapchain(ptr: *anyopaque, rhi_swapchain: *const rhi.Swapchain) void {
+    const ctx: *Context = @ptrCast(@alignCast(ptr));
+    const swapchain: *Swapchain = @alignCast(@constCast(
+        @fieldParentPtr("public", rhi_swapchain),
+    ));
+
+    // needs idle to make sure it's not in use since we can't wait on present
+    ctx.device.deviceWaitIdle() catch |e| {
+        log.warn("Failed deviceWaitIdle in destroySwapchain: {}", .{e});
+    };
+
+    if (swapchain.swapchain != .null_handle) {
+        for (0..swapchain.images.len) |i| {
+            ctx.device.destroySemaphore(swapchain.release_semaphores[i], null);
+            ctx.device.destroyImageView(swapchain.views[i], null);
+        }
+        ctx.device.destroySwapchainKHR(swapchain.swapchain, null);
+        ctx.gpa.free(swapchain.release_semaphores);
+        ctx.gpa.free(swapchain.views);
+        ctx.gpa.free(swapchain.images);
+    }
+
+    ctx.instance.destroySurfaceKHR(swapchain.surface, null);
+
+    ctx.gpa.free(swapchain.public.info.name);
+    ctx.swapchain_pool.destroy(swapchain);
+}
+
+fn acquireSwapchain(
+    ptr: *anyopaque,
+    rhi_swapchain: *const rhi.Swapchain,
+    timeout: u64,
+) rhi.Context.Error!bool {
+    const ctx: *Context = @ptrCast(@alignCast(ptr));
+    const swapchain: *Swapchain = @alignCast(@constCast(
+        @fieldParentPtr("public", rhi_swapchain),
+    ));
+
+    std.debug.assert(!swapchain.public.state.acquired);
+
+    if (swapchain.swapchain == .null_handle) {
+        try ctx.recreateSwapchain(swapchain);
+    }
+
+    ctx.acquire_semaphore_depot.debugPrint();
+    const acquire_semaphore = ctx.acquire_semaphore_depot.pop(.{
+        .graphics = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.graphics).semaphore),
+        .compute = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.compute).semaphore),
+        .transfer = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.transfer).semaphore),
+        .present = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.present).semaphore),
+    }) orelse
+        ctx.device.createSemaphore(&.{}, null) catch return false;
+    // FIXME if we return early, this needs to be pushed
+
+    const result = ctx.device.acquireNextImageKHR(
+        swapchain.swapchain,
+        timeout,
+        acquire_semaphore,
+        .null_handle,
+    ) catch |e| switch (e) {
+        error.OutOfDateKHR => vk.DeviceWrapper.AcquireNextImageKHRResult{
+            .result = .error_out_of_date_khr,
+            .image_index = undefined,
+        },
+        else => return e,
+    };
+    std.debug.print("{}\n", .{result});
+    switch (result.result) {
+        .success => {
+            swapchain.public.state.acquired = true;
+            swapchain.image_index = result.image_index;
+            swapchain.acquire_semaphore = acquire_semaphore;
+        },
+        .timeout => {},
+        .not_ready => {},
+        .suboptimal_khr, .error_out_of_date_khr => {
+            try ctx.recreateSwapchain(swapchain);
+        },
+        else => unreachable,
+    }
+
+    return swapchain.public.state.acquired;
+}
+
+fn submit(
+    ptr: *anyopaque,
+    io: std.Io,
+    command_buffers: []const rhi.CommandBuffer,
+    presents: []const rhi.Present,
+) rhi.Context.Error!rhi.Fence {
+    const ctx: *Context = @ptrCast(@alignCast(ptr));
+
+    var arena_impl: std.heap.ArenaAllocator = .init(ctx.gpa);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    const sync_point: SyncPoint = .{
+        .graphics = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.graphics).semaphore),
+        .compute = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.compute).semaphore),
+        .transfer = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.transfer).semaphore),
+        .present = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.present).semaphore),
+    };
+
+    _ = io;
+    _ = command_buffers;
+
+    // for each present
+    // transition the src image to the graphics queue
+    // we can assume that the swapchain image is on the graphics queue
+    // because we don't care about the contents since we always fully overwrite
+    // perform a graphics pass to transfer the src image onto the swapchain
+    // transfer the swapchain image to the present queue
+    // perform present
+
+    const present_queue = ctx.queues.get(.present);
+    const present_command_pool = ctx.command_pool_depots.getPtr(.present).pop(sync_point) orelse blk: {
+        const pool = try ctx.device.createCommandPool(&.{
+            .flags = .{},
+            .queue_family_index = ctx.queues.get(.present).family,
+        }, null);
+        errdefer ctx.device.destroyCommandPool(pool, null);
+        var buffers: [3]vk.CommandBuffer = .{.null_handle} ** 3;
+        try ctx.device.allocateCommandBuffers(&.{
+            .command_pool = pool,
+            .level = .primary,
+            .command_buffer_count = 3,
+        }, @ptrCast(&buffers[0]));
+        errdefer ctx.device.freeCommandBuffers(pool, 3, &buffers);
+        break :blk CommandPool{
+            .pool = pool,
+            .prefix = buffers[0],
+            .body = buffers[1],
+            .suffix = buffers[2],
+        };
+    };
+    try ctx.device.resetCommandPool(present_command_pool.pool, .{});
+
+    var acquire_semaphore_infos: std.ArrayList(vk.SemaphoreSubmitInfo) = .empty;
+    var release_semaphores: std.ArrayList(vk.Semaphore) = .empty;
+    var release_semaphore_infos: std.ArrayList(vk.SemaphoreSubmitInfo) = .empty;
+    var swapchains: std.ArrayList(vk.SwapchainKHR) = .empty;
+    var image_indices: std.ArrayList(u32) = .empty;
+    var swapchain_barriers: std.ArrayList(vk.ImageMemoryBarrier2) = .empty;
+
+    for (presents) |present| {
+        const swapchain: *Swapchain = @alignCast(@constCast(
+            @fieldParentPtr("public", present.swapchain),
+        ));
+        std.debug.assert(swapchain.public.state.acquired);
+        const image_index = swapchain.image_index.?;
+
+        // FIXME acquire should actually relate to the first queue that writes to the swapchain
+        try acquire_semaphore_infos.append(arena, .{
+            .semaphore = swapchain.acquire_semaphore,
+            .stage_mask = .{ .all_commands_bit = true },
+            .device_index = 0,
+            .value = undefined, // binary semaphore
+        });
+        try release_semaphores.append(arena, swapchain.release_semaphores[image_index]);
+        try release_semaphore_infos.append(arena, .{
+            .semaphore = swapchain.release_semaphores[image_index],
+            .stage_mask = .{ .all_commands_bit = true },
+            .device_index = 0,
+            .value = undefined, // binary semaphore
+        });
+        try swapchains.append(arena, swapchain.swapchain);
+        try image_indices.append(arena, image_index);
+        try swapchain_barriers.append(arena, .{
+            .src_stage_mask = .{ .all_commands_bit = true },
+            .src_access_mask = .{ .memory_write_bit = true },
+            .dst_stage_mask = .{ .all_commands_bit = true },
+            .dst_access_mask = .{ .memory_read_bit = true },
+            .image = swapchain.images[image_index],
+            .old_layout = .undefined,
+            .new_layout = .present_src_khr,
+            .src_queue_family_index = present_queue.family,
+            .dst_queue_family_index = present_queue.family,
+            .subresource_range = .{
+                .aspect_mask = .{ .color_bit = true },
+                .base_array_layer = 0,
+                .base_mip_level = 0,
+                .layer_count = 1,
+                .level_count = 1,
+            },
+        });
+
+        swapchain.public.state.acquired = false;
+    }
+
+    present_queue.value += 1;
+    try release_semaphore_infos.append(arena, .{
+        .semaphore = present_queue.semaphore,
+        .stage_mask = .{ .all_commands_bit = true },
+        .device_index = 0,
+        .value = present_queue.value,
+    });
+
+    try ctx.device.beginCommandBuffer(present_command_pool.body, &.{
+        .flags = .{ .one_time_submit_bit = true },
+    });
+    ctx.device.cmdPipelineBarrier2(present_command_pool.body, &.{
+        .image_memory_barrier_count = @intCast(swapchain_barriers.items.len),
+        .p_image_memory_barriers = swapchain_barriers.items.ptr,
+    });
+    try ctx.device.endCommandBuffer(present_command_pool.body);
+
+    try present_queue.queue.submit2(&[_]vk.SubmitInfo2{.{
+        .command_buffer_info_count = 1,
+        .p_command_buffer_infos = @ptrCast(&[_]vk.CommandBufferSubmitInfo{.{
+            .command_buffer = present_command_pool.body,
+            .device_mask = 0,
+        }}),
+        // FIXME the acquire will change
+        .wait_semaphore_info_count = @intCast(acquire_semaphore_infos.items.len),
+        .p_wait_semaphore_infos = acquire_semaphore_infos.items.ptr,
+        .signal_semaphore_info_count = @intCast(release_semaphore_infos.items.len),
+        .p_signal_semaphore_infos = release_semaphore_infos.items.ptr,
+    }}, .null_handle);
+
+    _ = try present_queue.queue.presentKHR(&.{
+        .wait_semaphore_count = @intCast(release_semaphores.items.len),
+        .p_wait_semaphores = release_semaphores.items.ptr,
+        .swapchain_count = @intCast(swapchains.items.len),
+        .p_swapchains = swapchains.items.ptr,
+        .p_image_indices = image_indices.items.ptr,
+    });
+
+    try ctx.command_pool_depots.getPtr(.present).push(
+        present_command_pool,
+        .present,
+        present_queue.value,
+    );
+    // NOTE this is conservative but safe, when the presentation engine has the image
+    // the acquire semaphore is long-since used
+    for (acquire_semaphore_infos.items) |acquire_semaphore_info| {
+        try ctx.acquire_semaphore_depot.push(
+            acquire_semaphore_info.semaphore,
+            .present,
+            present_queue.value,
+        );
+    }
+
+    return undefined;
+}
+
+fn recreateSwapchain(ctx: *Context, swapchain: *Swapchain) !void {
+    // TODO rewrite
+    try ctx.device.deviceWaitIdle();
+
+    var arena_impl = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer _ = arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    const capabilities = ctx.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(
+        ctx.physical_device,
+        swapchain.surface,
+    ) catch return error.Unknown;
+    const formats = ctx.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(
+        ctx.physical_device,
+        swapchain.surface,
+        arena,
+    ) catch return error.Unknown;
+    const present_modes = ctx.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(
+        ctx.physical_device,
+        swapchain.surface,
+        arena,
+    ) catch return error.Unknown;
+
+    log.debug("(re)creating swapchain", .{});
+    const format = pickSwapchainFormat(.sdr, formats) orelse formats[0];
+    log.debug("- format:       {} {}", .{ format.format, format.color_space });
+    const present_mode = pickSwapchainPresentMode(.fifo, present_modes) orelse .fifo_khr;
+    log.debug("- present_mode: {}", .{present_mode});
+    const extent = try getSwapchainExtent(ctx.platform, capabilities, swapchain.window);
+    log.debug("- extent:       {}", .{extent});
+    const count = getSwapchainImageCount(capabilities);
+    log.debug("- image count:  {}", .{count});
+
+    swapchain.public.state.size = .{ extent.width, extent.height, 1 };
+
+    const old_swapchain = swapchain.swapchain;
+
+    var create_info = vk.SwapchainCreateInfoKHR{
+        .surface = swapchain.surface,
+        .min_image_count = count,
+        .image_format = format.format,
+        .image_color_space = format.color_space,
+        .image_extent = extent,
+        .image_array_layers = 1,
+        .image_usage = .{
+            .color_attachment_bit = true,
+            .transfer_dst_bit = capabilities.supported_usage_flags.transfer_dst_bit,
+        },
+        .image_sharing_mode = .exclusive,
+        .pre_transform = capabilities.current_transform,
+        .composite_alpha = .{ .opaque_bit_khr = true },
+        .present_mode = present_mode,
+        .clipped = .true,
+        .old_swapchain = old_swapchain,
+    };
+    // std.debug.print("{}\n", .{create_info});
+    swapchain.swapchain = ctx.device.createSwapchainKHR(
+        &create_info,
+        null,
+    ) catch return error.Unknown;
+    errdefer ctx.device.destroySwapchainKHR(swapchain.swapchain, null);
+
+    if (old_swapchain != .null_handle) {
+        for (0..swapchain.images.len) |i| {
+            ctx.device.destroySemaphore(swapchain.release_semaphores[i], null);
+            ctx.device.destroyImageView(swapchain.views[i], null);
+        }
+        ctx.device.destroySwapchainKHR(old_swapchain, null);
+        ctx.gpa.free(swapchain.release_semaphores);
+        ctx.gpa.free(swapchain.views);
+        ctx.gpa.free(swapchain.images);
+    }
+
+    swapchain.images = ctx.device.getSwapchainImagesAllocKHR(
+        swapchain.swapchain,
+        ctx.gpa,
+    ) catch return error.Unknown;
+    errdefer ctx.gpa.free(swapchain.images);
+    std.debug.assert(swapchain.images.len == count);
+
+    swapchain.views = try ctx.gpa.alloc(vk.ImageView, count);
+    errdefer ctx.gpa.free(swapchain.views);
+    for (swapchain.images, 0..) |image, i| {
+        const view_create_info = vk.ImageViewCreateInfo{
+            .image = image,
+            .view_type = .@"2d",
+            .format = format.format,
+            .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
+            .subresource_range = .{
+                .aspect_mask = .{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+        };
+        swapchain.views[i] = ctx.device.createImageView(&view_create_info, null) catch {
+            // cleanup pattern
+            var j = i;
+            while (j > 0) : (j -= 1) ctx.device.destroyImageView(swapchain.views[j - 1], null);
+            return error.Unknown;
+        };
+    }
+
+    swapchain.release_semaphores = try ctx.gpa.alloc(vk.Semaphore, count);
+    errdefer ctx.gpa.free(swapchain.release_semaphores);
+    for (0..count) |i| {
+        swapchain.release_semaphores[i] = ctx.device.createSemaphore(&.{}, null) catch {
+            var j = i;
+            while (j > 0) : (j -= 1) ctx.device.destroySemaphore(swapchain.release_semaphores[j - 1], null);
+            return error.Unknown;
+        };
+    }
+
+    // FIXME FIXME if we fail at any point here we'll get a very hard to recover state
+    // we should probably first put the swapchain struct in some safe state
+    // and then only overwrite it if everything succeeds
+}
+
 fn initInstance(
     ctx: *Context,
     arena: std.mem.Allocator,
     platform: Platform,
     config: Config,
 ) !void {
+    // enable_validation activates the validation layer
+    // enable_debug activates the debug_utils instance extension
+
     var all_layers: std.ArrayList([*:0]const u8) = .empty;
     try all_layers.appendSlice(arena, &layers);
     if (config.enable_validation) try all_layers.appendSlice(arena, &debug_layers);
@@ -468,7 +873,7 @@ fn initInstance(
         )) continue :outer;
         try all_extensions.append(arena, ext1);
     }
-    if (config.enable_validation) outer: for (debug_instance_extensions) |ext1| {
+    if (config.enable_debug) outer: for (debug_instance_extensions) |ext1| {
         for (all_extensions.items) |ext2| if (std.mem.eql(
             u8,
             std.mem.sliceTo(ext1, 0),
@@ -524,6 +929,7 @@ fn deinitInstance(ctx: *Context) void {
     ctx.instance.destroyInstance(null);
     ctx.gpa.destroy(ctx.instance.wrapper);
 }
+
 fn pickPhysicalDevice(
     ctx: *Context,
     arena: std.mem.Allocator,
@@ -558,6 +964,10 @@ fn pickPhysicalDevice(
             log.info("Did not pick {s}: No graphics queue", .{name});
             continue;
         }
+        if (!candidate.queue_families.contains(.present)) {
+            log.info("Did not pick {s}: No present queue", .{name});
+            continue;
+        }
 
         std.debug.assert(candidate.queue_families.contains(.graphics));
         std.debug.assert(candidate.queue_families.contains(.compute));
@@ -583,21 +993,19 @@ fn pickPhysicalDevice(
     );
     log.debug(
         "- graphics queue family: {}",
-        .{
-            candidates.items[0].queue_families.getAssertContains(.graphics),
-        },
+        .{candidates.items[0].queue_families.getAssertContains(.graphics)},
     );
     log.debug(
         "- compute queue family: {}",
-        .{
-            candidates.items[0].queue_families.getAssertContains(.compute),
-        },
+        .{candidates.items[0].queue_families.getAssertContains(.compute)},
     );
     log.debug(
         "- transfer queue family: {}",
-        .{
-            candidates.items[0].queue_families.getAssertContains(.transfer),
-        },
+        .{candidates.items[0].queue_families.getAssertContains(.transfer)},
+    );
+    log.debug(
+        "- present queue family: {}",
+        .{candidates.items[0].queue_families.getAssertContains(.present)},
     );
     return candidates.items[0];
 }
@@ -607,16 +1015,13 @@ fn initDevice(
     arena: std.mem.Allocator,
     candidate: PhysicalDeviceCandidate,
 ) !void {
-    var queue_create_infos: std.AutoArrayHashMapUnmanaged(u32, vk.DeviceQueueCreateInfo) =
-        .empty;
-    try queue_create_infos.ensureTotalCapacity(arena, 3);
-    const priority: f32 = 1.0;
-    for ([3]Queue{ .graphics, .compute, .transfer }) |queue| {
+    var queue_create_infos: std.AutoArrayHashMapUnmanaged(u32, vk.DeviceQueueCreateInfo) = .empty;
+    for ([_]Queue{ .graphics, .compute, .transfer, .present }) |queue| {
         const queue_family_index = candidate.queue_families.getAssertContains(queue);
-        queue_create_infos.putAssumeCapacity(queue_family_index, .{
+        try queue_create_infos.put(arena, queue_family_index, .{
             .queue_family_index = queue_family_index,
             .queue_count = 1,
-            .p_queue_priorities = @ptrCast(&priority),
+            .p_queue_priorities = @ptrCast(&@as(f32, 1.0)),
         });
     }
     const create_info = vk.DeviceCreateInfo{
@@ -648,10 +1053,10 @@ fn initDevice(
                 .semaphore_type = .timeline,
                 .initial_value = 0,
             },
-        }, null) catch return error.Unknown;
+        }, null) catch return error.Unknown; // TODO
 
         // then assign it to all queues that share that family
-        for ([3]Queue{ .graphics, .compute, .transfer }) |queue| {
+        for ([_]Queue{ .graphics, .compute, .transfer, .present }) |queue| {
             if (candidate.queue_families.getAssertContains(queue) == queue_family_index) {
                 ctx.queues.set(queue, physical_queue);
             }
@@ -676,12 +1081,12 @@ fn initPipelineLayout(ctx: *Context) !void {
     const bindings: [3]vk.DescriptorSetLayoutBinding = .{ .{
         .binding = 0,
         .descriptor_type = .sampled_image,
-        .descriptor_count = 128 * 1024,
+        .descriptor_count = 256 * 1024,
         .stage_flags = .{ .vertex_bit = true, .fragment_bit = true, .compute_bit = true },
     }, .{
         .binding = 1,
         .descriptor_type = .storage_image,
-        .descriptor_count = 128 * 1024,
+        .descriptor_count = 256 * 1024,
         .stage_flags = .{ .vertex_bit = true, .fragment_bit = true, .compute_bit = true },
     }, .{
         .binding = 2,
@@ -726,8 +1131,8 @@ fn initPipelineLayout(ctx: *Context) !void {
     errdefer ctx.device.destroyPipelineLayout(ctx.pipeline_layout, null);
 
     const pool_sizes = [3]vk.DescriptorPoolSize{
-        .{ .type = .sampled_image, .descriptor_count = 128 * 1024 },
-        .{ .type = .storage_image, .descriptor_count = 128 * 1024 },
+        .{ .type = .sampled_image, .descriptor_count = 256 * 1024 },
+        .{ .type = .storage_image, .descriptor_count = 256 * 1024 },
         .{ .type = .sampler, .descriptor_count = 1024 },
     };
     ctx.descriptor_pool = try ctx.device.createDescriptorPool(&.{
@@ -759,7 +1164,7 @@ fn deinitPipelineLayout(ctx: *Context) void {
 }
 
 fn pickSwapchainFormat(
-    swapchain_composition: rhi.SwapchainComposition,
+    swapchain_composition: rhi.Composition,
     available_formats: []vk.SurfaceFormatKHR,
 ) ?vk.SurfaceFormatKHR {
     std.debug.assert(available_formats.len > 0);
