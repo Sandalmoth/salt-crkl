@@ -45,6 +45,20 @@ pub fn main() !void {
     const swapchain = try ctx.createSwapchain(.{ .window = window });
     defer ctx.destroySwapchain(swapchain);
 
+    const color_target = try ctx.createTexture(.{
+        .usage = .{
+            .attachment = true,
+            .sampled = true,
+        },
+        .texture_type = .texture_2d,
+        .mip_levels = 1,
+        .size = .{ 640, 480, 1 },
+        .format = .r8g8b8a8_srgb,
+    });
+    defer ctx.destroyTexture(color_target);
+    std.debug.print("main {*}\n", .{color_target});
+    std.debug.print("main {}\n", .{color_target});
+
     main_loop: while (true) {
         var event: sdl.Event = undefined;
         while (sdl.pollEvent(&event)) {
@@ -61,14 +75,6 @@ pub fn main() !void {
         _ = try ctx.submit(io, &.{}, &.{
             .{ .swapchain = swapchain, .texture = undefined },
         });
-
-        //     const command_buffer = try ctx.acquireCommandBuffer(.graphics);
-        //     const swapchain_texture = command_buffer.waitAndAcquireSwapchainTexture(swapchain) orelse {
-        //         command_buffer.cancel();
-        //         continue :main_loop;
-        //     };
-        //     _ = swapchain_texture;
-        //     _ = try ctx.submit(&.{command_buffer});
     }
 
     // const ctx: *rhi.Context = try .create(gpa, .{

@@ -400,7 +400,7 @@ pub const TextureCreateInfo = struct {
 
 pub const Texture = struct {
     group: *const Group,
-    default_view: View,
+    default_view: *const View,
     views: []const View,
 
     info: struct {
@@ -573,6 +573,11 @@ pub const Context = struct {
         PresentTimingQueueFullEXT,
         Minimized,
         InvalidVideoStdParametersKHR,
+        CompressionExhaustedEXT,
+        InvalidOpaqueCaptureAddressKHR,
+        InvalidExternalHandle,
+        MaxAllocs,
+        OutOfSlots,
     };
 
     ptr: *anyopaque,
@@ -620,6 +625,12 @@ pub const Context = struct {
     }
     pub fn acquireSwapchain(ctx: Context, swapchain: *const Swapchain, timeout: u64) Error!bool {
         return ctx.vtable.acquireSwapchain(ctx.ptr, swapchain, timeout);
+    }
+    pub fn createTexture(ctx: Context, create_info: TextureCreateInfo) Error!*const Texture {
+        return ctx.vtable.createTexture(ctx.ptr, create_info);
+    }
+    pub fn destroyTexture(ctx: Context, texture: *const Texture) void {
+        return ctx.vtable.destroyTexture(ctx.ptr, texture);
     }
     pub fn submit(
         ctx: Context,
