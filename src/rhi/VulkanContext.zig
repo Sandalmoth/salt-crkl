@@ -535,7 +535,7 @@ fn createSwapchain(
 
     swapchain.* = Swapchain{
         .public = .{ .info = .{
-            .name = try ctx.gpa.dupeZ(u8, create_info.name),
+            .name = try copyName(ctx.gpa, create_info.name),
         }, .state = .{
             .acquired = false,
             .composition = .sdr,
@@ -579,7 +579,7 @@ fn destroySwapchain(ptr: *anyopaque, rhi_swapchain: *const rhi.Swapchain) void {
 
     ctx.instance.destroySurfaceKHR(swapchain.surface, null);
 
-    ctx.gpa.free(swapchain.public.info.name);
+    freeName(ctx.gpa, swapchain.public.info.name);
     ctx.swapchain_pool.destroy(swapchain);
 }
 
@@ -1902,7 +1902,7 @@ const TextureAllocator = struct {
             .mip_levels = texture_create_info.mip_levels,
             .sample_count = texture_create_info.samples,
             .texture_type = texture_create_info.texture_type,
-            .name = try allocator.ctx.gpa.dupeZ(u8, texture_create_info.name),
+            .name = try copyName(allocator.ctx.gpa, texture_create_info.name),
         };
         texture.public.views = &.{};
 
@@ -1914,3 +1914,14 @@ const TextureAllocator = struct {
         return texture;
     }
 };
+
+/// noop for empty strings, unlike std.mem.Allocator.dupeZ
+fn copyName(gpa: std.mem.Allocator, string: [:0]const u8) ![:0]const u8 {
+    if (string.len == 0) return string;
+    return gpa.dupeZ(u8, string);
+}
+
+fn freeName(gpa: std.mem.Allocator, string: [:0]const u8) void {
+    if (string.len == 0) return;
+    gpa.free(string);
+}
