@@ -564,7 +564,7 @@ pub const Context = struct {
         Timeout,
         DeviceLost,
         Unknown,
-        // TODO remove these ?
+        // TODO cleanup and narrow down to one uniform set of errors like what's above
         OutOfHostMemory,
         ValidationFailed,
         SurfaceLostKHR,
@@ -578,6 +578,7 @@ pub const Context = struct {
         InvalidExternalHandle,
         MaxAllocs,
         OutOfSlots,
+        InvalidShaderNV,
     };
 
     ptr: *anyopaque,
@@ -621,7 +622,7 @@ pub const Context = struct {
         return ctx.vtable.createSwapchain(ctx.ptr, create_info);
     }
     pub fn destroySwapchain(ctx: Context, swapchain: *const Swapchain) void {
-        return ctx.vtable.destroySwapchain(ctx.ptr, swapchain);
+        ctx.vtable.destroySwapchain(ctx.ptr, swapchain);
     }
     pub fn acquireSwapchain(ctx: Context, swapchain: *const Swapchain, timeout: u64) Error!bool {
         return ctx.vtable.acquireSwapchain(ctx.ptr, swapchain, timeout);
@@ -630,7 +631,13 @@ pub const Context = struct {
         return ctx.vtable.createTexture(ctx.ptr, create_info);
     }
     pub fn destroyTexture(ctx: Context, texture: *const Texture) void {
-        return ctx.vtable.destroyTexture(ctx.ptr, texture);
+        ctx.vtable.destroyTexture(ctx.ptr, texture);
+    }
+    pub fn createShader(ctx: Context, create_info: ShaderCreateInfo) Error!*const Shader {
+        return ctx.vtable.createShader(ctx.ptr, create_info);
+    }
+    pub fn destroyShader(ctx: Context, shader: *const Shader) void {
+        ctx.vtable.destroyShader(ctx.ptr, shader);
     }
     pub fn submit(
         ctx: Context,

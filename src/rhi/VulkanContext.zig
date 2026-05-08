@@ -365,7 +365,6 @@ const Sampler = struct {
 
 const Shader = struct {
     public: rhi.Shader,
-    stage: vk.ShaderStage,
     module: vk.ShaderModule,
 };
 
@@ -400,14 +399,14 @@ const vtable: rhi.Context.VTable = .{
     .createBuffer = undefined,
     .createTexture = createTexture,
     .createSampler = undefined,
-    .createShader = undefined,
+    .createShader = createShader,
     .createGroup = undefined,
     .createGraphicsPipeline = undefined,
     .createComputePipeline = undefined,
     .destroyBuffer = undefined,
     .destroyTexture = queueDestroyTexture,
     .destroySampler = undefined,
-    .destroyShader = undefined,
+    .destroyShader = destroyShader,
     .destroyGroup = undefined,
     .destroyGraphicsPipeline = undefined,
     .destroyComputePipeline = undefined,
@@ -711,6 +710,39 @@ fn queueDestroyTexture(ptr: *anyopaque, rhi_texture: *const rhi.Texture) void {
 
     _ = ctx;
     // _ = texture;
+}
+
+fn createShader(
+    ptr: *anyopaque,
+    create_info: rhi.ShaderCreateInfo,
+) rhi.Context.Error!*const rhi.Shader {
+    const ctx: *Context = @ptrCast(@alignCast(ptr));
+    std.debug.assert(@intFromPtr(create_info.src.ptr) % 4 == 0); // SPIR-V alignment requirement
+    const shader = try ctx.shader_pool.create(ctx.gpa);
+    errdefer ctx.shader_pool.destroy(shader);
+    shader.* = .{
+        .public = .{
+            .info = .{
+                .stage = create_info.stage,
+                .name = create_info.name,
+            },
+        },
+        .module = try ctx.device.createShaderModule(&.{
+            .code_size = create_info.src.len,
+            .p_code = @ptrCast(@alignCast(create_info.src.ptr)),
+        }, null),
+    };
+    return &shader.public;
+}
+
+fn destroyShader(
+    ptr: *anyopaque,
+    rhi_shader: *const rhi.Shader,
+) void {
+    const ctx: *Context = @ptrCast(@alignCast(ptr));
+    const shader: *Shader = @alignCast(@constCast(@fieldParentPtr("public", rhi_shader)));
+    ctx.device.destroyShaderModule(shader.module, null);
+    ctx.shader_pool.destroy(shader);
 }
 
 fn submit(

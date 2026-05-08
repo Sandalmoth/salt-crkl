@@ -56,8 +56,17 @@ pub fn main() !void {
         .format = .r8g8b8a8_srgb,
     });
     defer ctx.destroyTexture(color_target);
-    std.debug.print("main {*}\n", .{color_target});
-    std.debug.print("main {}\n", .{color_target});
+
+    const vertex_shader = try ctx.createShader(.{
+        .stage = .vertex,
+        .src = &shader_vertex_spv,
+    });
+    defer ctx.destroyShader(vertex_shader);
+    const fragment_shader = try ctx.createShader(.{
+        .stage = .fragment,
+        .src = &shader_fragment_spv,
+    });
+    defer ctx.destroyShader(fragment_shader);
 
     main_loop: while (true) {
         var event: sdl.Event = undefined;
@@ -73,7 +82,7 @@ pub fn main() !void {
 
         if (!try ctx.acquireSwapchain(swapchain, 100_000_000)) continue :main_loop;
         _ = try ctx.submit(io, &.{}, &.{
-            .{ .swapchain = swapchain, .texture = undefined },
+            .{ .swapchain = swapchain, .texture = color_target },
         });
     }
 
