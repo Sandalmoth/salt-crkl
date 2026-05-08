@@ -104,6 +104,30 @@ const SlotPool = struct {
     }
 };
 
+/// like std.EnumArray but two dimensional
+fn EnumMatrix(comptime A: type, comptime B: type, comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        const AIndexer = std.enums.EnumIndexer(A);
+        const BIndexer = std.enums.EnumIndexer(B);
+
+        values: [AIndexer.count * BIndexer.count]T,
+
+        fn initFill(value: T) Self {
+            return .{ .values = @splat(value) };
+        }
+
+        fn get(matrix: Self, a: A, b: B) T {
+            return matrix.values[AIndexer.indexOf(a) + AIndexer.count * BIndexer.indexOf(b)];
+        }
+
+        fn set(matrix: *Self, a: A, b: B, value: T) void {
+            matrix.values[AIndexer.indexOf(a) + AIndexer.count * BIndexer.indexOf(b)] = value;
+        }
+    };
+}
+
 pub const PlatformError = error{Platform};
 pub const Platform = struct {
     // TODO not sure what the best function signatures are here
@@ -175,7 +199,7 @@ const device_features_1_3 = vk.PhysicalDeviceVulkan13Features{
     .synchronization_2 = .true,
 };
 
-const Queue = enum(u16) {
+const Queue = enum {
     graphics,
     compute,
     transfer,
@@ -194,6 +218,13 @@ const Fence = struct {
     compute: ?u64,
     transfer: ?u64,
     present: ?u64,
+
+    const never = Fence{
+        .graphics = null,
+        .compute = null,
+        .transfer = null,
+        .present = null,
+    };
 };
 
 const CommandPool = struct {
@@ -201,6 +232,13 @@ const CommandPool = struct {
     prefix: vk.CommandBuffer,
     body: vk.CommandBuffer,
     suffix: vk.CommandBuffer,
+};
+
+const Stage = enum {
+    vertex,
+    fragment,
+    compute,
+    tranfer,
 };
 
 fn vulkanImageType(texture_type: rhi.TextureType) vk.ImageType {
@@ -266,20 +304,26 @@ fn vulkanSampleCount(sample_count: rhi.SampleCount) vk.SampleCountFlags {
 }
 
 const Group = struct {
-    // NOTE this could be packed into a u32, or even smaller
-    // but we'd have to either do some ugly masking on the layout
-    // or map the layout to a continuous range
-    const TextureState = packed struct(u64) {
-        owned: bool,
-        owner: Queue,
+    const TextureState = struct {
+        owner: ?Queue,
         layout: vk.ImageLayout,
-        _padding: u15 = 0,
     };
 
     public: rhi.Group,
 
     texture_state: TextureState,
-    texture_overrides: std.AutoArrayHashMapUnmanaged(*const Texture, TextureState),
+    texture_state_overrides: std.AutoArrayHashMapUnmanaged(*Texture, TextureState),
+
+    last_used: Fence,
+
+    textures: std.AutoArrayHashMapUnmanaged(*Texture, void),
+    buffers: std.AutoArrayHashMapUnmanaged(*Buffer, void),
+    // buffers could actually be just a refcount since we don't need to do anything to them
+
+    last_write_epoch: u64,
+    last_write_stage_mask: std.EnumSet(Stage),
+    last_read_epoch: u64,
+    last_read_stage_mask: std.EnumSet(Stage),
 };
 
 const View = struct {
@@ -321,7 +365,7 @@ const Sampler = struct {
 
 const Shader = struct {
     public: rhi.Shader,
-    stage: vk.ShaderStageFlags,
+    stage: vk.ShaderStage,
     module: vk.ShaderModule,
 };
 
@@ -413,6 +457,9 @@ queues: std.EnumArray(Queue, *PhysicalQueue),
 
 texture_allocator: TextureAllocator,
 
+syncronization_epoch: u64,
+visibility_map: EnumMatrix(Stage, Stage, u64),
+
 pub fn init(
     gpa: std.mem.Allocator,
     platform: Platform,
@@ -455,6 +502,9 @@ pub fn init(
     // TODO init all allocators
     ctx.texture_allocator = try .init(ctx);
     errdefer ctx.texture_allocator.deinit();
+
+    ctx.syncronization_epoch = 0;
+    ctx.visibility_map = .initFill(0);
 
     return .{
         .ptr = ctx,
@@ -535,7 +585,7 @@ fn createSwapchain(
 
     swapchain.* = Swapchain{
         .public = .{ .info = .{
-            .name = try copyName(ctx.gpa, create_info.name),
+            .name = create_info.name,
         }, .state = .{
             .acquired = false,
             .composition = .sdr,
@@ -579,7 +629,6 @@ fn destroySwapchain(ptr: *anyopaque, rhi_swapchain: *const rhi.Swapchain) void {
 
     ctx.instance.destroySurfaceKHR(swapchain.surface, null);
 
-    freeName(ctx.gpa, swapchain.public.info.name);
     ctx.swapchain_pool.destroy(swapchain);
 }
 
@@ -1880,15 +1929,28 @@ const TextureAllocator = struct {
             @panic("TODO");
         } else {
             const group = try allocator.ctx.group_pool.create(allocator.ctx.gpa);
-            group.texture_state = .{
-                .owned = false,
-                .owner = undefined, // not sure if the compiler bug is fixed with undefined packed
-                .layout = .undefined,
+            group.* = .{
+                .public = .{
+                    .info = .{
+                        .name = "",
+                    },
+                },
+                .last_used = .never,
+                .textures = .empty,
+                .buffers = .empty,
+                .texture_state = .{
+                    .owner = null,
+                    .layout = .undefined,
+                },
+                .texture_state_overrides = .empty,
+                .last_write_epoch = 0,
+                .last_write_stage_mask = .{},
+                .last_read_epoch = 0,
+                .last_read_stage_mask = .{},
             };
-            group.texture_overrides = .empty;
-            group.public.info.name = &.{};
-            std.debug.print("{}\n", .{group.*});
             texture.public.group = &group.public;
+
+            std.debug.print("{}\n", .{group.*});
             std.debug.print("{}\n", .{texture.public.group.*});
         }
         // FIXME cleanup of group is very hard on errdefer, so don't have errors after it
@@ -1902,7 +1964,7 @@ const TextureAllocator = struct {
             .mip_levels = texture_create_info.mip_levels,
             .sample_count = texture_create_info.samples,
             .texture_type = texture_create_info.texture_type,
-            .name = try copyName(allocator.ctx.gpa, texture_create_info.name),
+            .name = texture_create_info.name,
         };
         texture.public.views = &.{};
 
@@ -1914,14 +1976,3 @@ const TextureAllocator = struct {
         return texture;
     }
 };
-
-/// noop for empty strings, unlike std.mem.Allocator.dupeZ
-fn copyName(gpa: std.mem.Allocator, string: [:0]const u8) ![:0]const u8 {
-    if (string.len == 0) return string;
-    return gpa.dupeZ(u8, string);
-}
-
-fn freeName(gpa: std.mem.Allocator, string: [:0]const u8) void {
-    if (string.len == 0) return;
-    gpa.free(string);
-}
