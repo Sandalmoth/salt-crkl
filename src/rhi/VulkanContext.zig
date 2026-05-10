@@ -204,6 +204,14 @@ const Queue = enum {
     compute,
     transfer,
     present,
+
+    fn fromRhi(rhi_queue: rhi.Queue) Queue {
+        return switch (rhi_queue) {
+            .graphics => .graphics,
+            .compute => .compute,
+            .transfer => .transfer,
+        };
+    }
 };
 
 const PhysicalQueue = struct {
@@ -303,6 +311,61 @@ fn vulkanSampleCount(sample_count: rhi.SampleCount) vk.SampleCountFlags {
     };
 }
 
+fn vulkanStage(stage: rhi.Stage) vk.ShaderStageFlags {
+    return switch (stage) {
+        .vertex => .{ .vertex_bit = true },
+        .fragment => .{ .fragment_bit = true },
+        .compute => .{ .compute_bit = true },
+    };
+}
+
+fn vulkanColorWriteMask(mask: rhi.ColorWriteMask) vk.ColorComponentFlags {
+    return .{
+        .r_bit = mask.r,
+        .g_bit = mask.g,
+        .b_bit = mask.b,
+        .a_bit = mask.a,
+    };
+}
+
+fn vulkanBlendFactor(blend_factor: rhi.BlendFactor) vk.BlendFactor {
+    return switch (blend_factor) {
+        .zero => .zero,
+        .one => .one,
+        .src_color => .src_color,
+        .one_minus_src_color => .one_minus_src_color,
+        .dst_color => .dst_color,
+        .one_minus_dst_color => .one_minus_dst_color,
+        .src_alpha => .src_alpha,
+        .one_minus_src_alpha => .one_minus_src_alpha,
+        .dst_alpha => .dst_alpha,
+        .one_minus_dst_alpha => .one_minus_dst_alpha,
+        .constant_color => .constant_color,
+        .one_minus_constant_color => .one_minus_constant_color,
+        .constant_alpha => .constant_alpha,
+        .one_minus_constant_alpha => .one_minus_constant_alpha,
+        .src_alpha_saturate => .src_alpha_saturate,
+    };
+}
+
+fn vulkanBlendOp(blend_op: rhi.BlendOp) vk.BlendOp {
+    return switch (blend_op) {
+        .add => .add,
+        .subtract => .subtract,
+        .reverse_subtract => .reverse_subtract,
+        .min => .min,
+        .max => .max,
+    };
+}
+
+fn vulkanPolygonMode(polygon_mode: rhi.PolygonMode) vk.PolygonMode {
+    return switch (polygon_mode) {
+        .fill => .fill,
+        .line => .line,
+        .point => .point,
+    };
+}
+
 const Group = struct {
     const TextureState = struct {
         owner: ?Queue,
@@ -370,6 +433,7 @@ const Shader = struct {
 
 const GraphicsPipeline = struct {
     public: rhi.GraphicsPipeline,
+    pipeline: vk.Pipeline,
 };
 
 const ComputePipeline = struct {
@@ -401,14 +465,14 @@ const vtable: rhi.Context.VTable = .{
     .createSampler = undefined,
     .createShader = createShader,
     .createGroup = undefined,
-    .createGraphicsPipeline = undefined,
+    .createGraphicsPipeline = createGraphicsPipeline,
     .createComputePipeline = undefined,
     .destroyBuffer = undefined,
     .destroyTexture = queueDestroyTexture,
     .destroySampler = undefined,
     .destroyShader = destroyShader,
     .destroyGroup = undefined,
-    .destroyGraphicsPipeline = undefined,
+    .destroyGraphicsPipeline = queueDestroyGraphicsPipeline,
     .destroyComputePipeline = undefined,
     .stagingAllocator = undefined,
     .submit = submit,
@@ -745,6 +809,178 @@ fn destroyShader(
     ctx.shader_pool.destroy(shader);
 }
 
+pub fn createGraphicsPipeline(
+    ptr: *anyopaque,
+    create_info: rhi.GraphicsPipelineCreateInfo,
+) rhi.Context.Error!*const rhi.GraphicsPipeline {
+    const ctx: *Context = @ptrCast(@alignCast(ptr));
+    const pipeline = try ctx.graphics_pipeline_pool.create(ctx.gpa);
+    errdefer ctx.graphics_pipeline_pool.destroy(pipeline);
+
+    // TODO handle fragment-shader-free pipelines
+    const vertex_shader: *Shader = @alignCast(@constCast(
+        @fieldParentPtr("public", create_info.vertex_shader),
+    ));
+    const fragment_shader: *Shader = @alignCast(@constCast(
+        @fieldParentPtr("public", create_info.fragment_shader.?),
+    ));
+    const shader_stages = [_]vk.PipelineShaderStageCreateInfo{ .{
+        .stage = vulkanStage(vertex_shader.public.info.stage),
+        .module = vertex_shader.module,
+        .p_name = "main",
+    }, .{
+        .stage = vulkanStage(fragment_shader.public.info.stage),
+        .module = fragment_shader.module,
+        .p_name = "main",
+    } };
+
+    const dynamic_states = [_]vk.DynamicState{
+        .viewport,
+        .scissor,
+        .depth_bias,
+        .blend_constants,
+        .depth_bounds,
+        .stencil_compare_mask,
+        .stencil_write_mask,
+        .stencil_reference,
+        .cull_mode,
+        .front_face,
+        .primitive_topology,
+        .depth_test_enable,
+        .depth_write_enable,
+        .depth_compare_op,
+        .depth_bounds_test_enable,
+        .stencil_test_enable,
+        .stencil_op,
+        .depth_bias_enable,
+        .primitive_restart_enable,
+    };
+
+    // TODO probably better to have a reusable arena in Context
+    var arena_impl: std.heap.ArenaAllocator = .init(ctx.gpa);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    const color_attachment_formats = try arena.alloc(
+        vk.Format,
+        create_info.color_attachments.len,
+    );
+    const color_blend_attachments = try arena.alloc(
+        vk.PipelineColorBlendAttachmentState,
+        create_info.color_attachments.len,
+    );
+    for (create_info.color_attachments, 0..) |color_attachment, i| {
+        color_attachment_formats[i] = vulkanFormat(color_attachment.format);
+        var cba = std.mem.zeroes(vk.PipelineColorBlendAttachmentState);
+        cba.color_write_mask = vulkanColorWriteMask(color_attachment.color_write_mask);
+        if (color_attachment.blend_state) |blend_state| {
+            cba.blend_enable = .true;
+            cba.src_color_blend_factor = vulkanBlendFactor(blend_state.src_color_blend_factor);
+            cba.dst_color_blend_factor = vulkanBlendFactor(blend_state.dst_color_blend_factor);
+            cba.color_blend_op = vulkanBlendOp(blend_state.color_blend_op);
+            cba.src_alpha_blend_factor = vulkanBlendFactor(blend_state.src_alpha_blend_factor);
+            cba.dst_alpha_blend_factor = vulkanBlendFactor(blend_state.dst_alpha_blend_factor);
+            cba.alpha_blend_op = vulkanBlendOp(blend_state.alpha_blend_op);
+        }
+        color_blend_attachments[i] = cba;
+    }
+
+    const dynamic_rendering: vk.PipelineRenderingCreateInfo = .{
+        .color_attachment_count = @intCast(color_attachment_formats.len),
+        .p_color_attachment_formats = if (color_attachment_formats.len > 0) @ptrCast(&color_attachment_formats[0]) else null,
+        .depth_attachment_format = if (create_info.depth_attachment_format) |format| vulkanFormat(format) else .undefined,
+        .stencil_attachment_format = if (create_info.stencil_attachment_format) |format| vulkanFormat(format) else .undefined,
+        .view_mask = 0, // multiview is not supported
+    };
+
+    const pipeline_create_info: vk.GraphicsPipelineCreateInfo = .{
+        .stage_count = @intCast(shader_stages.len),
+        .p_stages = @ptrCast(&shader_stages[0]),
+        .p_viewport_state = &.{
+            .viewport_count = 1, // multiple viewports are not supported
+            .scissor_count = 1, // multiple viewports are not supported
+        },
+        .p_rasterization_state = &.{
+            .depth_clamp_enable = .false, // depth clamp not supported
+            .rasterizer_discard_enable = .false,
+            .polygon_mode = vulkanPolygonMode(create_info.polygon_mode),
+            .line_width = 1.0,
+            .cull_mode = .{ .back_bit = true },
+            .front_face = .counter_clockwise,
+            .depth_bias_enable = .false,
+            .depth_bias_constant_factor = 0.0,
+            .depth_bias_clamp = 0.0,
+            .depth_bias_slope_factor = 0.0,
+        },
+        .p_multisample_state = &.{
+            .rasterization_samples = vulkanSampleCount(create_info.multisample.sample_count),
+            .sample_shading_enable = .false, // sample shading not supported
+            .min_sample_shading = 1.0, // sample shading not supported
+            .p_sample_mask = null, // sample mask not supported
+            .alpha_to_coverage_enable = if (create_info.multisample.enable_alpha_to_coverage) .true else .false,
+            .alpha_to_one_enable = .false, // alpha to one not supported
+        },
+        .p_depth_stencil_state = &.{
+            .depth_test_enable = .false,
+            .depth_write_enable = .false,
+            .depth_compare_op = .never,
+            .depth_bounds_test_enable = .false, // depth boudns not supported
+            .stencil_test_enable = .false,
+            .front = std.mem.zeroes(vk.StencilOpState),
+            .back = std.mem.zeroes(vk.StencilOpState),
+            .min_depth_bounds = 0.0, // depth boudns not supported
+            .max_depth_bounds = 0.0, // depth boudns not supported
+        },
+        .p_color_blend_state = &.{
+            .logic_op_enable = .false, // logic op is not supported
+            .logic_op = .clear, // logic op is not supported
+            .attachment_count = @intCast(color_blend_attachments.len),
+            .p_attachments = if (color_blend_attachments.len > 0) @ptrCast(&color_blend_attachments[0]) else null,
+            .blend_constants = @splat(1.0),
+        },
+        .p_dynamic_state = &.{
+            .dynamic_state_count = @intCast(dynamic_states.len),
+            .p_dynamic_states = &dynamic_states,
+        },
+        .layout = ctx.pipeline_layout,
+        .render_pass = .null_handle, // dynamic rendering
+        .subpass = 0,
+        .base_pipeline_handle = .null_handle,
+        .base_pipeline_index = -1,
+        .p_next = &dynamic_rendering,
+    };
+
+    var pipelines: [1]vk.Pipeline = undefined;
+    _ = try ctx.device.createGraphicsPipelines(
+        .null_handle,
+        &.{pipeline_create_info},
+        null,
+        &pipelines,
+    );
+
+    pipeline.* = .{
+        .public = .{
+            .info = .{
+                .fragment_shader = create_info.fragment_shader != null,
+                .polygon_mode = create_info.polygon_mode,
+                .multisample = create_info.multisample,
+                .color_attachments = create_info.color_attachments,
+                .depth_attachment_format = create_info.depth_attachment_format,
+                .stencil_attachment_format = create_info.stencil_attachment_format,
+                .name = create_info.name,
+            },
+        },
+        .pipeline = pipelines[0],
+    };
+
+    return &pipeline.public;
+}
+
+pub fn queueDestroyGraphicsPipeline(ptr: *anyopaque, rhi_pipeline: *const rhi.GraphicsPipeline) void {
+    _ = ptr;
+    _ = rhi_pipeline;
+}
+
 fn submit(
     ptr: *anyopaque,
     io: std.Io,
@@ -765,7 +1001,196 @@ fn submit(
     };
 
     _ = io;
-    _ = command_buffers;
+
+    const command_pools = try arena.alloc(CommandPool, command_buffers.len);
+    for (command_buffers, 0..) |command_buffer, i| {
+        command_pools[i] = try ctx.getCommandPool(.fromRhi(command_buffer.queue), sync_point);
+        // FIXME cleanup if we error
+    }
+
+    // TODO this can be done in parallel using the io
+    for (command_buffers, command_pools) |command_buffer, command_pool| {
+        try ctx.device.beginCommandBuffer(command_pool.body, &.{
+            .flags = .{ .one_time_submit_bit = true },
+        });
+        for (command_buffer.commands.items) |command| {
+            switch (command) {
+                .begin_render_pass => |cmd| {
+                    // TODO dispatch barriers
+
+                    _ = cmd;
+
+                    //     const color_attachment_infos: []vk.RenderingAttachmentInfo =
+                    //         if (cmd.color_attachments.len > 0)
+                    //             try arena.alloc(vk.RenderingAttachmentInfo, cmd.color_attachments.len)
+                    //         else
+                    //             &.{};
+                    //     const depth_attachment_info: ?*vk.RenderingAttachmentInfo =
+                    //         if (cmd.depth_attachment != null)
+                    //             try arena.create(vk.RenderingAttachmentInfo)
+                    //         else
+                    //             null;
+                    //     const stencil_attachment_info: ?*vk.RenderingAttachmentInfo =
+                    //         if (cmd.stencil_attachment != null)
+                    //             try arena.create(vk.RenderingAttachmentInfo)
+                    //         else
+                    //             null;
+
+                    //     for (cmd.color_attachments, 0..) |attachment, i| {
+                    //         const texture: *Texture = @alignCast(@constCast(
+                    //             @fieldParentPtr("public", attachment.texture),
+                    //         ));
+                    //         const view: *View = @alignCast(@constCast(
+                    //             @fieldParentPtr("public", if (attachment.view) |view|
+                    //                 view
+                    //             else
+                    //                 attachment.texture.default_view),
+                    //         ));
+
+                    //         color_attachment_infos[i] = .{
+                    //             .image_view = view.view,
+                    //             .image_layout = texture.group,
+                    //             .resolve_mode = .{},
+                    //             .resolve_image_layout = .undefined,
+                    //             .load_op = attachment.load_op.vulkan(),
+                    //             .store_op = attachment.store_op.vulkan(),
+                    //             .clear_value = attachment.clear_value.vulkan(),
+                    //         };
+                    //     }
+                    //     if (cmd.depth_attachment) |attachment| {
+                    //         _ = attachment;
+                    //     }
+                    //     if (cmd.stencil_attachment) |attachment| {
+                    //         _ = attachment;
+                    //     }
+
+                    //     ctx.device.cmdBeginRendering(cmdbuf, &.{
+                    //         .color_attachment_count = @intCast(color_attachment_infos.len),
+                    //         .p_color_attachments = color_attachment_infos.ptr,
+                    //         .p_depth_attachment = depth_attachment_info,
+                    //         .p_stencil_attachment = stencil_attachment_info,
+                    //         .layer_count = 1,
+                    //         .view_mask = 0,
+                    //         .render_area = .{
+                    //             .offset = .{ .x = 0, .y = 0 },
+                    //             .extent = cmd.render_area_extent,
+                    //         },
+                    //     });
+                    //     // set all the dynamic state
+                    //     // TODO we should probably store the state in the command buffer and
+                    //     // only update the diff
+                    //     const dynamic_state = cmd.pipeline.dynamic_state;
+                    //     ctx.device.cmdBindPipeline(cmdbuf, .graphics, cmd.pipeline.pipeline);
+                    //     ctx.device.cmdSetViewport(cmdbuf, 0, 1, @ptrCast(
+                    //         &dynamic_state.viewport.vulkan(),
+                    //     ));
+                    //     ctx.device.cmdSetScissor(cmdbuf, 0, 1, @ptrCast(
+                    //         &dynamic_state.scissor.vulkan(),
+                    //     ));
+                    //     ctx.device.cmdSetPrimitiveTopology(
+                    //         cmdbuf,
+                    //         dynamic_state.input_assembly.primitive_topology.vulkan(),
+                    //     );
+                    //     ctx.device.cmdSetPrimitiveRestartEnable(
+                    //         cmdbuf,
+                    //         if (dynamic_state.input_assembly.enable_primitive_restart) .true else .false,
+                    //     );
+                    //     ctx.device.cmdSetRasterizerDiscardEnable(
+                    //         cmdbuf,
+                    //         if (dynamic_state.rasterization.enable_rasterizer_discard) .true else .false,
+                    //     );
+                    //     ctx.device.cmdSetCullMode(
+                    //         cmdbuf,
+                    //         dynamic_state.rasterization.cull_mode.vulkan(),
+                    //     );
+                    //     ctx.device.cmdSetFrontFace(
+                    //         cmdbuf,
+                    //         dynamic_state.rasterization.front_face.vulkan(),
+                    //     );
+                    //     if (dynamic_state.rasterization.depth_bias) |depth_bias| {
+                    //         ctx.device.cmdSetDepthBiasEnable(cmdbuf, .true);
+                    //         ctx.device.cmdSetDepthBias(
+                    //             cmdbuf,
+                    //             depth_bias.constant_factor,
+                    //             depth_bias.clamp,
+                    //             depth_bias.slope_factor,
+                    //         );
+                    //     } else {
+                    //         ctx.device.cmdSetDepthBiasEnable(cmdbuf, .false);
+                    //     }
+                    //     if (dynamic_state.depth_stencil.depth_test) |compare_op| {
+                    //         ctx.device.cmdSetDepthTestEnable(cmdbuf, .true);
+                    //         ctx.device.cmdSetDepthCompareOp(cmdbuf, compare_op.vulkan());
+                    //     } else {
+                    //         ctx.device.cmdSetDepthTestEnable(cmdbuf, .false);
+                    //     }
+                    //     ctx.device.cmdSetDepthWriteEnable(
+                    //         cmdbuf,
+                    //         if (dynamic_state.depth_stencil.enable_depth_write) .true else .false,
+                    //     );
+                    //     if (dynamic_state.depth_stencil.stencil_test) |stencil_test| {
+                    //         ctx.device.cmdSetStencilTestEnable(cmdbuf, .true);
+                    //         const front_op_state = stencil_test.front.vulkan();
+                    //         const back_op_state = stencil_test.back.vulkan();
+                    //         ctx.device.cmdSetStencilOp(
+                    //             cmdbuf,
+                    //             .{ .front_bit = true },
+                    //             front_op_state.fail_op,
+                    //             front_op_state.pass_op,
+                    //             front_op_state.depth_fail_op,
+                    //             front_op_state.compare_op,
+                    //         );
+                    //         ctx.device.cmdSetStencilCompareMask(
+                    //             cmdbuf,
+                    //             .{ .front_bit = true },
+                    //             front_op_state.compare_mask,
+                    //         );
+                    //         ctx.device.cmdSetStencilWriteMask(
+                    //             cmdbuf,
+                    //             .{ .front_bit = true },
+                    //             front_op_state.write_mask,
+                    //         );
+                    //         ctx.device.cmdSetStencilReference(
+                    //             cmdbuf,
+                    //             .{ .front_bit = true },
+                    //             front_op_state.reference,
+                    //         );
+                    //         ctx.device.cmdSetStencilOp(
+                    //             cmdbuf,
+                    //             .{ .back_bit = true },
+                    //             back_op_state.fail_op,
+                    //             back_op_state.pass_op,
+                    //             back_op_state.depth_fail_op,
+                    //             back_op_state.compare_op,
+                    //         );
+                    //         ctx.device.cmdSetStencilCompareMask(
+                    //             cmdbuf,
+                    //             .{ .back_bit = true },
+                    //             back_op_state.compare_mask,
+                    //         );
+                    //         ctx.device.cmdSetStencilWriteMask(
+                    //             cmdbuf,
+                    //             .{ .back_bit = true },
+                    //             back_op_state.write_mask,
+                    //         );
+                    //         ctx.device.cmdSetStencilReference(
+                    //             cmdbuf,
+                    //             .{ .back_bit = true },
+                    //             back_op_state.reference,
+                    //         );
+                    //     } else {
+                    //         ctx.device.cmdSetStencilTestEnable(cmdbuf, .false);
+                    //     }
+                },
+                .bind_graphics_pipeline => |cmd| {
+                    _ = cmd;
+                },
+                .end_render_pass => {},
+                else => log.err("TODO: handle command {}", .{command}),
+            }
+        }
+        try ctx.device.endCommandBuffer(command_pool.body);
+    }
 
     // for each present
     // transition the src image to the graphics queue
@@ -776,27 +1201,7 @@ fn submit(
     // perform present
 
     const present_queue = ctx.queues.get(.present);
-    const present_command_pool = ctx.command_pool_depots.getPtr(.present).pop(sync_point) orelse blk: {
-        const pool = try ctx.device.createCommandPool(&.{
-            .flags = .{},
-            .queue_family_index = ctx.queues.get(.present).family,
-        }, null);
-        errdefer ctx.device.destroyCommandPool(pool, null);
-        var buffers: [3]vk.CommandBuffer = .{.null_handle} ** 3;
-        try ctx.device.allocateCommandBuffers(&.{
-            .command_pool = pool,
-            .level = .primary,
-            .command_buffer_count = 3,
-        }, @ptrCast(&buffers[0]));
-        errdefer ctx.device.freeCommandBuffers(pool, 3, &buffers);
-        break :blk CommandPool{
-            .pool = pool,
-            .prefix = buffers[0],
-            .body = buffers[1],
-            .suffix = buffers[2],
-        };
-    };
-    try ctx.device.resetCommandPool(present_command_pool.pool, .{});
+    const present_command_pool = try ctx.getCommandPool(.present, sync_point);
 
     var acquire_semaphore_infos: std.ArrayList(vk.SemaphoreSubmitInfo) = .empty;
     var release_semaphores: std.ArrayList(vk.Semaphore) = .empty;
@@ -888,6 +1293,14 @@ fn submit(
         .p_image_indices = image_indices.items.ptr,
     });
 
+    for (command_buffers, command_pools) |command_buffer, command_pool| {
+        const queue: Queue = .fromRhi(command_buffer.queue);
+        try ctx.command_pool_depots.getPtr(queue).push(
+            command_pool,
+            queue,
+            ctx.queues.get(queue).value,
+        );
+    }
     try ctx.command_pool_depots.getPtr(.present).push(
         present_command_pool,
         .present,
@@ -1421,6 +1834,31 @@ fn getSwapchainImageCount(capabilities: vk.SurfaceCapabilitiesKHR) u32 {
     var count = @max(capabilities.min_image_count, 2); // avoid having any extras, minimize delays
     if (capabilities.max_image_count > 0) count = @min(count, capabilities.max_image_count);
     return count;
+}
+
+fn getCommandPool(ctx: *Context, queue: Queue, sync_point: SyncPoint) !CommandPool {
+    const command_pool = ctx.command_pool_depots.getPtr(queue).pop(sync_point) orelse blk: {
+        const pool = try ctx.device.createCommandPool(&.{
+            .flags = .{},
+            .queue_family_index = ctx.queues.get(queue).family,
+        }, null);
+        errdefer ctx.device.destroyCommandPool(pool, null);
+        var buffers: [3]vk.CommandBuffer = .{.null_handle} ** 3;
+        try ctx.device.allocateCommandBuffers(&.{
+            .command_pool = pool,
+            .level = .primary,
+            .command_buffer_count = 3,
+        }, @ptrCast(&buffers[0]));
+        errdefer ctx.device.freeCommandBuffers(pool, 3, &buffers);
+        break :blk CommandPool{
+            .pool = pool,
+            .prefix = buffers[0],
+            .body = buffers[1],
+            .suffix = buffers[2],
+        };
+    };
+    try ctx.device.resetCommandPool(command_pool.pool, .{});
+    return command_pool;
 }
 
 const PhysicalDeviceCandidate = struct {

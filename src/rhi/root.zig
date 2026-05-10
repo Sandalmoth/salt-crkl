@@ -114,7 +114,7 @@ pub const PolygonMode = enum {
 };
 
 pub const MultisampleState = struct {
-    sample_count: SampleCount = .@"1",
+    sample_count: SampleCount = .count_1,
     enable_alpha_to_coverage: bool = false,
 };
 
@@ -302,14 +302,14 @@ pub const ClearValue = union(enum) {
         stencil: u8,
     },
 
-    pub fn float(r: f32, g: f32, b: f32, a: f32) ClearValue {
-        return .{ .color = .{ .float = .{ r, g, b, a } } };
+    pub fn float(values: [4]f32) ClearValue {
+        return .{ .color = .{ .float = values } };
     }
-    pub fn int(r: i32, g: i32, b: i32, a: i32) ClearValue {
-        return .{ .color = .{ .int = .{ r, g, b, a } } };
+    pub fn int(values: [4]i32) ClearValue {
+        return .{ .color = .{ .int = values } };
     }
-    pub fn uint(r: u32, g: u32, b: u32, a: u32) ClearValue {
-        return .{ .color = .{ .uint = .{ r, g, b, a } } };
+    pub fn uint(values: [4]u32) ClearValue {
+        return .{ .color = .{ .uint = values } };
     }
     pub fn depthStencil(depth: f32, stencil: u8) ClearValue {
         return .{ .depth_stencil = .{ .depth = depth, .stencil = stencil } };
@@ -373,6 +373,8 @@ pub const FenceMask = struct {
     compute: bool = true,
     transfer: bool = true,
 };
+
+pub const Stage = enum { vertex, fragment, compute };
 
 // objects
 
@@ -487,14 +489,12 @@ pub const Sampler = struct {
 };
 
 pub const ShaderCreateInfo = struct {
-    stage: Shader.Stage,
+    stage: Stage,
     src: []const u8,
     name: [:0]const u8 = &.{},
 };
 
 pub const Shader = struct {
-    const Stage = enum { vertex, fragment, shader };
-
     info: struct {
         stage: Stage,
         name: [:0]const u8,
@@ -515,9 +515,9 @@ pub const GraphicsPipelineCreateInfo = struct {
 pub const GraphicsPipeline = struct {
     info: struct {
         fragment_shader: bool,
-        polygon_mode: GraphicsPipelineCreateInfo.PolygonMode,
-        multisample: GraphicsPipelineCreateInfo.MultisampleState,
-        color_attachments: []const GraphicsPipelineCreateInfo.ColorAttachment,
+        polygon_mode: PolygonMode,
+        multisample: MultisampleState,
+        color_attachments: []const ColorAttachment,
         depth_attachment_format: ?Format,
         stencil_attachment_format: ?Format,
         name: [:0]const u8,
@@ -639,6 +639,13 @@ pub const Context = struct {
     pub fn destroyShader(ctx: Context, shader: *const Shader) void {
         ctx.vtable.destroyShader(ctx.ptr, shader);
     }
+    pub fn createGraphicsPipeline(ctx: Context, create_info: GraphicsPipelineCreateInfo) Error!*const GraphicsPipeline {
+        return ctx.vtable.createGraphicsPipeline(ctx.ptr, create_info);
+    }
+    pub fn destroyGraphicsPipeline(ctx: Context, pipeline: *const GraphicsPipeline) void {
+        ctx.vtable.destroyGraphicsPipeline(ctx.ptr, pipeline);
+    }
+
     pub fn submit(
         ctx: Context,
         io: std.Io,
@@ -678,8 +685,18 @@ pub const CommandBuffer = struct {
 
         push_constant: []u8,
 
-        begin_render_pass: struct {},
-        bind_graphics_pipeline: struct {},
+        begin_render_pass: struct {
+            color_attachments: []const RenderingAttachment,
+            depth_attachment: ?*const RenderingAttachment,
+            stencil_attachment: ?*const RenderingAttachment,
+            vertex_read_groups: []const Group,
+            fragment_read_groups: []const Group,
+            fragment_write_groups: []const Group,
+        },
+        bind_graphics_pipeline: struct {
+            pipeline: *const GraphicsPipeline,
+            dynamic_state: *const DynamicState,
+        },
         draw_indexed: struct {},
         draw_indexed_indirect: struct {},
         draw_indexed_indirect_count: struct {},
@@ -721,6 +738,65 @@ pub const CommandBuffer = struct {
         _ = dst;
         _ = dst_region;
         _ = filter;
+    }
+
+    pub fn beginRenderPass(
+        command_buffer: *CommandBuffer,
+        color_attachments: []const RenderingAttachment,
+        depth_attachment: ?RenderingAttachment,
+        stencil_attachment: ?RenderingAttachment,
+        vertex_read_groups: []const Group,
+        fragment_read_groups: []const Group,
+        fragment_write_groups: []const Group,
+    ) !void {
+        std.debug.assert(command_buffer.active_pass == null);
+        const arena = command_buffer.arena;
+        const command = try command_buffer.commands.addOne(arena);
+        errdefer _ = command_buffer.commands.pop();
+        var depth_attachment_copy: ?*RenderingAttachment = null;
+        if (depth_attachment) |attachment| {
+            depth_attachment_copy = try arena.create(RenderingAttachment);
+            depth_attachment_copy.?.* = attachment;
+        }
+        var stencil_attachment_copy: ?*RenderingAttachment = null;
+        if (stencil_attachment) |attachment| {
+            stencil_attachment_copy = try arena.create(RenderingAttachment);
+            stencil_attachment_copy.?.* = attachment;
+        }
+        command.* = .{ .begin_render_pass = .{
+            .color_attachments = try arena.dupe(RenderingAttachment, color_attachments),
+            .depth_attachment = depth_attachment_copy,
+            .stencil_attachment = stencil_attachment_copy,
+            .vertex_read_groups = try arena.dupe(Group, vertex_read_groups),
+            .fragment_read_groups = try arena.dupe(Group, fragment_read_groups),
+            .fragment_write_groups = try arena.dupe(Group, fragment_write_groups),
+        } };
+        command_buffer.active_pass = .render;
+    }
+
+    pub fn bindGraphicsPipeline(
+        command_buffer: *CommandBuffer,
+        pipeline: *const GraphicsPipeline,
+        dynamic_state: DynamicState,
+    ) !void {
+        const arena = command_buffer.arena;
+        const command = try command_buffer.commands.addOne(arena);
+        errdefer _ = command_buffer.commands.pop();
+        const dynamic_state_copy = try arena.create(DynamicState);
+        dynamic_state_copy.* = dynamic_state;
+        command.* = .{ .bind_graphics_pipeline = .{
+            .pipeline = pipeline,
+            .dynamic_state = dynamic_state_copy,
+        } };
+    }
+
+    pub fn endRenderPass(command_buffer: *CommandBuffer) !void {
+        std.debug.assert(command_buffer.active_pass.? == .render);
+        const arena = command_buffer.arena;
+        const command = try command_buffer.commands.addOne(arena);
+        errdefer _ = command_buffer.commands.pop();
+        command.* = .{ .end_render_pass = {} };
+        command_buffer.active_pass = null;
     }
 };
 

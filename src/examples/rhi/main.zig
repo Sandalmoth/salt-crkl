@@ -17,9 +17,9 @@ pub fn main() !void {
     defer _ = io_struct.deinit();
     const io = io_struct.io();
 
-    // var arena_struct: std.heap.ArenaAllocator = .init(gpa);
-    // defer _ = arena_struct.deinit();
-    // const arena = arena_struct.allocator();
+    var arena_struct: std.heap.ArenaAllocator = .init(gpa);
+    defer _ = arena_struct.deinit();
+    const arena = arena_struct.allocator();
 
     try sdl.init(sdl.c.SDL_INIT_VIDEO);
     defer sdl.quit();
@@ -68,7 +68,20 @@ pub fn main() !void {
     });
     defer ctx.destroyShader(fragment_shader);
 
+    const pipeline = try ctx.createGraphicsPipeline(.{
+        .vertex_shader = vertex_shader,
+        .fragment_shader = fragment_shader,
+        .color_attachments = &.{.{
+            .format = .r8g8b8a8_srgb,
+        }},
+        .depth_attachment_format = null,
+        .stencil_attachment_format = null,
+    });
+    defer ctx.destroyGraphicsPipeline(pipeline);
+
     main_loop: while (true) {
+        _ = arena_struct.reset(.retain_capacity);
+
         var event: sdl.Event = undefined;
         while (sdl.pollEvent(&event)) {
             if (event.type == sdl.c.SDL_EVENT_QUIT) break :main_loop;
@@ -81,7 +94,47 @@ pub fn main() !void {
         try io.sleep(.fromMilliseconds(10), .real);
 
         if (!try ctx.acquireSwapchain(swapchain, 100_000_000)) continue :main_loop;
-        _ = try ctx.submit(io, &.{}, &.{
+
+        var command_buffer: rhi.CommandBuffer = .init(arena, .graphics);
+        try command_buffer.beginRenderPass(
+            &.{.{
+                .texture = color_target,
+                .load_op = .clear,
+                .store_op = .store,
+                .clear_value = .float(.{ 0, 1.0, 0, 1.0 }),
+            }},
+            null,
+            null,
+            &.{},
+            &.{},
+            &.{},
+        );
+        try command_buffer.bindGraphicsPipeline(pipeline, .{
+            .viewport = .{
+                .x = 0,
+                .y = 0,
+                .width = 640,
+                .height = 480,
+                .min_depth = 0,
+                .max_depth = 1,
+            },
+            .scissor = .{
+                .x = 0,
+                .y = 0,
+                .width = 640,
+                .height = 480,
+            },
+        });
+        try command_buffer.endRenderPass();
+
+        // try command_buffer.bindIndexBuffer(index_buffer, 0);
+        // try command_buffer.pushConstant(u64, vertex_buffer.buffer_device_address);
+        // try command_buffer.drawIndexedInstanced(6, 1, 0, 0, 0);
+        // try command_buffer.endRenderPass();
+
+        _ = try ctx.submit(io, &.{
+            command_buffer,
+        }, &.{
             .{ .swapchain = swapchain, .texture = color_target },
         });
     }
