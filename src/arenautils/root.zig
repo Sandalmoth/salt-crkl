@@ -45,7 +45,7 @@ pub fn List(comptime T: type) type {
         segments: ?*[63]?[*]T, // hell yeah
         len: usize,
 
-        const empty = Self{ .segments = null, .len = 0 };
+        pub const empty = Self{ .segments = null, .len = 0 };
 
         fn AtType(comptime SelfType: type) type {
             if (@typeInfo(SelfType).pointer.is_const) {
@@ -192,12 +192,12 @@ pub fn Map(comptime K: type, comptime V: type, comptime Context: type) type {
                 };
             }
         };
-        const init = if (@sizeOf(Context) == 0) Init.init else Init.initContext;
+        pub const init = if (@sizeOf(Context) == 0) Init.init else Init.initContext;
 
         /// put key in map, if key is not present sets it to initial value, otherwise returns ptr
         /// updates using the ptr are not synchronized
         /// threadsafe, may overallocate during a race
-        fn put(map: *Self, arena: std.mem.Allocator, key: K, initial_value: V) !*V {
+        pub fn put(map: *Self, arena: std.mem.Allocator, key: K, initial_value: V) !*V {
             var walk: *?*Node = &map.root;
             var hash = map.ctx.hash(key);
             while (true) : (hash <<= 2) {
@@ -240,7 +240,7 @@ pub fn Map(comptime K: type, comptime V: type, comptime Context: type) type {
         }
 
         /// updates using the ptr are not synchronized
-        fn get(map: anytype, key: K) GetType(@TypeOf(map)) {
+        pub fn get(map: anytype, key: K) GetType(@TypeOf(map)) {
             var walk: *?*Node = &map.root;
             var hash = map.ctx.hash(key);
             while (true) : (hash <<= 2) {
