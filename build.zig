@@ -45,6 +45,12 @@ pub fn build(b: *std.Build) void {
     });
     _ = math;
 
+    const arenautils = b.addModule("math", .{
+        .root_source_file = b.path("src/arenautils/root.zig"),
+        .target = target,
+    });
+    _ = arenautils;
+
     const profiler = b.addModule("profiler", .{
         .root_source_file = b.path("src/profiler/root.zig"),
         .target = target,
