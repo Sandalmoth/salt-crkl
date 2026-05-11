@@ -42,17 +42,10 @@ pub fn List(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        segments: []?[*]T,
+        segments: ?*[63]?[*]T, // hell yeah
         len: usize,
 
-        pub fn init(arena: std.mem.Allocator) !Self {
-            const segments = try arena.alloc(?[*]T, 63);
-            @memset(segments[0..63], null);
-            return .{
-                .segments = segments,
-                .len = 0,
-            };
-        }
+        const empty = Self{ .segments = null, .len = 0 };
 
         fn AtType(comptime SelfType: type) type {
             if (@typeInfo(SelfType).pointer.is_const) {
@@ -68,25 +61,46 @@ pub fn List(comptime T: type) type {
             std.debug.assert(index < @atomicLoad(usize, &self.len, .acquire));
             const shelf_index = shelfIndex(index);
             const box_index = boxIndex(index, shelf_index);
-            return &self.segments[shelf_index].?[box_index];
+            // NOTE if we are in range, then the segments must exist
+            // so we don't need to check for it since we've already asserted
+            return &self.segments.?[shelf_index].?[box_index];
         }
 
-        /// Increase length by 1, returning pointer to the new item.
+        /// increase length by 1, returning pointer to the new item
         /// thread safe, may overallocate during a race
         pub fn addOne(self: *Self, arena: std.mem.Allocator) !*T {
+            // ensure that there is a segments array
+            const segments = @atomicLoad(?*[63]?[*]T, &self.segments, .acquire) orelse blk: {
+                const new_segments = try arena.create([63]?[*]T);
+                new_segments.* = @splat(null);
+                if (@cmpxchgStrong(
+                    ?*[63]?[*]T,
+                    &self.segments,
+                    null,
+                    new_segments,
+                    .release,
+                    .acquire,
+                )) |actual| {
+                    // another thread made the new shelf first
+                    arena.destroy(new_segments); // might work
+                    break :blk actual.?;
+                }
+                // we made the new shelf
+                break :blk new_segments;
+            };
+
             // get a guess at what the index will be
             var index = @atomicLoad(usize, &self.len, .acquire);
-
             while (true) {
                 const shelf_index = shelfIndex(index);
 
                 // ensure that the shelf exists
-                const shelf = @atomicLoad(?[*]T, &self.segments[shelf_index], .acquire) orelse
+                const shelf = @atomicLoad(?[*]T, &segments[shelf_index], .acquire) orelse
                     blk: {
                         const new_shelf = try arena.alloc(T, shelfSize(shelf_index));
                         if (@cmpxchgStrong(
                             ?[*]T,
-                            &self.segments[shelf_index],
+                            &segments[shelf_index],
                             null,
                             new_shelf.ptr,
                             .release,
@@ -136,7 +150,7 @@ test "List" {
     var arena_impl: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_impl.deinit();
     const arena = arena_impl.allocator();
-    var a: List(u32) = try .init(arena);
+    var a: List(u32) = .empty;
     for (0..10) |i| {
         (try a.addOne(arena)).* = @intCast(i);
     }
@@ -164,13 +178,25 @@ pub fn Map(comptime K: type, comptime V: type, comptime Context: type) type {
         root: ?*Node,
         ctx: Context,
 
-        fn init(ctx: Context) Self {
-            return .{
-                .root = null,
-                .ctx = ctx,
-            };
-        }
+        const Init = struct {
+            fn init() Self {
+                return .{
+                    .root = null,
+                    .ctx = undefined,
+                };
+            }
+            fn initContext(ctx: Context) Self {
+                return .{
+                    .root = null,
+                    .ctx = ctx,
+                };
+            }
+        };
+        const init = if (@sizeOf(Context) == 0) Init.init else Init.initContext;
 
+        /// put key in map, if key is not present sets it to initial value, otherwise returns ptr
+        /// updates using the ptr are not synchronized
+        /// threadsafe, may overallocate during a race
         fn put(map: *Self, arena: std.mem.Allocator, key: K, initial_value: V) !*V {
             var walk: *?*Node = &map.root;
             var hash = map.ctx.hash(key);
@@ -213,6 +239,7 @@ pub fn Map(comptime K: type, comptime V: type, comptime Context: type) type {
             }
         }
 
+        /// updates using the ptr are not synchronized
         fn get(map: anytype, key: K) GetType(@TypeOf(map)) {
             var walk: *?*Node = &map.root;
             var hash = map.ctx.hash(key);
@@ -231,7 +258,7 @@ test "Map" {
     var arena_impl: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_impl.deinit();
     const arena = arena_impl.allocator();
-    var a: AutoMap(u32, u32) = .init(.{});
+    var a: AutoMap(u32, u32) = .init();
     for (0..10) |i| {
         _ = try a.put(arena, @intCast(i), @intCast(3 * (i + 1)));
     }
