@@ -16,22 +16,22 @@ pub fn build(b: *std.Build) void {
     const sdl_lib = sdl_dep.artifact("SDL3");
 
     // libraries
-    const pl_mod = b.addModule("packer_loader", .{
-        .root_source_file = b.path("src/packer-loader/root.zig"),
+    const spiral = b.addModule("spiral", .{
+        .root_source_file = b.path("src/spiral/root.zig"),
         .target = target,
     });
-    _ = pl_mod;
+    _ = spiral;
 
-    const pl_exe = b.addExecutable(.{
-        .name = "packer_loader",
+    const spiral_exe = b.addExecutable(.{
+        .name = "spiral",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/packer-loader/main.zig"),
+            .root_source_file = b.path("src/spiral/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{},
         }),
     });
-    b.installArtifact(pl_exe);
+    b.installArtifact(spiral_exe);
 
     const ecs = b.addModule("ecs", .{
         .root_source_file = b.path("src/ecs/root.zig"),
