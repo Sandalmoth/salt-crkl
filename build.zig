@@ -16,6 +16,12 @@ pub fn build(b: *std.Build) void {
     const sdl_lib = sdl_dep.artifact("SDL3");
 
     // libraries
+    const arenautils = b.addModule("math", .{
+        .root_source_file = b.path("src/arenautils/root.zig"),
+        .target = target,
+    });
+    // _ = arenautils;
+
     const spiral = b.addModule("spiral", .{
         .root_source_file = b.path("src/spiral/root.zig"),
         .target = target,
@@ -28,7 +34,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/spiral/main.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{},
+            .imports = &.{
+                .{ .name = "arenautils", .module = arenautils },
+            },
         }),
     });
     b.installArtifact(spiral_exe);
@@ -44,12 +52,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
     _ = math;
-
-    const arenautils = b.addModule("math", .{
-        .root_source_file = b.path("src/arenautils/root.zig"),
-        .target = target,
-    });
-    _ = arenautils;
 
     const profiler = b.addModule("profiler", .{
         .root_source_file = b.path("src/profiler/root.zig"),
