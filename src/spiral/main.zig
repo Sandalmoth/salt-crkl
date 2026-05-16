@@ -3,9 +3,16 @@ const std = @import("std");
 
 const spiral = @import("root.zig");
 
+const Uuid = @import("Uuid.zig");
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
+
+    var seed: u64 = undefined;
+    io.random(std.mem.asBytes(&seed));
+    var rng: std.Random.DefaultPrng = .init(seed);
+    const rand = rng.random();
 
     // var arena_impl: std.heap.ArenaAllocator = .init(gpa);
     // defer arena_impl.deinit();
@@ -30,6 +37,22 @@ pub fn main(init: std.process.Init) !void {
     var writer = file.writer(io, &buffer);
     try writer.interface.writeInt(u32, 123, .little);
     try writer.interface.flush();
+
+    const uuid: Uuid = .random(io, rand);
+    const uuid_str = uuid.stringify();
+    std.debug.print("{s}\n  {}\n  {}\n", .{
+        uuid_str,
+        uuid,
+        try Uuid.parse(&uuid_str),
+    });
+    std.debug.print("  {s}\n    {}\n    {}\n  {s}\n    {}\n    {}\n", .{
+        &uuid.child("walk").stringify(),
+        uuid.child("walk"),
+        uuid.child("walk"),
+        &uuid.child("albedo").stringify(),
+        uuid.child("albedo"),
+        uuid.child("albedo"),
+    });
 }
 
 const Asset = struct {
@@ -37,5 +60,6 @@ const Asset = struct {
 };
 
 const Manifest = struct {
+    uuid: u128,
     assets: []Asset,
 };

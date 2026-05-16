@@ -106,11 +106,6 @@ const Storage = struct {
     }
 };
 
-fn daemon(storage: *Storage) void {
-    _ = storage;
-    std.debug.print("howdy\n", .{});
-}
-
 test "Storage" {
     var s: Storage = try .init(std.testing.allocator, std.testing.io, "data");
     s.deinit(); // kinda silly to need try, but, i guess we can always fail to wait?
