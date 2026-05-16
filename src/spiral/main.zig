@@ -14,18 +14,46 @@ pub fn main(init: std.process.Init) !void {
     var rng: std.Random.DefaultPrng = .init(seed);
     const rand = rng.random();
 
-    // var arena_impl: std.heap.ArenaAllocator = .init(gpa);
-    // defer arena_impl.deinit();
-    // const arena = arena_impl.allocator();
+    var arena_impl: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
 
     const dir: std.Io.Dir = try .openDir(std.Io.Dir.cwd(), io, "raw", .{ .iterate = true });
     var it = try dir.walk(gpa);
     defer it.deinit();
     while (try it.next(io)) |entry| {
+        _ = arena_impl.reset(.retain_capacity);
         switch (entry.kind) {
             .file => {
                 if (!std.mem.endsWith(u8, entry.basename, ".manifest.zon")) continue;
                 std.debug.print("file {s} {s}\n", .{ entry.basename, entry.path });
+                const filename = entry.basename[0 .. entry.basename.len - 13];
+                const extension = std.fs.path.extension(filename);
+                std.debug.print("  {s} {s}\n", .{ filename, extension });
+
+                if (!std.mem.eql(u8, filename, "a.txt")) continue;
+
+                const manifest_bytes =
+                    try entry.dir.readFileAlloc(io, entry.basename, arena, .limited(1024 * 1024));
+                const manifest_bytes_z =
+                    try std.mem.concatWithSentinel(arena, u8, &.{manifest_bytes}, 0);
+                std.debug.print("{s}\n", .{manifest_bytes_z});
+                var diagnostics: std.zon.parse.Diagnostics = .{};
+                const manifest = std.zon.parse.fromSliceAlloc(
+                    Manifest,
+                    arena,
+                    manifest_bytes_z,
+                    &diagnostics,
+                    .{},
+                ) catch |e| {
+                    std.debug.print("failed to parse zon\n{}\n", .{diagnostics});
+                    var it2 = diagnostics.iterateErrors();
+                    while (it2.next()) |diag| {
+                        std.debug.print("{}\n", .{diag});
+                    }
+                    return e;
+                };
+                std.debug.print("{}\n", .{manifest});
             },
             else => continue,
         }
@@ -55,11 +83,16 @@ pub fn main(init: std.process.Init) !void {
     });
 }
 
+const Config = union(enum) {
+    txt: void,
+};
+
 const Asset = struct {
-    uuid: u128,
+    uuid: []const u8,
+    config: Config,
 };
 
 const Manifest = struct {
-    uuid: u128,
-    assets: []Asset,
+    uuid: []const u8,
+    assets: []Asset = &.{},
 };
