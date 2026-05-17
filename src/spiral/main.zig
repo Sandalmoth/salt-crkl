@@ -18,8 +18,10 @@ pub fn main(init: std.process.Init) !void {
     defer arena_impl.deinit();
     const arena = arena_impl.allocator();
 
-    const dir: std.Io.Dir = try .openDir(std.Io.Dir.cwd(), io, "raw", .{ .iterate = true });
-    var it = try dir.walk(gpa);
+    const output_dir: std.Io.Dir = try .openDir(.cwd(), io, "data", .{});
+
+    const input_dir: std.Io.Dir = try .openDir(std.Io.Dir.cwd(), io, "raw", .{ .iterate = true });
+    var it = try input_dir.walk(gpa);
     defer it.deinit();
     while (try it.next(io)) |entry| {
         _ = arena_impl.reset(.retain_capacity);
@@ -54,13 +56,17 @@ pub fn main(init: std.process.Init) !void {
                     return e;
                 };
                 std.debug.print("{}\n", .{manifest});
+
+                std.debug.print("{s}\n", .{extension});
+                if (std.mem.eql(u8, extension, ".txt"))
+                    try processTxt(arena, io, output_dir, manifest, entry.dir, filename);
             },
             else => continue,
         }
     }
 
     var buffer: [16 * 1024]u8 = undefined;
-    const file = try std.Io.Dir.cwd().createFile(io, "data/index", .{});
+    const file = try output_dir.createFile(io, "index", .{});
     defer file.close(io);
     var writer = file.writer(io, &buffer);
     try writer.interface.writeInt(u32, 123, .little);
@@ -73,18 +79,21 @@ pub fn main(init: std.process.Init) !void {
         uuid,
         try Uuid.parse(&uuid_str),
     });
-    std.debug.print("  {s}\n    {}\n    {}\n  {s}\n    {}\n    {}\n", .{
+    std.debug.print("  {s}\n    {}\n    {}\n  {s}\n    {}\n    {}\n  {s}\n    {}\n    {}\n", .{
         &uuid.child("walk").stringify(),
         uuid.child("walk"),
         uuid.child("walk"),
         &uuid.child("albedo").stringify(),
         uuid.child("albedo"),
         uuid.child("albedo"),
+        &uuid.child("").stringify(),
+        uuid.child(""),
+        uuid.child(""),
     });
 }
 
 const Config = union(enum) {
-    txt: void,
+    txt,
 };
 
 const Asset = struct {
@@ -94,5 +103,22 @@ const Asset = struct {
 
 const Manifest = struct {
     uuid: []const u8,
-    assets: []Asset = &.{},
+    assets: []Asset,
 };
+
+fn processTxt(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    output_dir: std.Io.Dir,
+    manifest: Manifest,
+    input_dir: std.Io.Dir,
+    filename: []const u8,
+) !void {
+    _ = arena;
+    // std.debug.print("{}\n", .{input_dir});
+    // std.debug.print("{s}\n", .{filename});
+    // std.debug.print("{}\n", .{output_dir});
+    // std.debug.print("{s}\n", .{manifest.assets[0].uuid});
+    // _ = io;
+    try std.Io.Dir.copyFile(input_dir, filename, output_dir, manifest.assets[0].uuid, io, .{});
+}
