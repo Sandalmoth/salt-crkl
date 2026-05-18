@@ -47,17 +47,20 @@ pub fn List(comptime T: type) type {
 
         pub const empty = Self{ .segments = null, .len = 0 };
 
-        fn AtType(comptime SelfType: type) type {
-            if (@typeInfo(SelfType).pointer.is_const) {
-                return *const T;
-            } else {
-                return *T;
-            }
+        /// returnss element index from the list
+        /// asserts that index is in range
+        pub fn get(self: anytype, index: usize) T {
+            std.debug.assert(index < @atomicLoad(usize, &self.len, .acquire));
+            const shelf_index = shelfIndex(index);
+            const box_index = boxIndex(index, shelf_index);
+            // NOTE if we are in range, then the segments must exist
+            // so we don't need to check for it since we've already asserted
+            return self.segments.?[shelf_index].?[box_index];
         }
 
         /// returns a pointer to element index from the list
         /// asserts that index is in range
-        pub fn at(self: anytype, index: usize) AtType(@TypeOf(self)) {
+        pub fn getPtr(self: anytype, index: usize) *T {
             std.debug.assert(index < @atomicLoad(usize, &self.len, .acquire));
             const shelf_index = shelfIndex(index);
             const box_index = boxIndex(index, shelf_index);
@@ -155,7 +158,8 @@ test "List" {
         (try a.addOne(arena)).* = @intCast(i);
     }
     for (0..10) |i| {
-        try std.testing.expectEqual(@as(u32, @intCast(i)), a.at(i).*);
+        try std.testing.expectEqual(@as(u32, @intCast(i)), a.get(i));
+        try std.testing.expectEqual(@as(u32, @intCast(i)), a.getPtr(i).*);
     }
 }
 
@@ -231,16 +235,20 @@ pub fn Map(comptime K: type, comptime V: type, comptime Context: type) type {
             }
         }
 
-        fn GetType(comptime SelfType: type) type {
-            if (@typeInfo(SelfType).pointer.is_const) {
-                return ?*const V;
-            } else {
-                return ?*V;
+        pub fn get(map: Map, key: K) ?V {
+            var walk: *?*Node = &map.root;
+            var hash = map.ctx.hash(key);
+            while (true) : (hash <<= 2) {
+                const node = @atomicLoad(?*Node, walk, .acquire) orelse return null;
+                if (map.ctx.eql(node.key, key)) {
+                    return node.value;
+                }
+                walk = &node.children[hash >> 62];
             }
         }
 
         /// updates using the ptr are not synchronized
-        pub fn get(map: anytype, key: K) GetType(@TypeOf(map)) {
+        pub fn getPtr(map: *Map, key: K) ?*V {
             var walk: *?*Node = &map.root;
             var hash = map.ctx.hash(key);
             while (true) : (hash <<= 2) {
@@ -263,7 +271,8 @@ test "Map" {
         _ = try a.put(arena, @intCast(i), @intCast(3 * (i + 1)));
     }
     for (0..10) |i| {
-        try std.testing.expectEqual(@as(u32, @intCast(3 * (i + 1))), a.get(@intCast(i)).?.*);
+        try std.testing.expectEqual(@as(u32, @intCast(3 * (i + 1))), a.get(@intCast(i)).?);
+        try std.testing.expectEqual(@as(u32, @intCast(3 * (i + 1))), a.getPtr(@intCast(i)).?.*);
     }
     for (10..20) |i| {
         try std.testing.expectEqual(null, a.get(@intCast(i)));

@@ -3,7 +3,25 @@ const std = @import("std");
 
 const spiral = @import("root.zig");
 
+const log = std.log.scoped(.spiral);
+
 const Uuid = @import("Uuid.zig");
+
+var manifests: arenautils.List(Manifest) = .empty;
+var content_hashes: arenautils.AutoMap(u128, struct {}) = .init();
+
+// iterate the raw dir
+// for each manifest
+//   rebuild the asset list in the manifest, keep config if possible
+//   hash data and config, if hash doesn't exist
+//     process the file and add to content hashes
+//     add content table
+//   store manifest -> content hash in list
+// generate index
+
+// so, the manifest should be able to work from just the root uuid and nothing more
+// and then we let the process function identify subassets and complete/update the list
+// when we run add, we just always try to process the file also to build the manifest
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
@@ -33,17 +51,16 @@ pub fn main(init: std.process.Init) !void {
                 const extension = std.fs.path.extension(filename);
                 std.debug.print("  {s} {s}\n", .{ filename, extension });
 
-                if (!std.mem.eql(u8, filename, "a.txt")) continue;
-
                 const manifest_bytes =
                     try entry.dir.readFileAlloc(io, entry.basename, arena, .limited(1024 * 1024));
                 const manifest_bytes_z =
                     try std.mem.concatWithSentinel(arena, u8, &.{manifest_bytes}, 0);
                 std.debug.print("{s}\n", .{manifest_bytes_z});
                 var diagnostics: std.zon.parse.Diagnostics = .{};
+                // note that the manifests go on the permanent arena
                 const manifest = std.zon.parse.fromSliceAlloc(
                     Manifest,
-                    arena,
+                    init.arena.allocator(),
                     manifest_bytes_z,
                     &diagnostics,
                     .{},
@@ -55,6 +72,7 @@ pub fn main(init: std.process.Init) !void {
                     }
                     return e;
                 };
+                (try manifests.addOne(init.arena.allocator())).* = manifest;
                 std.debug.print("{}\n", .{manifest});
 
                 std.debug.print("{s}\n", .{extension});
@@ -69,26 +87,25 @@ pub fn main(init: std.process.Init) !void {
     const file = try output_dir.createFile(io, "index", .{});
     defer file.close(io);
     var writer = file.writer(io, &buffer);
-    try writer.interface.writeInt(u32, 123, .little);
+    try writer.interface.writeInt(u32, @intCast(manifests.len), .little);
+    for (0..manifests.len) |i| {
+        const manifest = manifests.get(i);
+        std.debug.print("{}\n", .{manifest});
+        for (manifest.assets) |asset| {
+            const uuid: Uuid = try .parse(asset.uuid);
+            try writer.interface.writeInt(u128, uuid.bits, .little);
+            // if in buckets: bucket, offset, size
+            // if not: content hash (== filename)
+            // block the asset is in, or maxint if not in block
+            try writer.interface.writeInt(u32, std.math.maxInt(u32), .little);
+        }
+    }
     try writer.interface.flush();
 
     const uuid: Uuid = .random(io, rand);
-    const uuid_str = uuid.stringify();
-    std.debug.print("{s}\n  {}\n  {}\n", .{
-        uuid_str,
-        uuid,
-        try Uuid.parse(&uuid_str),
-    });
-    std.debug.print("  {s}\n    {}\n    {}\n  {s}\n    {}\n    {}\n  {s}\n    {}\n    {}\n", .{
-        &uuid.child("walk").stringify(),
-        uuid.child("walk"),
-        uuid.child("walk"),
-        &uuid.child("albedo").stringify(),
-        uuid.child("albedo"),
-        uuid.child("albedo"),
+    std.debug.print("{s}\n{s}\n", .{
+        &uuid.stringify(),
         &uuid.child("").stringify(),
-        uuid.child(""),
-        uuid.child(""),
     });
 }
 
@@ -99,6 +116,7 @@ const Config = union(enum) {
 const Asset = struct {
     uuid: []const u8,
     config: Config,
+    name: []const u8 = "",
 };
 
 const Manifest = struct {
@@ -115,10 +133,6 @@ fn processTxt(
     filename: []const u8,
 ) !void {
     _ = arena;
-    // std.debug.print("{}\n", .{input_dir});
-    // std.debug.print("{s}\n", .{filename});
-    // std.debug.print("{}\n", .{output_dir});
-    // std.debug.print("{s}\n", .{manifest.assets[0].uuid});
-    // _ = io;
+
     try std.Io.Dir.copyFile(input_dir, filename, output_dir, manifest.assets[0].uuid, io, .{});
 }
