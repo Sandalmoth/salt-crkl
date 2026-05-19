@@ -49,7 +49,7 @@ pub fn List(comptime T: type) type {
 
         /// returnss element index from the list
         /// asserts that index is in range
-        pub fn get(self: anytype, index: usize) T {
+        pub fn get(self: Self, index: usize) T {
             std.debug.assert(index < @atomicLoad(usize, &self.len, .acquire));
             const shelf_index = shelfIndex(index);
             const box_index = boxIndex(index, shelf_index);
@@ -60,7 +60,7 @@ pub fn List(comptime T: type) type {
 
         /// returns a pointer to element index from the list
         /// asserts that index is in range
-        pub fn getPtr(self: anytype, index: usize) *T {
+        pub fn getPtr(self: *Self, index: usize) *T {
             std.debug.assert(index < @atomicLoad(usize, &self.len, .acquire));
             const shelf_index = shelfIndex(index);
             const box_index = boxIndex(index, shelf_index);
@@ -235,7 +235,7 @@ pub fn Map(comptime K: type, comptime V: type, comptime Context: type) type {
             }
         }
 
-        pub fn get(map: Map, key: K) ?V {
+        pub fn get(map: Self, key: K) ?V {
             var walk: *?*Node = &map.root;
             var hash = map.ctx.hash(key);
             while (true) : (hash <<= 2) {
@@ -248,7 +248,7 @@ pub fn Map(comptime K: type, comptime V: type, comptime Context: type) type {
         }
 
         /// updates using the ptr are not synchronized
-        pub fn getPtr(map: *Map, key: K) ?*V {
+        pub fn getPtr(map: *Self, key: K) ?*V {
             var walk: *?*Node = &map.root;
             var hash = map.ctx.hash(key);
             while (true) : (hash <<= 2) {

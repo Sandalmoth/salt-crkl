@@ -7,7 +7,8 @@ const log = std.log.scoped(.spiral);
 
 const Uuid = @import("Uuid.zig");
 
-var manifests: arenautils.List(Manifest) = .empty;
+var permanent_arena: std.mem.Allocator = undefined;
+var manifests: arenautils.AutoMap(Uuid, u128) = .init();
 var content_hashes: arenautils.AutoMap(u128, struct {}) = .init();
 
 // iterate the raw dir
@@ -26,6 +27,7 @@ var content_hashes: arenautils.AutoMap(u128, struct {}) = .init();
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
+    permanent_arena = init.arena.allocator();
 
     var seed: u64 = undefined;
     io.random(std.mem.asBytes(&seed));
@@ -60,7 +62,7 @@ pub fn main(init: std.process.Init) !void {
                 // note that the manifests go on the permanent arena
                 const manifest = std.zon.parse.fromSliceAlloc(
                     Manifest,
-                    init.arena.allocator(),
+                    permanent_arena,
                     manifest_bytes_z,
                     &diagnostics,
                     .{},
@@ -72,7 +74,6 @@ pub fn main(init: std.process.Init) !void {
                     }
                     return e;
                 };
-                (try manifests.addOne(init.arena.allocator())).* = manifest;
                 std.debug.print("{}\n", .{manifest});
 
                 std.debug.print("{s}\n", .{extension});
@@ -87,19 +88,19 @@ pub fn main(init: std.process.Init) !void {
     const file = try output_dir.createFile(io, "index", .{});
     defer file.close(io);
     var writer = file.writer(io, &buffer);
-    try writer.interface.writeInt(u32, @intCast(manifests.len), .little);
-    for (0..manifests.len) |i| {
-        const manifest = manifests.get(i);
-        std.debug.print("{}\n", .{manifest});
-        for (manifest.assets) |asset| {
-            const uuid: Uuid = try .parse(asset.uuid);
-            try writer.interface.writeInt(u128, uuid.bits, .little);
-            // if in buckets: bucket, offset, size
-            // if not: content hash (== filename)
-            // block the asset is in, or maxint if not in block
-            try writer.interface.writeInt(u32, std.math.maxInt(u32), .little);
-        }
-    }
+    // try writer.interface.writeInt(u32, @intCast(manifests.len), .little);
+    // for (0..manifests.len) |i| {
+    //     const manifest = manifests.get(i);
+    //     std.debug.print("{}\n", .{manifest});
+    //     for (manifest.assets) |asset| {
+    //         const uuid: Uuid = try .parse(asset.uuid);
+    //         try writer.interface.writeInt(u128, uuid.bits, .little);
+    //         // if in buckets: bucket, offset, size
+    //         // if not: content hash (== filename)
+    //         // block the asset is in, or maxint if not in block
+    //         try writer.interface.writeInt(u32, std.math.maxInt(u32), .little);
+    //     }
+    // }
     try writer.interface.flush();
 
     const uuid: Uuid = .random(io, rand);
@@ -116,23 +117,80 @@ const Config = union(enum) {
 const Asset = struct {
     uuid: []const u8,
     config: Config,
-    name: []const u8 = "",
+    name: []const u8,
 };
 
 const Manifest = struct {
     uuid: []const u8,
-    assets: []Asset,
+    assets: []const Asset,
 };
+
+// so, the manifest should be able to work from just the root uuid and nothing more
+// and then we let the process function identify subassets and complete/update the list
+// when we run add, we just always try to process the file also to build the manifest
 
 fn processTxt(
     arena: std.mem.Allocator,
     io: std.Io,
     output_dir: std.Io.Dir,
-    manifest: Manifest,
+    old_manifest: Manifest,
     input_dir: std.Io.Dir,
     filename: []const u8,
 ) !void {
     _ = arena;
+    std.debug.assert(old_manifest.assets.len <= 1);
 
-    try std.Io.Dir.copyFile(input_dir, filename, output_dir, manifest.assets[0].uuid, io, .{});
+    // txt has no config, so just regenerate the asset list and proceed
+    const uuid: Uuid = try .parse(old_manifest.uuid);
+    const child_uuid = uuid.child("");
+    const child_uuid_str = child_uuid.stringify();
+    const new_manifest: Manifest = .{
+        .uuid = old_manifest.uuid,
+        .assets = &.{
+            .{ .uuid = &child_uuid_str, .config = .{ .txt = {} }, .name = "" },
+        },
+    };
+    if (old_manifest.assets.len > 0) {
+        std.debug.assert(old_manifest.assets[0].config == .txt);
+        std.debug.assert(std.mem.eql(u8, old_manifest.assets[0].uuid, new_manifest.assets[0].uuid));
+    }
+
+    var buffer: [16 * 1024]u8 = undefined;
+
+    // read file and produce content hash
+    const input_file = try input_dir.openFile(io, filename, .{});
+    var reader = input_file.reader(io, &buffer);
+    var content_hasher_a = std.hash.XxHash3.init(0xc22cc9d473e8e35b);
+    var content_hasher_b = std.hash.XxHash3.init(0xa4e5461484c572b1);
+    while (true) {
+        reader.interface.fillMore() catch |e| {
+            if (e == error.EndOfStream) break;
+            return e;
+        };
+        const buffered = reader.interface.buffered();
+        content_hasher_a.update(buffered);
+        content_hasher_b.update(buffered);
+        reader.interface.tossBuffered();
+    }
+    const hash_a: u128 = content_hasher_a.final();
+    const hash_b: u128 = content_hasher_b.final();
+    const content_hash: u128 = hash_a << 64 | hash_b;
+    var content_hash_str: [32]u8 = undefined;
+    _ = std.fmt.bufPrint(&content_hash_str, "{x}", .{content_hash}) catch unreachable;
+    std.debug.print("{s}\n", .{content_hash_str});
+
+    try std.Io.Dir.copyFile(input_dir, filename, output_dir, &content_hash_str, io, .{});
+
+    var manifest_filename_str: [128]u8 = undefined;
+    const output_file = try input_dir.createFile(io, try std.fmt.bufPrint(
+        &manifest_filename_str,
+        "{s}.manifest.zon",
+        .{filename},
+    ), .{});
+    defer output_file.close(io);
+    var writer = output_file.writer(io, &buffer);
+    try std.zon.stringify.serialize(new_manifest, .{}, &writer.interface);
+    try writer.flush();
+
+    _ = try manifests.put(permanent_arena, child_uuid, content_hash);
 }
