@@ -8,8 +8,8 @@ const log = std.log.scoped(.spiral);
 const Uuid = @import("Uuid.zig");
 
 var permanent_arena: std.mem.Allocator = undefined;
-var manifests: arenautils.AutoMap(Uuid, u128) = .init();
-var content_hashes: arenautils.AutoMap(u128, struct {}) = .init();
+var assets: arenautils.AutoMap(Uuid, u128) = .init();
+// var content_hashes: arenautils.AutoMap(u128, struct {}) = .init();
 
 // iterate the raw dir
 // for each manifest
@@ -47,6 +47,8 @@ pub fn main(init: std.process.Init) !void {
         _ = arena_impl.reset(.retain_capacity);
         switch (entry.kind) {
             .file => {
+                var buffer: [16 * 1024]u8 = undefined;
+
                 if (!std.mem.endsWith(u8, entry.basename, ".manifest.zon")) continue;
                 std.debug.print("file {s} {s}\n", .{ entry.basename, entry.path });
                 const filename = entry.basename[0 .. entry.basename.len - 13];
@@ -56,13 +58,12 @@ pub fn main(init: std.process.Init) !void {
                 const manifest_bytes =
                     try entry.dir.readFileAlloc(io, entry.basename, arena, .limited(1024 * 1024));
                 const manifest_bytes_z =
-                    try std.mem.concatWithSentinel(arena, u8, &.{manifest_bytes}, 0);
+                    try std.mem.concatWithSentinel(arena, u8, &.{manifest_bytes}, 0); // silly
                 std.debug.print("{s}\n", .{manifest_bytes_z});
                 var diagnostics: std.zon.parse.Diagnostics = .{};
-                // note that the manifests go on the permanent arena
                 const manifest = std.zon.parse.fromSliceAlloc(
                     Manifest,
-                    permanent_arena,
+                    arena,
                     manifest_bytes_z,
                     &diagnostics,
                     .{},
@@ -75,10 +76,18 @@ pub fn main(init: std.process.Init) !void {
                     return e;
                 };
                 std.debug.print("{}\n", .{manifest});
+                const new_manifest = if (std.mem.eql(u8, extension, ".txt"))
+                    try processTxt(arena, io, output_dir, manifest, entry.dir, filename)
+                else blk: {
+                    log.err("unknown file extension {s} for {s}", .{ extension, entry.path });
+                    break :blk manifest; // don't overwrite if unknown
+                };
 
-                std.debug.print("{s}\n", .{extension});
-                if (std.mem.eql(u8, extension, ".txt"))
-                    try processTxt(arena, io, output_dir, manifest, entry.dir, filename);
+                const output_file = try entry.dir.createFile(io, entry.basename, .{}); // overwrite
+                defer output_file.close(io);
+                var writer = output_file.writer(io, &buffer);
+                try std.zon.stringify.serialize(new_manifest, .{}, &writer.interface);
+                try writer.flush();
             },
             else => continue,
         }
@@ -136,18 +145,20 @@ fn processTxt(
     old_manifest: Manifest,
     input_dir: std.Io.Dir,
     filename: []const u8,
-) !void {
-    _ = arena;
+) !Manifest {
     std.debug.assert(old_manifest.assets.len <= 1);
 
     // txt has no config, so just regenerate the asset list and proceed
     const uuid: Uuid = try .parse(old_manifest.uuid);
     const child_uuid = uuid.child("");
-    const child_uuid_str = child_uuid.stringify();
     const new_manifest: Manifest = .{
         .uuid = old_manifest.uuid,
         .assets = &.{
-            .{ .uuid = &child_uuid_str, .config = .{ .txt = {} }, .name = "" },
+            .{
+                .uuid = try arena.dupe(u8, &child_uuid.stringify()),
+                .config = .{ .txt = {} },
+                .name = "",
+            },
         },
     };
     if (old_manifest.assets.len > 0) {
@@ -181,16 +192,6 @@ fn processTxt(
 
     try std.Io.Dir.copyFile(input_dir, filename, output_dir, &content_hash_str, io, .{});
 
-    var manifest_filename_str: [128]u8 = undefined;
-    const output_file = try input_dir.createFile(io, try std.fmt.bufPrint(
-        &manifest_filename_str,
-        "{s}.manifest.zon",
-        .{filename},
-    ), .{});
-    defer output_file.close(io);
-    var writer = output_file.writer(io, &buffer);
-    try std.zon.stringify.serialize(new_manifest, .{}, &writer.interface);
-    try writer.flush();
-
-    _ = try manifests.put(permanent_arena, child_uuid, content_hash);
+    _ = try assets.put(permanent_arena, child_uuid, content_hash);
+    return new_manifest;
 }

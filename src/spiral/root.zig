@@ -38,7 +38,7 @@ const Storage = struct {
             ix_page: usize,
             offset: usize,
         },
-        file: void,
+        file: u128,
     }),
     buckets: []std.Io.File,
 
