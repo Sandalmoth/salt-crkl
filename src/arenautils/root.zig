@@ -259,6 +259,44 @@ pub fn Map(comptime K: type, comptime V: type, comptime Context: type) type {
                 walk = &node.children[hash >> 62];
             }
         }
+
+        pub const Iterator = struct {
+            const Queue = struct {
+                node: *Node,
+                next: ?*Queue,
+            };
+
+            arena: std.mem.Allocator,
+            queue: ?*Queue,
+
+            pub fn next(
+                it: *Iterator,
+            ) !?struct { key: K, value_ptr: *V } {
+                if (it.queue) |queue| {
+                    it.queue = queue.next;
+                    for (0..4) |i| {
+                        if (queue.node.children[i] == null) continue;
+                        const child = try it.arena.create(Queue);
+                        child.* = .{ .node = queue.node.children[i].?, .next = it.queue };
+                        it.queue = child;
+                    }
+                    return .{
+                        .key = queue.node.key,
+                        .value_ptr = &queue.node.value,
+                    };
+                }
+                return null;
+            }
+        };
+
+        pub fn iterator(map: *Self, arena: std.mem.Allocator) !Iterator {
+            if (map.root) |root| {
+                const queue = try arena.create(Iterator.Queue);
+                queue.* = .{ .node = root, .next = null };
+                return .{ .arena = arena, .queue = queue };
+            }
+            return .{ .arena = arena, .queue = null };
+        }
     };
 }
 

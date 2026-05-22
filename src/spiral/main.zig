@@ -93,6 +93,8 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    _ = arena_impl.reset(.retain_capacity);
+
     var buffer: [16 * 1024]u8 = undefined;
     const file = try output_dir.createFile(io, "index", .{});
     defer file.close(io);
@@ -110,6 +112,12 @@ pub fn main(init: std.process.Init) !void {
     //         try writer.interface.writeInt(u32, std.math.maxInt(u32), .little);
     //     }
     // }
+    var it_assets = try assets.iterator(arena);
+    while (try it_assets.next()) |kv| {
+        const uuid = kv.key;
+        const content_hash = kv.value_ptr.*;
+        std.debug.print("{s} -> {x}\n", .{ &uuid.stringify(), content_hash });
+    }
     try writer.interface.flush();
 
     const uuid: Uuid = .random(io, rand);
