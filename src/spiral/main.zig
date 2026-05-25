@@ -7,8 +7,14 @@ const log = std.log.scoped(.spiral);
 
 const Uuid = @import("Uuid.zig");
 
+const AssetInfo = struct {
+    content_hash: u128,
+    destination: enum { bucket, preload },
+    size: u64,
+};
+
 var permanent_arena: std.mem.Allocator = undefined;
-var assets: arenautils.AutoMap(Uuid, u128) = .init();
+var assets: arenautils.AutoMap(Uuid, AssetInfo) = .init();
 // var content_hashes: arenautils.AutoMap(u128, struct {}) = .init();
 
 // iterate the raw dir
@@ -113,10 +119,18 @@ pub fn main(init: std.process.Init) !void {
     //     }
     // }
     var it_assets = try assets.iterator(arena);
+    // write index consisting of
+    //
     while (try it_assets.next()) |kv| {
         const uuid = kv.key;
-        const content_hash = kv.value_ptr.*;
-        std.debug.print("{s} -> {x}\n", .{ &uuid.stringify(), content_hash });
+        const asset_info = kv.value_ptr.*;
+        std.debug.print("{s} -> {}\n", .{ &uuid.stringify(), asset_info });
+        try writer.interface.writeInt(u128, uuid.bits, .little);
+        try (spiral.Storage.Location{
+            .size = asset_info.size,
+            .location = .{ .file = asset_info.content_hash },
+        }).serialize(&writer.interface);
+        // try writer.interface.writeInt(u64, settings, .little);
     }
     try writer.interface.flush();
 
@@ -181,12 +195,14 @@ fn processTxt(
     var reader = input_file.reader(io, &buffer);
     var content_hasher_a = std.hash.XxHash3.init(0xc22cc9d473e8e35b);
     var content_hasher_b = std.hash.XxHash3.init(0xa4e5461484c572b1);
+    var size: u64 = 0;
     while (true) {
         reader.interface.fillMore() catch |e| {
             if (e == error.EndOfStream) break;
             return e;
         };
         const buffered = reader.interface.buffered();
+        size += buffered.len;
         content_hasher_a.update(buffered);
         content_hasher_b.update(buffered);
         reader.interface.tossBuffered();
@@ -198,8 +214,15 @@ fn processTxt(
     _ = std.fmt.bufPrint(&content_hash_str, "{x}", .{content_hash}) catch unreachable;
     std.debug.print("{s}\n", .{content_hash_str});
 
+    _ = try assets.put(permanent_arena, child_uuid, .{
+        .content_hash = content_hash,
+        .destination = .bucket,
+        .size = size,
+    });
+
+    // for simple files with no processing, i think we might as well always copy
+    // but in principle, if a file with the hash is already present then we should do nothing
     try std.Io.Dir.copyFile(input_dir, filename, output_dir, &content_hash_str, io, .{});
 
-    _ = try assets.put(permanent_arena, child_uuid, content_hash);
     return new_manifest;
 }

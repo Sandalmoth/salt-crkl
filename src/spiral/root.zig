@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const Storage = struct {
+pub const Storage = struct {
     const Signal = struct {
         event: ?*std.Io.Event,
         future: std.Io.Future(void),
@@ -24,6 +24,62 @@ const Storage = struct {
         deleted: u128,
     };
 
+    pub const Location = struct {
+        size: u64, // size of the (decompressed) asset
+        location: union(enum) {
+            bucket: struct {
+                index: u64,
+                offset: u64,
+                size: u64, // (maybe compressed) size in the bucket
+                compressed: bool,
+            },
+            file: u128, // content hash, hex string is filename
+            preload: struct {
+                offset: u64,
+            },
+        },
+
+        const Flags = packed struct(u32) {
+            compressed: bool = false,
+            in_bucket: bool = false,
+            in_file: bool = false,
+            in_preload: bool = false,
+            _pad: u28 = 0,
+        };
+
+        pub fn serialize(location: Location, writer: *std.Io.Writer) !void {
+            var flags: Flags = .{};
+            switch (location.location) {
+                .bucket => |bucket| {
+                    flags.in_bucket = true;
+                    flags.compressed = bucket.compressed;
+                },
+                .file => |file| {
+                    _ = file;
+                    flags.in_file = true;
+                },
+                .preload => |preload| {
+                    _ = preload;
+                },
+            }
+            try writer.writeInt(u32, @bitCast(flags), .little);
+            try writer.writeInt(u64, location.size, .little);
+            switch (location.location) {
+                .bucket => |bucket| {
+                    try writer.writeInt(u64, bucket.index, .little);
+                    try writer.writeInt(u64, bucket.offset, .little);
+                    try writer.writeInt(u64, bucket.size, .little);
+                },
+                .file => |file| {
+                    try writer.writeInt(u128, file, .little);
+                },
+                .preload => |preload| {
+                    try writer.writeInt(u64, preload.offset, .little);
+                },
+            }
+        }
+    };
+
     gpa: std.mem.Allocator,
     io: std.Io,
     dir: std.Io.Dir,
@@ -33,12 +89,15 @@ const Storage = struct {
     buffer_memory_memory: [][]u8, // god fucking damnit
     buffers: std.Io.Queue([]u8),
 
-    index: std.AutoHashMap(u128, union(enum) {
-        page: struct {
-            ix_page: usize,
-            offset: usize,
+    index: std.AutoHashMap(u128, struct {
+        size: usize,
+        location: union(enum) {
+            page: struct {
+                ix_page: u64,
+                offset: u64,
+            },
+            file: u128,
         },
-        file: u128,
     }),
     buckets: []std.Io.File,
 
