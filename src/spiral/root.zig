@@ -14,7 +14,7 @@ pub const Storage = struct {
             if (self.event) |event| return event.isSet();
             return true;
         }
-        pub fn await(self: @This()) []u8 {
+        pub fn await(self: *@This()) []u8 {
             const result = self.future.await(self.io);
             if (self.event) |event| {
                 DeferredMemoryPool(std.Io.Event).mark(event);
@@ -155,6 +155,11 @@ pub const Storage = struct {
         }
         try buffers.putOne(io, buffer);
 
+        var it = index.iterator();
+        while (it.next()) |kv| std.debug.print("{}\n", .{kv});
+
+        std.debug.print("{}\n", .{index});
+
         return .{
             .gpa = gpa,
             .io = io,
@@ -176,23 +181,23 @@ pub const Storage = struct {
         storage.gpa.free(storage.buffer_memory);
         storage.gpa.free(storage.buffer_memory_memory);
         storage.dir.close(storage.io);
+        storage.event_pool.deinit(storage.gpa);
     }
 
-    pub fn load(storage: *Storage, allocator: std.mem.Allocator, uuid: u128) !Signal {
-        storage.event_pool.sweep(storage.io); // noop if there are free events to use
-        const event = try storage.event_pool.create();
-        errdefer storage.event_pool.destroy(event);
+    pub fn load(storage: *Storage, allocator: std.mem.Allocator, uuid: Uuid) !Signal {
+        try storage.event_pool.sweep(storage.io); // noop if there are free events to use
+        const event = try storage.event_pool.create(storage.gpa, storage.io);
+        errdefer DeferredMemoryPool(std.Io.Event).mark(event);
 
         const location = storage.index.get(uuid) orelse return error.FileNotFound;
         const dst = try allocator.alloc(u8, location.size);
 
-        if (location.location == .preload) {
-            // load right away, avoid potential async overhead
-        }
-
+        // use single threaded io if preloaded, i.e. just run right away since it's already in mem
+        const io = if (location.location == .preload) storage.immediate_io.io() else storage.io;
         return .{
             .event = event,
-            .future = storage.io.async(loadImpl, .{ storage, uuid, dst, event }),
+            .future = io.async(loadImpl, .{ storage, uuid, dst, event }),
+            .io = io,
         };
     }
 
@@ -201,17 +206,30 @@ pub const Storage = struct {
         return null;
     }
 
-    fn loadImpl(storage: *Storage, uuid: 128, dst: []u8, event: *std.Io.Event) []u8 {
+    fn loadImpl(storage: *Storage, uuid: Uuid, dst: []u8, event: *std.Io.Event) []u8 {
         _ = storage;
         _ = uuid;
-        _ = dst;
         _ = event;
+        return dst;
     }
 };
 
 test "Storage" {
     var s: Storage = try .init(std.testing.allocator, std.testing.io, "data");
-    s.deinit(); // kinda silly to need try, but, i guess we can always fail to wait?
+    defer s.deinit();
+
+    std.debug.print("{}\n", .{s.index});
+    var it = s.index.iterator();
+    while (it.next()) |kv| std.debug.print("{}\n", .{kv});
+
+    var a_future = (try s.load(
+        std.testing.allocator,
+        try .parse("603HK0R1ZP89REPQDG25GGYSTW"),
+    ));
+    const a = a_future.await();
+    defer std.testing.allocator.free(a);
+
+    std.debug.print("{s}\n", .{a});
 }
 
 pub fn DeferredMemoryPool(comptime T: type) type {
@@ -236,7 +254,7 @@ pub fn DeferredMemoryPool(comptime T: type) type {
         const empty = Self{ .mutex = .init, .segments = null, .free_list = null };
 
         pub fn create(pool: *Self, gpa: std.mem.Allocator, io: std.Io) !*T {
-            pool.mutex.lock(io);
+            try pool.mutex.lock(io);
             defer pool.mutex.unlock(io);
 
             if (pool.free_list) |node| {
@@ -278,18 +296,18 @@ pub fn DeferredMemoryPool(comptime T: type) type {
             var walk: ?*Segment = pool.segments;
             while (walk) |segment| {
                 walk = segment.next;
-                gpa.free(segment.nodex);
+                gpa.free(segment.nodes);
                 gpa.destroy(segment);
             }
         }
 
         pub fn mark(value: *T) void {
-            const node: *Node = @fieldParentPtr("value", value);
+            const node: *Node = @alignCast(@fieldParentPtr("value", value));
             node.flag = true;
         }
 
-        pub fn sweep(pool: *Self, io: std.Io) void {
-            pool.mutex.lock(io);
+        pub fn sweep(pool: *Self, io: std.Io) !void {
+            try pool.mutex.lock(io);
             defer pool.mutex.unlock(io);
 
             if (pool.free_list) |_| return; // only sweep if we actually are out of free slots
