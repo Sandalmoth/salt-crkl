@@ -3,7 +3,7 @@ const std = @import("std");
 
 const spiral = @import("root.zig");
 
-const log = std.log.scoped(.spiral);
+const log = std.log.scoped(.spiral_cli);
 
 const Uuid = @import("Uuid.zig");
 
@@ -105,22 +105,13 @@ pub fn main(init: std.process.Init) !void {
     const file = try output_dir.createFile(io, "index", .{});
     defer file.close(io);
     var writer = file.writer(io, &buffer);
-    // try writer.interface.writeInt(u32, @intCast(manifests.len), .little);
-    // for (0..manifests.len) |i| {
-    //     const manifest = manifests.get(i);
-    //     std.debug.print("{}\n", .{manifest});
-    //     for (manifest.assets) |asset| {
-    //         const uuid: Uuid = try .parse(asset.uuid);
-    //         try writer.interface.writeInt(u128, uuid.bits, .little);
-    //         // if in buckets: bucket, offset, size
-    //         // if not: content hash (== filename)
-    //         // block the asset is in, or maxint if not in block
-    //         try writer.interface.writeInt(u32, std.math.maxInt(u32), .little);
-    //     }
-    // }
+
+    var asset_count: u32 = 0;
     var it_assets = try assets.iterator(arena);
-    // write index consisting of
-    //
+    while (try it_assets.next()) |_| asset_count += 1;
+    try writer.interface.writeInt(u32, asset_count, .little);
+
+    it_assets = try assets.iterator(arena);
     while (try it_assets.next()) |kv| {
         const uuid = kv.key;
         const asset_info = kv.value_ptr.*;
@@ -130,9 +121,11 @@ pub fn main(init: std.process.Init) !void {
             .size = asset_info.size,
             .location = .{ .file = asset_info.content_hash },
         }).serialize(&writer.interface);
-        // try writer.interface.writeInt(u64, settings, .little);
     }
     try writer.interface.flush();
+
+    const preload_file = try output_dir.createFile(io, "preload", .{});
+    defer preload_file.close(io);
 
     const uuid: Uuid = .random(io, rand);
     std.debug.print("{s}\n{s}\n", .{
