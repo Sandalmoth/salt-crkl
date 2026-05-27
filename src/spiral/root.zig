@@ -189,21 +189,34 @@ pub const Storage = struct {
     }
 
     pub fn load(storage: *Storage, allocator: std.mem.Allocator, uuid: Uuid) !Signal {
-        try storage.event_pool.sweep(storage.io); // noop if there are free events to use
-        const event = try storage.event_pool.create(storage.gpa, storage.io);
-        event.reset();
-        errdefer DeferredMemoryPool(std.Io.Event).mark(event);
-
-        const location = storage.index.get(uuid) orelse return error.FileNotFound;
+        const location = storage.index.get(uuid) orelse return error.Invalid;
         const dst = try allocator.alloc(u8, location.size);
+        errdefer allocator.free(dst);
 
-        // use single threaded io if preloaded, i.e. just run right away since it's already in mem
-        const io = if (location.location == .preload) storage.immediate_io.io() else storage.io;
-        return .{
-            .event = event,
-            .future = io.async(loadImpl, .{ storage, location, dst, event }),
-            .io = io,
-        };
+        if (location.location == .preload) {
+            // use single threaded io if preloaded, i.e. just run right away since it's already in mem
+            const io = storage.immediate_io.io();
+            return .{
+                .event = null,
+                .future = io.async(loadImpl, .{ storage, location, dst, null }),
+                .io = io,
+            };
+        } else {
+            try storage.event_pool.sweep(storage.io); // noop if there are free events to use
+            const event = try storage.event_pool.create(storage.gpa, storage.io);
+            event.reset();
+            errdefer DeferredMemoryPool(std.Io.Event).mark(event);
+
+            // use single threaded io if preloaded, i.e. just run right away since it's already in mem
+            const io = storage.io;
+            return .{
+                .event = event,
+                .future = io.async(loadImpl, .{ storage, location, dst, event }),
+                .io = io,
+            };
+        }
+
+        unreachable;
     }
 
     pub fn poll(storage: *Storage) ?Event {
@@ -211,7 +224,7 @@ pub const Storage = struct {
         return null;
     }
 
-    fn loadImpl(storage: *Storage, src: Location, dst: []u8, event: *std.Io.Event) Error![]u8 {
+    fn loadImpl(storage: *Storage, src: Location, dst: []u8, event: ?*std.Io.Event) Error![]u8 {
         switch (src.location) {
             .bucket => {
                 @panic("TODO");
@@ -226,7 +239,8 @@ pub const Storage = struct {
                 @memcpy(dst, storage.preload[preload .. preload + src.size]);
             },
         }
-        event.set(storage.io);
+        if (event != null) event.?.set(storage.io);
+
         return dst;
     }
 };
@@ -243,6 +257,9 @@ test "Storage" {
         std.testing.allocator,
         try .parse("603HK0R1ZP89REPQDG25GGYSTW"),
     );
+    // std.debug.print("{?}\n", .{a_future.event});
+    // try std.Io.sleep(std.testing.io, .fromMilliseconds(100), .real);
+    // std.debug.print("{?}\n", .{a_future.event});
     const a = try a_future.await();
     defer std.testing.allocator.free(a);
     std.debug.print("{s}\n", .{a});
