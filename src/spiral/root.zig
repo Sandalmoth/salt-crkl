@@ -4,18 +4,22 @@ const Uuid = @import("Uuid.zig");
 
 const log = std.log.scoped(.spiral);
 
+const Error = error{
+    FileNotFound,
+};
+
 pub const Storage = struct {
     const Signal = struct {
         event: ?*std.Io.Event,
-        future: std.Io.Future([]u8),
+        future: std.Io.Future(Error![]u8),
         io: std.Io,
 
         pub fn poll(self: @This()) bool {
             if (self.event) |event| return event.isSet();
             return true;
         }
-        pub fn await(self: *@This()) []u8 {
-            const result = self.future.await(self.io);
+        pub fn await(self: *@This()) ![]u8 {
+            const result = try self.future.await(self.io);
             if (self.event) |event| {
                 DeferredMemoryPool(std.Io.Event).mark(event);
                 self.event = null;
@@ -25,9 +29,9 @@ pub const Storage = struct {
     };
 
     const Event = union(enum) {
-        created: u128,
-        altered: u128,
-        deleted: u128,
+        created: Uuid,
+        altered: Uuid,
+        deleted: Uuid,
     };
 
     pub const Location = struct {
@@ -187,6 +191,7 @@ pub const Storage = struct {
     pub fn load(storage: *Storage, allocator: std.mem.Allocator, uuid: Uuid) !Signal {
         try storage.event_pool.sweep(storage.io); // noop if there are free events to use
         const event = try storage.event_pool.create(storage.gpa, storage.io);
+        event.reset();
         errdefer DeferredMemoryPool(std.Io.Event).mark(event);
 
         const location = storage.index.get(uuid) orelse return error.FileNotFound;
@@ -196,7 +201,7 @@ pub const Storage = struct {
         const io = if (location.location == .preload) storage.immediate_io.io() else storage.io;
         return .{
             .event = event,
-            .future = io.async(loadImpl, .{ storage, uuid, dst, event }),
+            .future = io.async(loadImpl, .{ storage, location, dst, event }),
             .io = io,
         };
     }
@@ -206,10 +211,22 @@ pub const Storage = struct {
         return null;
     }
 
-    fn loadImpl(storage: *Storage, uuid: Uuid, dst: []u8, event: *std.Io.Event) []u8 {
-        _ = storage;
-        _ = uuid;
-        _ = event;
+    fn loadImpl(storage: *Storage, src: Location, dst: []u8, event: *std.Io.Event) Error![]u8 {
+        switch (src.location) {
+            .bucket => {
+                @panic("TODO");
+            },
+            .file => |file| {
+                var content_hash_str: [32]u8 = undefined;
+                _ = std.fmt.bufPrint(&content_hash_str, "{x}", .{file}) catch unreachable;
+                _ = storage.dir.readFile(storage.io, &content_hash_str, dst) catch
+                    return error.FileNotFound;
+            },
+            .preload => |preload| {
+                @memcpy(dst, storage.preload[preload .. preload + src.size]);
+            },
+        }
+        event.set(storage.io);
         return dst;
     }
 };
@@ -222,14 +239,29 @@ test "Storage" {
     var it = s.index.iterator();
     while (it.next()) |kv| std.debug.print("{}\n", .{kv});
 
-    var a_future = (try s.load(
+    var a_future = try s.load(
         std.testing.allocator,
         try .parse("603HK0R1ZP89REPQDG25GGYSTW"),
-    ));
-    const a = a_future.await();
+    );
+    const a = try a_future.await();
     defer std.testing.allocator.free(a);
-
     std.debug.print("{s}\n", .{a});
+
+    var b_future = try s.load(
+        std.testing.allocator,
+        try .parse("1Y99Z3J6K45HR5S3WZKSVQ51E1"),
+    );
+    const b = try b_future.await();
+    defer std.testing.allocator.free(b);
+    std.debug.print("{s}\n", .{b});
+
+    var c_future = try s.load(
+        std.testing.allocator,
+        try .parse("37BQJ0V3J4RA73SA8QBQH8VY1Z"),
+    );
+    const c = try c_future.await();
+    defer std.testing.allocator.free(c);
+    std.debug.print("{s}\n", .{c});
 }
 
 pub fn DeferredMemoryPool(comptime T: type) type {
