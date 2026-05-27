@@ -123,9 +123,13 @@ pub const Storage = struct {
 
     event_pool: DeferredMemoryPool(std.Io.Event),
 
+    rwlock: std.Io.RwLock,
+
     index: std.AutoHashMapUnmanaged(Uuid, Location),
     buckets: []std.Io.File,
     preload: []const u8,
+
+    last_refresh: std.Io.Timestamp,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !Storage {
         const dir: std.Io.Dir = try .openDir(.cwd(), io, path, .{});
@@ -153,9 +157,11 @@ pub const Storage = struct {
             .io = io,
             .dir = dir,
             .event_pool = .empty,
+            .rwlock = .init,
             .index = index,
             .buckets = &.{},
             .preload = preload,
+            .last_refresh = .now(io, .real),
         };
     }
 
@@ -173,6 +179,9 @@ pub const Storage = struct {
     }
 
     pub fn load(storage: *Storage, allocator: std.mem.Allocator, uuid: Uuid) !Future {
+        try storage.rwlock.lockShared(storage.io);
+        defer storage.rwlock.unlockShared(storage.io);
+
         const location = storage.index.get(uuid) orelse return error.Invalid;
         const dst = try allocator.alloc(u8, location.size);
         errdefer allocator.free(dst);
@@ -180,6 +189,10 @@ pub const Storage = struct {
         if (location.location == .preload) {
             // use single threaded io if preloaded,
             // i.e. just run right away since it's already in mem
+            // NOTE currently we assume that this really will run the io right now on this thread
+            // meaning we're still covered by the rwlock for the execution of the preload read
+            // if that assumption is wrong, preloads could get corrupted memory then
+            // if poll triggers and index + preload reload between index lookup and the read
             const io = storage.immediate_io.io();
             return .{
                 .event = null,
@@ -203,8 +216,43 @@ pub const Storage = struct {
         unreachable;
     }
 
-    pub fn poll(storage: *Storage) ?Event {
-        _ = storage;
+    pub fn poll(storage: *Storage) !?Event {
+        if (storage.last_refresh.untilNow(storage.io, .real).toMilliseconds() > 100) {
+            // check if index or preload file has changed and if so reload them.
+            // TODO check instead of blind reloading
+            try storage.rwlock.lock();
+            defer storage.rwlock.unlock();
+
+            var buffer: [1024]u8 = undefined;
+            const index_file = try storage.dir.openFile(storage.io, "index", .{ .mode = .read_only });
+            var index_reader = index_file.reader(storage.io, &buffer);
+            const asset_count = try index_reader.interface.takeInt(u32, .little);
+            var index: std.AutoHashMapUnmanaged(Uuid, Location) = .empty;
+            try index.ensureTotalCapacity(storage.gpa, @intCast(asset_count));
+            for (0..asset_count) |_| {
+                const uuid: Uuid = .{ .bits = try index_reader.interface.takeInt(u128, .little) };
+                const location: Location = try .deserialize(&index_reader.interface);
+                std.debug.assert(!index.contains(uuid));
+                index.putAssumeCapacity(uuid, location);
+            }
+            errdefer index.deinit(storage.gpa);
+
+            const preload = try storage.dir.readFileAlloc(storage.io, "preload", storage.gpa, .limited(1024 * 1024 * 1024));
+            errdefer storage.gpa.free(preload);
+
+            // TODO somehow generate a list of events here
+
+            storage.gpa.free(storage.preload);
+            storage.index.deinit(storage.gpa);
+
+            storage.index = index;
+            storage.preload = preload;
+
+            storage.last_refresh = .now(storage.io, .real);
+        }
+
+        // TODO then, if there are events, pop one off the list
+
         return null;
     }
 
