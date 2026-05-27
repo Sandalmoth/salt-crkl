@@ -5,11 +5,13 @@ const Uuid = @import("Uuid.zig");
 const log = std.log.scoped(.spiral);
 
 const Error = error{
-    FileNotFound,
+    Bucket,
+    File,
+    Preload,
 };
 
 pub const Storage = struct {
-    const Signal = struct {
+    const Future = struct {
         event: ?*std.Io.Event,
         future: std.Io.Future(Error![]u8),
         io: std.Io,
@@ -71,7 +73,6 @@ pub const Storage = struct {
                     flags.in_preload = true;
                 },
             }
-            std.debug.print("flags: {}\n", .{flags});
             try writer.writeInt(u32, @bitCast(flags), .little);
             try writer.writeInt(u64, location.size, .little);
             switch (location.location) {
@@ -91,7 +92,6 @@ pub const Storage = struct {
 
         pub fn deserialize(reader: *std.Io.Reader) !Location {
             const flags: Flags = @bitCast(try reader.takeInt(u32, .little));
-            std.debug.print("flags: {}\n", .{flags});
             var location: Location = undefined;
             location.size = try reader.takeInt(u64, .little);
             if (flags.in_bucket) {
@@ -118,13 +118,10 @@ pub const Storage = struct {
 
     gpa: std.mem.Allocator,
     io: std.Io,
-    immediate_io: std.Io.Threaded = .init_single_threaded, // used to unify signal interface
+    immediate_io: std.Io.Threaded = .init_single_threaded, // used to unify future interface
     dir: std.Io.Dir,
 
     event_pool: DeferredMemoryPool(std.Io.Event),
-    buffer_memory: []u8,
-    buffer_memory_memory: [][]u8, // god fucking damnit
-    buffers: std.Io.Queue([]u8),
 
     index: std.AutoHashMapUnmanaged(Uuid, Location),
     buckets: []std.Io.File,
@@ -134,67 +131,55 @@ pub const Storage = struct {
         const dir: std.Io.Dir = try .openDir(.cwd(), io, path, .{});
         errdefer dir.close(io);
 
-        // memory buffers for readers to use. just pop it off the queue and return it after
-        const buffer_memory = try gpa.alloc(u8, 32 * 64 * 1024);
-        const buffer_memory_memory = try gpa.alloc([]u8, 32);
-        errdefer gpa.free(buffer_memory);
-        var buffers: std.Io.Queue([]u8) = .init(buffer_memory_memory);
-        for (0..32) |i| {
-            try buffers.putOne(io, buffer_memory[i * 32 * 1024 .. (i + 1) * 32 * 1024]);
-        }
-
-        const buffer = try buffers.getOne(io);
+        var buffer: [1024]u8 = undefined;
         const index_file = try dir.openFile(io, "index", .{ .mode = .read_only });
-        var index_reader = index_file.reader(io, buffer);
+        var index_reader = index_file.reader(io, &buffer);
         const asset_count = try index_reader.interface.takeInt(u32, .little);
-        std.debug.print("asset_count {}\n", .{asset_count});
         var index: std.AutoHashMapUnmanaged(Uuid, Location) = .empty;
         try index.ensureTotalCapacity(gpa, @intCast(asset_count));
         for (0..asset_count) |_| {
             const uuid: Uuid = .{ .bits = try index_reader.interface.takeInt(u128, .little) };
             const location: Location = try .deserialize(&index_reader.interface);
-            std.debug.print("{s} {}\n", .{ &uuid.stringify(), location });
             std.debug.assert(!index.contains(uuid));
             index.putAssumeCapacity(uuid, location);
         }
-        try buffers.putOne(io, buffer);
+        errdefer index.deinit(gpa);
 
-        var it = index.iterator();
-        while (it.next()) |kv| std.debug.print("{}\n", .{kv});
-
-        std.debug.print("{}\n", .{index});
+        const preload = try dir.readFileAlloc(io, "preload", gpa, .limited(1024 * 1024 * 1024));
+        errdefer gpa.free(preload);
 
         return .{
             .gpa = gpa,
             .io = io,
             .dir = dir,
             .event_pool = .empty,
-            .buffer_memory = buffer_memory,
-            .buffer_memory_memory = buffer_memory_memory,
-            .buffers = buffers,
             .index = index,
             .buckets = &.{},
-            .preload = try dir.readFileAlloc(io, "preload", gpa, .limited(1024 * 1024 * 1024)),
+            .preload = preload,
         };
     }
 
     pub fn deinit(storage: *Storage) void {
-        // FIXME? shoudl we wait for outstanding tasks or something?
+        // Q: should we wait for outstanding tasks or something?
+        // i guess ideally we should request cancellation of every load
+        // otherwise, could be a problem if we close the dir or deinit the event i think
+        // but seems kinda annoying to track, and shouldn't really be a problem
+        // and besides, i think it's also illegal to deinit an io without awaiting everything
+        // so like, we're not adding an extra complication in this case
         storage.gpa.free(storage.preload);
         storage.index.deinit(storage.gpa);
-        storage.gpa.free(storage.buffer_memory);
-        storage.gpa.free(storage.buffer_memory_memory);
         storage.dir.close(storage.io);
         storage.event_pool.deinit(storage.gpa);
     }
 
-    pub fn load(storage: *Storage, allocator: std.mem.Allocator, uuid: Uuid) !Signal {
+    pub fn load(storage: *Storage, allocator: std.mem.Allocator, uuid: Uuid) !Future {
         const location = storage.index.get(uuid) orelse return error.Invalid;
         const dst = try allocator.alloc(u8, location.size);
         errdefer allocator.free(dst);
 
         if (location.location == .preload) {
-            // use single threaded io if preloaded, i.e. just run right away since it's already in mem
+            // use single threaded io if preloaded,
+            // i.e. just run right away since it's already in mem
             const io = storage.immediate_io.io();
             return .{
                 .event = null,
@@ -207,7 +192,6 @@ pub const Storage = struct {
             event.reset();
             errdefer DeferredMemoryPool(std.Io.Event).mark(event);
 
-            // use single threaded io if preloaded, i.e. just run right away since it's already in mem
             const io = storage.io;
             return .{
                 .event = event,
@@ -232,8 +216,10 @@ pub const Storage = struct {
             .file => |file| {
                 var content_hash_str: [32]u8 = undefined;
                 _ = std.fmt.bufPrint(&content_hash_str, "{x}", .{file}) catch unreachable;
-                _ = storage.dir.readFile(storage.io, &content_hash_str, dst) catch
-                    return error.FileNotFound;
+                _ = storage.dir.readFile(storage.io, &content_hash_str, dst) catch |e| {
+                    log.err("failed to load from file {s} with error {}", .{ &content_hash_str, e });
+                    return error.File;
+                };
             },
             .preload => |preload| {
                 @memcpy(dst, storage.preload[preload .. preload + src.size]);
@@ -249,33 +235,27 @@ test "Storage" {
     var s: Storage = try .init(std.testing.allocator, std.testing.io, "data");
     defer s.deinit();
 
-    std.debug.print("{}\n", .{s.index});
-    var it = s.index.iterator();
-    while (it.next()) |kv| std.debug.print("{}\n", .{kv});
-
     var a_future = try s.load(
         std.testing.allocator,
         try .parse("603HK0R1ZP89REPQDG25GGYSTW"),
     );
-    // std.debug.print("{?}\n", .{a_future.event});
-    // try std.Io.sleep(std.testing.io, .fromMilliseconds(100), .real);
-    // std.debug.print("{?}\n", .{a_future.event});
-    const a = try a_future.await();
-    defer std.testing.allocator.free(a);
-    std.debug.print("{s}\n", .{a});
-
     var b_future = try s.load(
         std.testing.allocator,
         try .parse("1Y99Z3J6K45HR5S3WZKSVQ51E1"),
     );
-    const b = try b_future.await();
-    defer std.testing.allocator.free(b);
-    std.debug.print("{s}\n", .{b});
-
     var c_future = try s.load(
         std.testing.allocator,
         try .parse("37BQJ0V3J4RA73SA8QBQH8VY1Z"),
     );
+
+    const a = try a_future.await();
+    defer std.testing.allocator.free(a);
+    std.debug.print("{s}\n", .{a});
+
+    const b = try b_future.await();
+    defer std.testing.allocator.free(b);
+    std.debug.print("{s}\n", .{b});
+
     const c = try c_future.await();
     defer std.testing.allocator.free(c);
     std.debug.print("{s}\n", .{c});
