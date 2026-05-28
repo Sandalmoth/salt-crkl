@@ -83,7 +83,7 @@ pub fn main(init: std.process.Init) !void {
                 };
                 std.debug.print("{}\n", .{manifest});
                 const new_manifest = if (std.mem.eql(u8, extension, ".txt"))
-                    try processTxt(arena, io, output_dir, manifest, entry.dir, filename)
+                    try processTxt(arena, io, entry.dir, output_dir, manifest, filename)
                 else blk: {
                     log.err("unknown file extension {s} for {s}", .{ extension, entry.path });
                     break :blk manifest; // don't overwrite if unknown
@@ -139,6 +139,79 @@ pub fn main(init: std.process.Init) !void {
     });
 }
 
+fn addFile(arena: std.mem.Allocator, io: std.Io, path: []const u8) !void {
+    var seed: u64 = undefined;
+    io.random(std.mem.asBytes(&seed));
+    var rng: std.Random.DefaultPrng = .init(seed);
+    const rand = rng.random();
+
+    const manifest_path = try std.fmt.allocPrint(arena, "{s}.manifest.zon", .{path});
+    const input_dir: std.Io.Dir = try .openDir(std.Io.Dir.cwd(), io, "raw", .{});
+
+    const uuid: Uuid = .random(io, rand);
+    const manifest: Manifest = .{
+        .uuid = &uuid.stringify(),
+        .assets = &.{},
+    };
+    const output_file = try input_dir.createFile(io, manifest_path, .{ .exclusive = true });
+    defer output_file.close(io);
+    var buffer: [1024]u8 = undefined;
+    var writer = output_file.writer(io, &buffer);
+    try std.zon.stringify.serialize(
+        manifest,
+        .{ .emit_default_optional_fields = false },
+        &writer.interface,
+    );
+    try writer.flush();
+
+    log.info("created {s}", .{manifest_path});
+
+    const output_dir: std.Io.Dir = try .openDir(std.Io.Dir.cwd(), io, "raw", .{});
+    try processManifest(arena, io, input_dir, output_dir, manifest_path);
+}
+
+fn processManifest(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    input_dir: std.Io.Dir,
+    output_dir: std.Io.Dir,
+    path: []const u8,
+) !void {
+    std.debug.assert(std.mem.endsWith(u8, path, ".manifest.zon"));
+
+    const bytes = input_dir.readFileAllocOptions(io, path, arena, .limited(1024 * 1024), .@"1", 0);
+    var diagnostics: std.zon.parse.Diagnostics = .{};
+    const old_manifest =
+        std.zon.parse.fromSliceAlloc(Manifest, arena, bytes, &diagnostics, .{}) catch |e| {
+            log.err("failed to parse manifest {s}", .{path});
+            var it = diagnostics.iterateErrors();
+            while (it.next()) |diag| {
+                std.debug.print("  {}\n", .{diag});
+            }
+            return e;
+        };
+
+    const raw_path = path[0 .. path.len - 13];
+    const extension = std.fs.path.extension(raw_path);
+
+    const f = dispatch_table.get(extension) orelse {
+        log.err("cannot parse {s}, unknown extension {s}", .{ raw_path, extension });
+        return;
+    };
+    const new_manifest = try f(arena, io, input_dir, output_dir, old_manifest, raw_path);
+
+    const output_file = try input_dir.createFile(io, path);
+    defer output_file.close(io);
+    var buffer: [1024]u8 = undefined;
+    var writer = output_file.writer(io, &buffer);
+    try std.zon.stringify.serialize(
+        new_manifest,
+        .{ .emit_default_optional_fields = false },
+        &writer.interface,
+    );
+    try writer.flush();
+}
+
 const Config = union(enum) {
     txt,
 };
@@ -156,6 +229,17 @@ const Manifest = struct {
     assets: []Asset,
 };
 
+const dispatch_table: std.StaticStringMap(*const fn (
+    std.mem.Allocator,
+    std.Io,
+    std.Io.Dir,
+    std.Io.Dir,
+    Manifest,
+    []const u8,
+) anyerror!Manifest) = .initComptime(&.{
+    .{ ".txt", processTxt },
+});
+
 // so, the manifest should be able to work from just the root uuid and nothing more
 // and then we let the process function identify subassets and complete/update the list
 // when we run add, we just always try to process the file also to build the manifest
@@ -163,9 +247,9 @@ const Manifest = struct {
 fn processTxt(
     arena: std.mem.Allocator,
     io: std.Io,
+    input_dir: std.Io.Dir,
     output_dir: std.Io.Dir,
     old_manifest: Manifest,
-    input_dir: std.Io.Dir,
     filename: []const u8,
 ) !Manifest {
     std.debug.assert(old_manifest.assets.len <= 1);
