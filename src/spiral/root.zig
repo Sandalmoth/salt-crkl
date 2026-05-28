@@ -189,10 +189,6 @@ pub const Storage = struct {
         if (location.location == .preload) {
             // use single threaded io if preloaded,
             // i.e. just run right away since it's already in mem
-            // NOTE currently we assume that this really will run the io right now on this thread
-            // meaning we're still covered by the rwlock for the execution of the preload read
-            // if that assumption is wrong, preloads could get corrupted memory then
-            // if poll triggers and index + preload reload between index lookup and the read
             const io = storage.immediate_io.io();
             return .{
                 .event = null,
@@ -218,7 +214,9 @@ pub const Storage = struct {
 
     pub fn poll(storage: *Storage) !?Event {
         if (storage.last_refresh.untilNow(storage.io, .real).toMilliseconds() > 100) {
-            // check if index or preload file has changed and if so reload them.
+            // check if index file has changed and if so reload them.
+            // note that hot-reloading always uses the file location
+
             // TODO check instead of blind reloading
             try storage.rwlock.lock();
             defer storage.rwlock.unlock();
@@ -237,17 +235,10 @@ pub const Storage = struct {
             }
             errdefer index.deinit(storage.gpa);
 
-            const preload = try storage.dir.readFileAlloc(storage.io, "preload", storage.gpa, .limited(1024 * 1024 * 1024));
-            errdefer storage.gpa.free(preload);
-
             // TODO somehow generate a list of events here
 
-            storage.gpa.free(storage.preload);
             storage.index.deinit(storage.gpa);
-
             storage.index = index;
-            storage.preload = preload;
-
             storage.last_refresh = .now(storage.io, .real);
         }
 

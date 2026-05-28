@@ -92,7 +92,11 @@ pub fn main(init: std.process.Init) !void {
                 const output_file = try entry.dir.createFile(io, entry.basename, .{}); // overwrite
                 defer output_file.close(io);
                 var writer = output_file.writer(io, &buffer);
-                try std.zon.stringify.serialize(new_manifest, .{}, &writer.interface);
+                try std.zon.stringify.serialize(
+                    new_manifest,
+                    .{ .emit_default_optional_fields = false },
+                    &writer.interface,
+                );
                 try writer.flush();
             },
             else => continue,
@@ -125,6 +129,7 @@ pub fn main(init: std.process.Init) !void {
     try writer.interface.flush();
 
     const preload_file = try output_dir.createFile(io, "preload", .{});
+    // write preload files in order of their hash i guess?
     defer preload_file.close(io);
 
     const uuid: Uuid = .random(io, rand);
@@ -141,12 +146,14 @@ const Config = union(enum) {
 const Asset = struct {
     uuid: []const u8,
     config: Config,
-    name: []const u8,
+    subresource_name: []const u8 = "",
+    global_name: []const u8 = "",
+    preload: bool = false,
 };
 
 const Manifest = struct {
     uuid: []const u8,
-    assets: []const Asset,
+    assets: []Asset,
 };
 
 // so, the manifest should be able to work from just the root uuid and nothing more
@@ -163,19 +170,26 @@ fn processTxt(
 ) !Manifest {
     std.debug.assert(old_manifest.assets.len <= 1);
 
+    const old_asset: ?Asset = if (old_manifest.assets.len == 0) null else old_manifest.assets[0];
+
     // txt has no config, so just regenerate the asset list and proceed
     const uuid: Uuid = try .parse(old_manifest.uuid);
     const child_uuid = uuid.child("");
+
     const new_manifest: Manifest = .{
         .uuid = old_manifest.uuid,
-        .assets = &.{
-            .{
-                .uuid = try arena.dupe(u8, &child_uuid.stringify()),
-                .config = .{ .txt = {} },
-                .name = "",
-            },
-        },
+        .assets = try arena.alloc(Asset, 1),
     };
+    new_manifest.assets[0] = .{
+        .uuid = try arena.dupe(u8, &child_uuid.stringify()),
+        .config = .{ .txt = {} },
+        .subresource_name = "",
+    };
+    if (old_asset) |asset| {
+        new_manifest.assets[0].global_name =
+            if (asset.global_name.len > 0) try arena.dupe(u8, asset.global_name) else "";
+        new_manifest.assets[0].preload = asset.preload;
+    }
     if (old_manifest.assets.len > 0) {
         std.debug.assert(old_manifest.assets[0].config == .txt);
         std.debug.assert(std.mem.eql(u8, old_manifest.assets[0].uuid, new_manifest.assets[0].uuid));
