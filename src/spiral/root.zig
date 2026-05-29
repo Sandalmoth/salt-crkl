@@ -116,6 +116,10 @@ pub const Storage = struct {
         }
     };
 
+    const LoadOptions = struct {
+        alignment: std.mem.Alignment = .@"1",
+    };
+
     gpa: std.mem.Allocator,
     io: std.Io,
     immediate_io: std.Io.Threaded = .init_single_threaded, // used to unify future interface
@@ -178,7 +182,12 @@ pub const Storage = struct {
         storage.event_pool.deinit(storage.gpa);
     }
 
-    pub fn load(storage: *Storage, allocator: std.mem.Allocator, uuid: Uuid) !Future {
+    pub fn load(
+        storage: *Storage,
+        allocator: std.mem.Allocator,
+        uuid: Uuid,
+        options: LoadOptions,
+    ) !Future {
         try storage.rwlock.lockShared(storage.io);
         defer storage.rwlock.unlockShared(storage.io);
 
