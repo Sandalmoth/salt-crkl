@@ -98,22 +98,42 @@ pub const Location = struct {
     }
 };
 
-pub const Future = enum(u64) {
-    nil = 0,
-    _,
+pub const Future = struct {
+    event: ?*std.Io.Event,
+    storage: *Storage,
 
-    const HashContext = struct {
-        pub fn hash(ctx: HashContext, future: Future) u64 {
-            _ = ctx;
-            return @intFromEnum(future); // it's already random
-        }
+    pub fn poll(self: @This()) bool {
+        if (self.event) |event| return event.isSet();
+        return true;
+    }
+    pub fn await(self: *@This()) !void {
+        if (self.event) |event| {
+            try event.wait(self.storage.io);
 
-        pub fn eql(ctx: HashContext, a: Future, b: Future) bool {
-            _ = ctx;
-            return a == b;
+            try self.storage.mutex.lock(self.storage.io);
+            defer self.storage.mutex.unlock(self.storage.io);
+            self.storage.events.destroy(event);
+            self.event = null;
         }
-    };
+    }
 };
+
+// pub const Future = enum(u64) {
+//     nil = 0,
+//     _,
+
+//     const HashContext = struct {
+//         pub fn hash(ctx: HashContext, future: Future) u64 {
+//             _ = ctx;
+//             return @intFromEnum(future); // it's already random
+//         }
+
+//         pub fn eql(ctx: HashContext, a: Future, b: Future) bool {
+//             _ = ctx;
+//             return a == b;
+//         }
+//     };
+// };
 
 pub const LoadOptions = struct {
     alignment: std.mem.Alignment = .@"1",
@@ -126,10 +146,9 @@ pub const StorageConfig = struct {
 
 pub const Storage = struct {
     const LoadRequest = struct {
-        allocator: std.mem.Allocator,
-        future: Future,
+        event: *std.Io.Event,
+        dst: []u8,
         location: Location,
-        options: LoadOptions,
     };
 
     gpa: std.mem.Allocator,
@@ -142,8 +161,10 @@ pub const Storage = struct {
     buckets: []std.Io.File,
     preload: []const u8,
 
-    futures: std.AutoHashMapUnmanaged(Future, Error![]u8) = .empty,
-    future_counter: u64 = 1,
+    // futures: std.AutoHashMapUnmanaged(Future, Error![]u8) = .empty,
+    // future_counter: u64 = 1,
+
+    events: MemoryPool(std.Io.Event),
     capacity: usize,
 
     workers: std.Io.Group = .init,
@@ -182,6 +203,9 @@ pub const Storage = struct {
         const preload = try dir.readFileAlloc(io, "preload", gpa, .limited(1024 * 1024 * 1024));
         errdefer gpa.free(preload);
 
+        var events: MemoryPool(std.Io.Event) = .init(gpa);
+        errdefer events.deinit();
+
         storage.* = .{
             .gpa = gpa,
             .io = io,
@@ -189,13 +213,14 @@ pub const Storage = struct {
             .index = index,
             .buckets = &.{},
             .preload = preload,
+            .events = events,
             .capacity = config.capacity,
             .queue_buffer = queue_buffer,
             .queue = .init(queue_buffer),
         };
 
-        try storage.futures.ensureTotalCapacity(gpa, config.capacity);
-        errdefer storage.futures.deinit(gpa);
+        // try storage.futures.ensureTotalCapacity(gpa, config.capacity);
+        // errdefer storage.futures.deinit(gpa);
 
         for (0..config.worker_count) |_| {
             try storage.workers.concurrent(io, worker, .{storage});
@@ -209,7 +234,8 @@ pub const Storage = struct {
         storage.workers.cancel(storage.io);
 
         storage.gpa.free(storage.queue_buffer);
-        storage.futures.deinit(storage.gpa);
+        storage.events.deinit();
+        // storage.futures.deinit(storage.gpa);
         storage.gpa.free(storage.preload);
         storage.index.deinit(storage.gpa);
         storage.dir.close(storage.io);
@@ -231,11 +257,21 @@ pub const Storage = struct {
     // - no generic future
     // - i guess if the load fails, the await on the future would return the error
 
+    pub fn alloc(storage: *Storage, comptime T: type, gpa: std.mem.Allocator, uuid: Uuid) ![]T {
+        try storage.mutex.lock(storage.io);
+        defer storage.mutex.unlock(storage.io);
+
+        const src = storage.index.get(uuid) orelse {
+            log.err("uuid {s} is not in index", .{&uuid.stringify()});
+            return error.Invalid;
+        };
+        return try gpa.alloc(T, @divExact(src.size, @sizeOf(T)));
+    }
+
     pub fn load(
         storage: *Storage,
-        allocator: std.mem.Allocator,
         uuid: Uuid,
-        comptime options: LoadOptions,
+        dst: []u8,
     ) !Future {
         try storage.mutex.lock(storage.io);
         defer storage.mutex.unlock(storage.io);
@@ -247,61 +283,118 @@ pub const Storage = struct {
         };
 
         storage.capacity -= 1;
-        std.debug.assert(storage.futures.available > 0);
-        const future = newFuture(storage);
+        // std.debug.assert(storage.futures.available > 0);
+        // const future = newFuture(storage);
 
         if (src.location == .preload) {
-            const dst = allocator.alignedAlloc(u8, options.alignment, src.size) catch |e| {
-                storage.futures.putAssumeCapacityNoClobber(future, e);
-                return .nil;
-            };
             @memcpy(dst, storage.preload[src.location.preload .. src.location.preload + src.size]);
-            storage.futures.putAssumeCapacityNoClobber(future, dst);
+            return .{ .event = null, .storage = storage };
         } else {
+            const event = try storage.events.create();
+            errdefer storage.events.destroy(event);
+            event.reset();
             try storage.queue.putOne(storage.io, .{
-                .allocator = allocator,
-                .future = future,
-                .options = options,
                 .location = src,
+                .dst = dst,
+                .event = event,
             });
+            return .{ .event = event, .storage = storage };
         }
 
-        return future;
+        unreachable;
     }
 
     fn worker(storage: *Storage) !void {
         while (true) {
-            const x = storage.queue.getOne(storage.io) catch return error.Canceled;
-            try storage.io.sleep(.fromMilliseconds(200), .real);
-            std.debug.print("worker {}\n", .{x});
+            const req = storage.queue.getOne(storage.io) catch return error.Canceled;
+            if (req.location.location == .file) {
+                const file = req.location.location.file;
+                var content_hash_str: [32]u8 = undefined;
+                _ = std.fmt.bufPrint(&content_hash_str, "{x}", .{file}) catch unreachable;
+                _ = storage.dir.readFile(storage.io, &content_hash_str, req.dst) catch unreachable;
+                // FIXME how can we provide these errors to the user?
+                // catch |e| {
+                //     log.err("failed to load from file {s} with error {}", .{ &content_hash_str, e });
+                //     return error.File;
+                // };
+            }
+            req.event.set(storage.io);
         }
     }
 
-    fn newFuture(storage: *Storage) Future {
-        // xorshift* with 2^64 - 1 period (0 is fixed point, and also the nil entity)
-        // NOTE could be atomic + cas instead
-        // storage.mutex.lockUncancelable(storage.io);
-        // defer storage.mutex.unlock(storage.io);
-        // currently this is executed under a mutex anyway but could change in the future
-        var x = storage.future_counter;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        storage.future_counter = x;
-        return @enumFromInt(x *% 0x2545f4914f6cdd1d);
-    }
+    // fn newFuture(storage: *Storage) Future {
+    //     // xorshift* with 2^64 - 1 period (0 is fixed point, and also the nil entity)
+    //     // NOTE could be atomic + cas instead
+    //     // storage.mutex.lockUncancelable(storage.io);
+    //     // defer storage.mutex.unlock(storage.io);
+    //     // currently this is executed under a mutex anyway but could change in the future
+    //     var x = storage.future_counter;
+    //     x ^= x >> 12;
+    //     x ^= x << 25;
+    //     x ^= x >> 27;
+    //     storage.future_counter = x;
+    //     return @enumFromInt(x *% 0x2545f4914f6cdd1d);
+    // }
 };
+
+// literally every time i go to use std.heap.MemoryPool it has idiotic alignment issues...
+fn MemoryPool(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        const Node = struct {
+            next: ?*Node,
+            value: T,
+        };
+
+        arena_impl: std.heap.ArenaAllocator,
+        free_list: ?*Node,
+
+        fn init(gpa: std.mem.Allocator) Self {
+            return .{
+                .arena_impl = .init(gpa),
+                .free_list = null,
+            };
+        }
+
+        fn deinit(pool: *Self) void {
+            pool.arena_impl.deinit();
+            pool.* = undefined;
+        }
+
+        fn create(pool: *Self) !*T {
+            if (pool.free_list) |node| {
+                pool.free_list = node.next;
+                return &node.value;
+            }
+            return try pool.arena_impl.allocator().create(T);
+        }
+
+        fn destroy(pool: *Self, value: *T) void {
+            const node: *Node = @alignCast(@fieldParentPtr("value", value));
+            node.next = pool.free_list;
+            pool.free_list = node;
+        }
+    };
+}
 
 test "Storage" {
     const s: *Storage = try .init(std.testing.allocator, std.testing.io, "data", .{});
     defer s.deinit();
 
-    const a_future = try s.load(
-        std.testing.allocator,
-        try .parse("603HK0R1ZP89REPQDG25GGYSTW"),
-        .{},
+    var it = s.index.iterator();
+    while (it.next()) |kv| std.debug.print(
+        "{s} -> {}\n",
+        .{ &kv.key_ptr.stringify(), kv.value_ptr },
     );
-    _ = a_future;
+
+    const uuid_a: Uuid = try .parse("6BQN4HWA3VC8ZYQ1ZZ1BDSJ771");
+    const a = try s.alloc(u8, std.testing.allocator, uuid_a);
+    defer std.testing.allocator.free(a);
+    var a_future = try s.load(uuid_a, a);
+    try a_future.await();
+    std.debug.print("{s}\n", .{a});
+
     // const a =
 
     // var a_future = try s.load(
