@@ -56,6 +56,8 @@ pub fn build(b: *std.Build) void {
     const profiler = b.addModule("profiler", .{
         .root_source_file = b.path("src/profiler/root.zig"),
         .target = target,
+        .optimize = optimize,
+        .imports = &.{},
     });
     _ = profiler;
 
