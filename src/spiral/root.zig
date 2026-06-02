@@ -99,44 +99,32 @@ pub const Location = struct {
 };
 
 pub const Future = struct {
-    event: ?*std.Io.Event,
+    const Remote = struct {
+        event: std.Io.Event,
+        result: Error!void,
+    };
+
+    remote: ?*Remote,
     storage: *Storage,
 
     pub fn poll(self: @This()) bool {
-        if (self.event) |event| return event.isSet();
+        if (self.remote) |remote| return remote.event.isSet();
         return true;
     }
+
+    // NOTE maybe we shoudl store a copy of the result and make this idempotent
     pub fn await(self: *@This()) !void {
-        if (self.event) |event| {
-            try event.wait(self.storage.io);
+        if (self.remote) |remote| {
+            try remote.event.wait(self.storage.io);
 
             try self.storage.mutex.lock(self.storage.io);
             defer self.storage.mutex.unlock(self.storage.io);
-            self.storage.events.destroy(event);
-            self.event = null;
+            self.storage.events.destroy(remote);
+            self.remote = null;
+
+            return remote.result;
         }
     }
-};
-
-// pub const Future = enum(u64) {
-//     nil = 0,
-//     _,
-
-//     const HashContext = struct {
-//         pub fn hash(ctx: HashContext, future: Future) u64 {
-//             _ = ctx;
-//             return @intFromEnum(future); // it's already random
-//         }
-
-//         pub fn eql(ctx: HashContext, a: Future, b: Future) bool {
-//             _ = ctx;
-//             return a == b;
-//         }
-//     };
-// };
-
-pub const LoadOptions = struct {
-    alignment: std.mem.Alignment = .@"1",
 };
 
 pub const StorageConfig = struct {
@@ -146,7 +134,7 @@ pub const StorageConfig = struct {
 
 pub const Storage = struct {
     const LoadRequest = struct {
-        event: *std.Io.Event,
+        remote: *Future.Remote,
         dst: []u8,
         location: Location,
     };
@@ -161,11 +149,7 @@ pub const Storage = struct {
     buckets: []std.Io.File,
     preload: []const u8,
 
-    // futures: std.AutoHashMapUnmanaged(Future, Error![]u8) = .empty,
-    // future_counter: u64 = 1,
-
-    events: MemoryPool(std.Io.Event),
-    capacity: usize,
+    events: MemoryPool(Future.Remote),
 
     workers: std.Io.Group = .init,
     queue_buffer: []LoadRequest,
@@ -203,7 +187,7 @@ pub const Storage = struct {
         const preload = try dir.readFileAlloc(io, "preload", gpa, .limited(1024 * 1024 * 1024));
         errdefer gpa.free(preload);
 
-        var events: MemoryPool(std.Io.Event) = .init(gpa);
+        var events: MemoryPool(Future.Remote) = .init(gpa);
         errdefer events.deinit();
 
         storage.* = .{
@@ -214,13 +198,9 @@ pub const Storage = struct {
             .buckets = &.{},
             .preload = preload,
             .events = events,
-            .capacity = config.capacity,
             .queue_buffer = queue_buffer,
             .queue = .init(queue_buffer),
         };
-
-        // try storage.futures.ensureTotalCapacity(gpa, config.capacity);
-        // errdefer storage.futures.deinit(gpa);
 
         for (0..config.worker_count) |_| {
             try storage.workers.concurrent(io, worker, .{storage});
@@ -235,27 +215,12 @@ pub const Storage = struct {
 
         storage.gpa.free(storage.queue_buffer);
         storage.events.deinit();
-        // storage.futures.deinit(storage.gpa);
         storage.gpa.free(storage.preload);
         storage.index.deinit(storage.gpa);
         storage.dir.close(storage.io);
 
         storage.gpa.destroy(storage);
     }
-
-    // allocating load
-    // - how do we pass the comptime alignment to alloc later on?
-    // - i guess we have to alloc on load and fill it later (and free if it fails i guess)
-    // - can poll or wait on handle, waiting returns the memory or the memory
-    // - the future would have to be generic
-    // - probably have a loadOne(T) -> *T and loadMany(T) -> []T
-
-    // load to buffer
-    // - user basically gets something to poll or wait, like a std.Io.Event
-    // - before then, touching the memory they provided is undefined behaviour
-    // - user doesn't have to wrap things in allocator if inconvenient
-    // - no generic future
-    // - i guess if the load fails, the await on the future would return the error
 
     pub fn alloc(storage: *Storage, comptime T: type, gpa: std.mem.Allocator, uuid: Uuid) ![]T {
         try storage.mutex.lock(storage.io);
@@ -268,6 +233,18 @@ pub const Storage = struct {
         return try gpa.alloc(T, @divExact(src.size, @sizeOf(T)));
     }
 
+    pub fn create(storage: *Storage, comptime T: type, gpa: std.mem.Allocator, uuid: Uuid) !*T {
+        try storage.mutex.lock(storage.io);
+        defer storage.mutex.unlock(storage.io);
+
+        const src = storage.index.get(uuid) orelse {
+            log.err("uuid {s} is not in index", .{&uuid.stringify()});
+            return error.Invalid;
+        };
+        std.debug.assert(@sizeOf(T) == src.size);
+        return try gpa.create(T);
+    }
+
     pub fn load(
         storage: *Storage,
         uuid: Uuid,
@@ -276,29 +253,26 @@ pub const Storage = struct {
         try storage.mutex.lock(storage.io);
         defer storage.mutex.unlock(storage.io);
 
-        if (storage.capacity == 0) return error.Capacity;
         const src = storage.index.get(uuid) orelse {
             log.err("uuid {s} is not in index", .{&uuid.stringify()});
             return error.Invalid;
         };
-
-        storage.capacity -= 1;
-        // std.debug.assert(storage.futures.available > 0);
-        // const future = newFuture(storage);
+        std.debug.assert(src.size == dst.len);
 
         if (src.location == .preload) {
             @memcpy(dst, storage.preload[src.location.preload .. src.location.preload + src.size]);
-            return .{ .event = null, .storage = storage };
+            return .{ .remote = null, .storage = storage };
         } else {
-            const event = try storage.events.create();
-            errdefer storage.events.destroy(event);
-            event.reset();
+            const remote = try storage.events.create();
+            errdefer storage.events.destroy(remote);
+            remote.event.reset();
+            remote.result = {};
             try storage.queue.putOne(storage.io, .{
                 .location = src,
                 .dst = dst,
-                .event = event,
+                .remote = remote,
             });
-            return .{ .event = event, .storage = storage };
+            return .{ .remote = remote, .storage = storage };
         }
 
         unreachable;
@@ -307,34 +281,26 @@ pub const Storage = struct {
     fn worker(storage: *Storage) !void {
         while (true) {
             const req = storage.queue.getOne(storage.io) catch return error.Canceled;
+            std.debug.assert(req.location.location != .preload);
             if (req.location.location == .file) {
                 const file = req.location.location.file;
                 var content_hash_str: [32]u8 = undefined;
                 _ = std.fmt.bufPrint(&content_hash_str, "{x}", .{file}) catch unreachable;
-                _ = storage.dir.readFile(storage.io, &content_hash_str, req.dst) catch unreachable;
-                // FIXME how can we provide these errors to the user?
-                // catch |e| {
-                //     log.err("failed to load from file {s} with error {}", .{ &content_hash_str, e });
-                //     return error.File;
-                // };
+                _ = storage.dir.readFile(storage.io, &content_hash_str, req.dst) catch |e| {
+                    log.err(
+                        "failed to load from file {s} with error {}",
+                        .{ &content_hash_str, e },
+                    );
+                    req.remote.result = error.File;
+                    return;
+                };
             }
-            req.event.set(storage.io);
+            if (req.location.location == .bucket) {
+                @panic("TODO");
+            }
+            req.remote.event.set(storage.io);
         }
     }
-
-    // fn newFuture(storage: *Storage) Future {
-    //     // xorshift* with 2^64 - 1 period (0 is fixed point, and also the nil entity)
-    //     // NOTE could be atomic + cas instead
-    //     // storage.mutex.lockUncancelable(storage.io);
-    //     // defer storage.mutex.unlock(storage.io);
-    //     // currently this is executed under a mutex anyway but could change in the future
-    //     var x = storage.future_counter;
-    //     x ^= x >> 12;
-    //     x ^= x << 25;
-    //     x ^= x >> 27;
-    //     storage.future_counter = x;
-    //     return @enumFromInt(x *% 0x2545f4914f6cdd1d);
-    // }
 };
 
 // literally every time i go to use std.heap.MemoryPool it has idiotic alignment issues...
@@ -389,11 +355,35 @@ test "Storage" {
     );
 
     const uuid_a: Uuid = try .parse("6BQN4HWA3VC8ZYQ1ZZ1BDSJ771");
+    const uuid_b: Uuid = try .parse("1Y99Z3J6K45HR5S3WZKSVQ51E1");
+    const uuid_c: Uuid = try .parse("37BQJ0V3J4RA73SA8QBQH8VY1Z");
+
     const a = try s.alloc(u8, std.testing.allocator, uuid_a);
-    defer std.testing.allocator.free(a);
     var a_future = try s.load(uuid_a, a);
+    const b = try s.alloc(u8, std.testing.allocator, uuid_b);
+    var b_future = try s.load(uuid_b, b);
+    const c = try s.alloc(u8, std.testing.allocator, uuid_c);
+    var c_future = try s.load(uuid_c, c);
+
+    defer std.testing.allocator.free(a);
+    defer std.testing.allocator.free(b);
+    defer std.testing.allocator.free(c);
+
+    std.debug.print("yo\n", .{});
+    // so if one of these fails
+    // we start deallocating b and c
+    // while our reader might still be working with them
+    // which then causes crazy crashes
+    // how can we make it stable? maybe the catch cancel pattern?
+    // but in that case the required cancel behaviour is very complicated
+    // and do we really want to cancel all tasks because on failed? no!
     try a_future.await();
+    try b_future.await();
+    try c_future.await();
+
     std.debug.print("{s}\n", .{a});
+    std.debug.print("{s}\n", .{b});
+    std.debug.print("{s}\n", .{c});
 
     // const a =
 
