@@ -130,7 +130,7 @@ fn packAll(gpa: std.mem.Allocator, io: std.Io) !void {
         log.debug("{s} -> {x}", .{ &uuid.stringify(), asset_info.content_hash });
         try writer.interface.writeInt(u128, uuid.bits, .little);
         // TODO support other locations
-        try (spiral.Storage.Location{
+        try (spiral.Location{
             .size = asset_info.size,
             .location = .{ .file = asset_info.content_hash },
         }).serialize(&writer.interface);
