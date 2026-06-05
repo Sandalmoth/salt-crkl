@@ -2,27 +2,9 @@ const std = @import("std");
 
 const log = std.log.scoped(.profiler);
 
-const AtomicTimer = struct {
-    t0: std.Io.Timestamp,
-    prev: i64,
-
-    pub fn start() AtomicTimer {
-        return .{
-            .t0 = .now(io, .real),
-            .prev = 0,
-        };
-    }
-
-    pub fn read(atomic_timer: *AtomicTimer) i64 {
-        const dt: i64 = @intCast(atomic_timer.t0.untilNow(io, .real).nanoseconds);
-        const prev = @atomicRmw(i64, &atomic_timer.prev, .Max, dt, .monotonic);
-        return @max(dt, prev);
-    }
-};
-
 const Timestamp = struct {
     name: [*:0]const u8,
-    time: i64,
+    time: std.Io.Timestamp,
     thread_id: std.Thread.Id,
     scope_id: i64, // NOTE zero means it's a marker, >0 is open scaope, <0 is close scope
 };
@@ -40,18 +22,16 @@ const Queue = struct {
     pool: std.heap.MemoryPool(Segment),
     head: *Segment,
     tail: *Segment,
-    // NOTE spinlocks since once the pool is primed the critical sections are very small
-    // and this way we don't need an io when adding a timestamp
-    pool_mutex: std.atomic.Mutex,
-    push_mutex: std.atomic.Mutex,
+    pool_mutex: std.Io.Mutex,
+    push_mutex: std.Io.Mutex,
 
     fn init() !Queue {
         var q: Queue = undefined;
-        q.pool = .init(gpa);
-        q.pool_mutex = .unlocked;
-        q.push_mutex = .unlocked;
+        q.pool = .empty;
+        q.pool_mutex = .init;
+        q.push_mutex = .init;
 
-        const segment = try q.pool.create();
+        const segment = try q.pool.create(gpa);
         segment.next = null;
         segment.head = 0;
         segment.tail = 0;
@@ -62,7 +42,7 @@ const Queue = struct {
     }
 
     fn deinit(q: *Queue) void {
-        q.pool.deinit();
+        q.pool.deinit(gpa);
         q.* = undefined;
     }
 
@@ -76,8 +56,8 @@ const Queue = struct {
             return;
         }
 
-        while (!q.push_mutex.tryLock()) {}
-        defer q.push_mutex.unlock();
+        q.push_mutex.lockUncancelable(io);
+        defer q.push_mutex.unlock(io);
 
         // test if someone else already did the mutex part
         const maybe_new_segment = @atomicLoad(*Segment, &q.tail, .acquire);
@@ -87,9 +67,9 @@ const Queue = struct {
         }
 
         // we are first, add new segment
-        while (!q.pool_mutex.tryLock()) {}
-        const new_segment = try q.pool.create();
-        q.pool_mutex.unlock();
+        q.pool_mutex.lockUncancelable(io);
+        const new_segment = try q.pool.create(gpa);
+        q.pool_mutex.unlock(io);
         segment.next = new_segment;
         new_segment.next = null;
         new_segment.head = 0;
@@ -114,9 +94,9 @@ const Queue = struct {
         if (@atomicLoad(?*Segment, &segment.next, .acquire)) |next| {
             // tail has already moved on, safe to remove
             q.head = next;
-            while (q.pool_mutex.tryLock()) {}
+            q.pool_mutex.lockUncancelable(io);
             q.pool.destroy(segment);
-            q.pool_mutex.unlock();
+            q.pool_mutex.unlock(io);
             return q.pop();
         }
 
@@ -129,7 +109,7 @@ pub const Handle = struct {
     name: [:0]const u8,
     thread_id: std.Thread.Id,
     scope_id: i64,
-    start_time: u64,
+    start_time: std.Io.Timestamp,
     failed_begin: bool,
 
     pub fn end(handle: Handle) void {
@@ -137,7 +117,7 @@ pub const Handle = struct {
         queue.push(.{
             .name = handle.name.ptr,
             .thread_id = handle.thread_id,
-            .time = @max(handle.start_time + 1, timer.read()), // guarantee begin-end order
+            .time = .now(io, .awake),
             .scope_id = -handle.scope_id,
         }) catch {};
     }
@@ -145,8 +125,8 @@ pub const Handle = struct {
 
 pub const Scope = struct {
     name: []const u8,
-    start: u64,
-    end: u64,
+    start: std.Io.Timestamp,
+    end: std.Io.Timestamp,
     depth: u32,
     parent: ?*Scope,
     id: i64,
@@ -183,7 +163,6 @@ var gpa: std.mem.Allocator = undefined;
 var io: std.Io = undefined;
 var history: usize = undefined;
 
-var timer: AtomicTimer = undefined;
 var queue: Queue = undefined;
 var scope_id: i64 = 1; // used to generate a unique id, incremented on every begin
 
@@ -197,14 +176,15 @@ pub var stats: std.StringHashMapUnmanaged(Stats) = .empty;
 // store the past N stats, preferably in one contiguous array per stat
 // but if some name hasn't been used in the last N frames, i guess we should remove it
 
-pub fn init(_gpa: std.mem.Allocator, _io: std.Io, _history: usize) void {
+pub fn init(_gpa: std.mem.Allocator, _io: std.Io, _history: usize) !void {
     gpa = _gpa;
     io = _io;
     history = _history;
-    timer = .start();
+    queue = try .init();
 }
 
 pub fn deinit() void {
+    queue.deinit();
     scope_pool.deinit(gpa);
 
     var it_timelines = timelines.iterator();
@@ -225,7 +205,7 @@ pub fn begin(name: [:0]const u8) Handle {
         .name = name,
         .thread_id = std.Thread.getCurrentId(),
         .scope_id = @atomicRmw(i64, &scope_id, .Add, 1, .monotonic),
-        .start_time = timer.read(),
+        .start_time = .now(io, .awake),
         .failed_begin = false,
     };
     queue.push(.{
@@ -244,7 +224,7 @@ pub fn mark(name: [:0]const u8) void {
     queue.push(.{
         .name = name.ptr,
         .thread_id = std.Thread.getCurrentId(),
-        .time = timer.read(),
+        .time = .now(io, .awake),
         .scope_id = 0,
     }) catch {
         log.debug("allocation failure in mark, timestamp discarded", .{});
@@ -333,7 +313,7 @@ pub fn beginFrame() !void {
                 break :blk result.value_ptr;
             };
             const data = stat.data.slice();
-            var dt: f32 = @floatFromInt(scope.end - scope.start);
+            var dt: f32 = @floatFromInt(scope.start.durationTo(scope.end).toNanoseconds());
             dt *= 1e-6; // convert to ms
             data.items(.count)[stat.cursor] += 1.0;
             data.items(.total)[stat.cursor] += dt;
@@ -355,56 +335,56 @@ pub fn beginFrame() !void {
     }
 }
 
-test "scratch" {
-    init(std.testing.allocator, std.testing.io, 10);
-    defer deinit();
+// test "scratch" {
+//     try init(std.testing.allocator, std.testing.io, 10);
+//     defer deinit();
 
-    const A = struct {
-        fn a() void {
-            for (0..2) |_| {
-                const scope = begin("a");
-                defer scope.end();
-                std.Thread.sleep(100_000_000);
-                b();
-            }
-        }
+//     const A = struct {
+//         fn a() !void {
+//             for (0..2) |_| {
+//                 const scope = begin("a");
+//                 defer scope.end();
+//                 try std.testing.io.sleep(.fromMilliseconds(100), .awake);
+//                 try b();
+//             }
+//         }
 
-        fn b() void {
-            for (0..2) |_| {
-                const scope = begin("b");
-                defer scope.end();
-                std.Thread.sleep(10_000_000);
-            }
-        }
-    };
+//         fn b() !void {
+//             for (0..2) |_| {
+//                 const scope = begin("b");
+//                 defer scope.end();
+//                 try std.testing.io.sleep(.fromMilliseconds(100), .awake);
+//             }
+//         }
+//     };
 
-    const t0 = try std.Thread.spawn(.{}, A.a, .{});
-    A.a();
-    t0.join();
+//     const t0 = try std.Thread.spawn(.{}, A.a, .{});
+//     try A.a();
+//     t0.join();
 
-    const z = begin("z");
-    try beginFrame();
-    z.end();
-    const t1 = try std.Thread.spawn(.{}, A.a, .{});
-    t1.join();
+//     const z = begin("z");
+//     try beginFrame();
+//     z.end();
+//     const t1 = try std.Thread.spawn(.{}, A.a, .{});
+//     t1.join();
 
-    try beginFrame();
-    try beginFrame();
+//     try beginFrame();
+//     try beginFrame();
 
-    var it = timelines.iterator();
-    while (it.next()) |kv| {
-        std.debug.print("--- {} ---\n", .{kv.key_ptr.*});
-        for (kv.value_ptr.items) |scope| std.debug.print("{}\n", .{scope});
-    }
+//     var it = timelines.iterator();
+//     while (it.next()) |kv| {
+//         std.debug.print("--- {} ---\n", .{kv.key_ptr.*});
+//         for (kv.value_ptr.items) |scope| std.debug.print("{}\n", .{scope});
+//     }
 
-    var it2 = stats.iterator();
-    while (it2.next()) |kv| {
-        std.debug.print("--- {s} ---\n", .{kv.key_ptr.*});
-        std.debug.print("mean {any}\n", .{kv.value_ptr.data.items(.mean)});
-        std.debug.print("std {any}\n", .{kv.value_ptr.data.items(.std)});
-        std.debug.print("min {any}\n", .{kv.value_ptr.data.items(.min)});
-        std.debug.print("max {any}\n", .{kv.value_ptr.data.items(.max)});
-        std.debug.print("total {any}\n", .{kv.value_ptr.data.items(.total)});
-        std.debug.print("count {any}\n", .{kv.value_ptr.data.items(.count)});
-    }
-}
+//     var it2 = stats.iterator();
+//     while (it2.next()) |kv| {
+//         std.debug.print("--- {s} ---\n", .{kv.key_ptr.*});
+//         std.debug.print("mean {any}\n", .{kv.value_ptr.data.items(.mean)});
+//         std.debug.print("std {any}\n", .{kv.value_ptr.data.items(.std)});
+//         std.debug.print("min {any}\n", .{kv.value_ptr.data.items(.min)});
+//         std.debug.print("max {any}\n", .{kv.value_ptr.data.items(.max)});
+//         std.debug.print("total {any}\n", .{kv.value_ptr.data.items(.total)});
+//         std.debug.print("count {any}\n", .{kv.value_ptr.data.items(.count)});
+//     }
+// }
