@@ -38,7 +38,6 @@ const Mutex = struct {
             ) == null) return;
             while (@atomicLoad(?*Node, &node.next, .acquire) == null) {
                 std.atomic.spinLoopHint();
-                // FIXME FIXME FIXME we get stuck
             }
         }
         const next = @atomicLoad(?*Node, &node.next, .acquire).?;
