@@ -44,6 +44,8 @@ pub fn build(b: *std.Build) void {
     const ecs = b.addModule("ecs", .{
         .root_source_file = b.path("src/ecs/root.zig"),
         .target = target,
+        .optimize = optimize,
+        .imports = &.{},
     });
     _ = ecs;
 
