@@ -56,20 +56,6 @@ pub fn World(comptime Spec: type) type {
         pub const Record = blk: {
             // generate a type that has all components as optionals
 
-            // var fields: [n_components]std.builtin.Type.StructField = undefined;
-            // @memcpy(&fields, std.meta.fields(Spec));
-            // for (0..fields.len) |i| {
-            //     fields[i].default_value_ptr = &@as(?fields[i].type, null);
-            //     fields[i].type = ?fields[i].type;
-            // }
-            // const info: std.builtin.Type = .{ .@"struct" = std.builtin.Type.Struct{
-            //     .layout = .auto,
-            //     .fields = &fields,
-            //     .decls = &.{},
-            //     .is_tuple = false,
-            // } };
-            // break :blk @Type(info);
-
             var field_names: [n_components][]const u8 = undefined;
             var field_types: [n_components]type = undefined;
             var field_attrs: [n_components]std.builtin.Type.StructField.Attributes = undefined;
@@ -85,20 +71,6 @@ pub fn World(comptime Spec: type) type {
 
         pub const Reference = blk: {
             // generate a type that has all components as optional pointers
-
-            // var fields: [n_components]std.builtin.Type.StructField = undefined;
-            // @memcpy(&fields, std.meta.fields(Spec));
-            // for (0..fields.len) |i| {
-            //     fields[i].default_value_ptr = &@as(?*fields[i].type, null);
-            //     fields[i].type = ?*fields[i].type;
-            // }
-            // const info: std.builtin.Type = .{ .@"struct" = std.builtin.Type.Struct{
-            //     .layout = .auto,
-            //     .fields = &fields,
-            //     .decls = &.{},
-            //     .is_tuple = false,
-            // } };
-            // break :blk @Type(info);
 
             var field_names: [n_components][]const u8 = undefined;
             var field_types: [n_components]type = undefined;
@@ -452,6 +424,7 @@ pub fn World(comptime Spec: type) type {
             };
         }
 
+        /// lock free thread safe
         pub fn queueCreate(world: *_World, record: Record) !Key {
             const key = world.keygen.next();
             (try world.create_queue.addOne(
@@ -461,6 +434,7 @@ pub fn World(comptime Spec: type) type {
             return key;
         }
 
+        /// lock free thread safe
         pub fn queueInsert(
             world: *_World,
             key: Key,
@@ -475,11 +449,13 @@ pub fn World(comptime Spec: type) type {
             )).* = .{ .key = key, .value = value };
         }
 
+        /// lock free thread safe
         pub fn queueDestroy(world: *_World, key: Key) !void {
             std.debug.assert(key != .nil);
             (try world.destroy_queue.addOne(Key, world.queue_arena.allocator())).* = key;
         }
 
+        /// lock free thread safe
         pub fn queueRemove(
             world: *_World,
             key: Key,
@@ -524,6 +500,7 @@ pub fn World(comptime Spec: type) type {
                     // page is empty, destroy entirely
                     for (world.pages.items(.page), 0..) |p, i| {
                         if (p == location.page) {
+                            world.pool.destroy(p);
                             world.pages.swapRemove(i);
                             break;
                         }
@@ -617,34 +594,6 @@ pub fn World(comptime Spec: type) type {
             }
             return page;
         }
-
-        // fn serialize(world: *_World, writer: *std.Io.Writer, ctx: anytype) !void {
-        //     var it = world.entityIterator(.{});
-        //     while (it.next()) |e| {
-        //         std.debug.assert(e.key() != .nil);
-        //         @import("serializer.zig").serialize(writer, ctx, e.key());
-        //         @import("serializer.zig").serialize(writer, ctx, e.record());
-        //     }
-        //     @import("serializer.zig").serialize(writer, ctx, Key.nil);
-        //     try writer.flush();
-        // }
-
-        // fn deserialize(world: *_World, reader: *std.Io.Reader, ctx: anytype) !void {
-        //     var create_queue = world.acquireCreateQueue();
-        //     while (true) {
-        //         const old_key = try @import("serializer").deserialize(reader, ctx, Key);
-        //         if (old_key == .nil) break;
-        //         const new_key = try create_queue.create(
-        //             try @import("serializer.zig").deserialize(reader, ctx, Record),
-        //         );
-        //         _ = new_key;
-        //         // ctx needs to contain a map from old -> new keys
-        //         // but how can we do that and allow for a custom ctx?
-        //         // we could just make the deserializer take both a ctx and a map
-        //         // and then do the new key remap automatically
-        //     }
-        //     world.submitCreateQueue(create_queue);
-        // }
     };
 }
 
