@@ -112,12 +112,50 @@ def write_vector(f, dim, type):
     f.write(f"}};\n\n")
 
 
+def write_matrix(f, dim, type):
+    abbrev = {
+        "f32": "f",
+        "f64": "d",
+    }[type]
+    typename = f"M{dim}{abbrev}"
+    vector = f"@Vector({dim}, {type})"
+
+    f.write(f"pub const {typename} = struct {{\n")
+    f.write(f"    data: [{dim}]{vector},\n")
+
+    f.write("\n");
+
+    f.write(f"    pub const zero: {typename} = .{{ .data = .{{\n")
+    for _ in range(dim):
+        f.write(f"        .{{ {', '.join(['0' for _ in range(dim)])} }},\n");
+    f.write(f"    }} }};\n")
+
+    f.write(f"    pub const eye: {typename} = .{{ .data = .{{\n")
+    for i in range(dim):
+        f.write(f"        .{{ {', '.join(['1' if i == j else '0' for j in range(dim)])} }},\n");
+    f.write(f"    }} }};\n")
+
+    f.write("\n");
+
+    f.write(f"    pub fn splat(s: {type}) {typename} {{\n")
+    f.write(f"        return .{{ .data = .{{\n")
+    for _ in range(dim):
+        f.write(f"            @splat(s),\n")
+    f.write(f"        }} }};\n")
+    f.write(f"    }}\n")
+
+    f.write(f"}};\n\n")
+
+
 f = open(os.path.join(__location__, f"lin.zig"), "w+");
 
 f.write(f"const std = @import(\"std\");\n\n")
 
 write_vector(f, 2, "f32")
+write_matrix(f, 2, "f32")
 write_vector(f, 3, "f32")
+write_matrix(f, 3, "f32")
 write_vector(f, 4, "f32")
+write_matrix(f, 4, "f32")
 
 f.close();

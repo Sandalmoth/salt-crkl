@@ -6,7 +6,7 @@ pub const V2f = struct {
     pub const zero: V2f = .{ .data = @splat(0) };
 
     pub fn splat(s: f32) V2f {
-         return .{ .data = @splat(s) };
+        return .{ .data = @splat(s) };
     }
 
     pub fn floor(v: V2f) V2f {
@@ -137,13 +137,33 @@ pub const V2f = struct {
     }
 };
 
+pub const M2f = struct {
+    data: [2]@Vector(2, f32),
+
+    pub const zero: M2f = .{ .data = .{
+        .{ 0, 0 },
+        .{ 0, 0 },
+    } };
+    pub const eye: M2f = .{ .data = .{
+        .{ 1, 0 },
+        .{ 0, 1 },
+    } };
+
+    pub fn splat(s: f32) M2f {
+        return .{ .data = .{
+            @splat(s),
+            @splat(s),
+        } };
+    }
+};
+
 pub const V3f = struct {
     data: @Vector(3, f32),
 
     pub const zero: V3f = .{ .data = @splat(0) };
 
     pub fn splat(s: f32) V3f {
-         return .{ .data = @splat(s) };
+        return .{ .data = @splat(s) };
     }
 
     pub fn floor(v: V3f) V3f {
@@ -544,13 +564,36 @@ pub const V3f = struct {
     }
 };
 
+pub const M3f = struct {
+    data: [3]@Vector(3, f32),
+
+    pub const zero: M3f = .{ .data = .{
+        .{ 0, 0, 0 },
+        .{ 0, 0, 0 },
+        .{ 0, 0, 0 },
+    } };
+    pub const eye: M3f = .{ .data = .{
+        .{ 1, 0, 0 },
+        .{ 0, 1, 0 },
+        .{ 0, 0, 1 },
+    } };
+
+    pub fn splat(s: f32) M3f {
+        return .{ .data = .{
+            @splat(s),
+            @splat(s),
+            @splat(s),
+        } };
+    }
+};
+
 pub const V4f = struct {
     data: @Vector(4, f32),
 
     pub const zero: V4f = .{ .data = @splat(0) };
 
     pub fn splat(s: f32) V4f {
-         return .{ .data = @splat(s) };
+        return .{ .data = @splat(s) };
     }
 
     pub fn floor(v: V4f) V4f {
@@ -1611,3 +1654,28 @@ pub const V4f = struct {
     }
 };
 
+pub const M4f = struct {
+    data: [4]@Vector(4, f32),
+
+    pub const zero: M4f = .{ .data = .{
+        .{ 0, 0, 0, 0 },
+        .{ 0, 0, 0, 0 },
+        .{ 0, 0, 0, 0 },
+        .{ 0, 0, 0, 0 },
+    } };
+    pub const eye: M4f = .{ .data = .{
+        .{ 1, 0, 0, 0 },
+        .{ 0, 1, 0, 0 },
+        .{ 0, 0, 1, 0 },
+        .{ 0, 0, 0, 1 },
+    } };
+
+    pub fn splat(s: f32) M4f {
+        return .{ .data = .{
+            @splat(s),
+            @splat(s),
+            @splat(s),
+            @splat(s),
+        } };
+    }
+};
