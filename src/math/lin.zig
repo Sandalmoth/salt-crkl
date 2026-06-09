@@ -8,6 +8,9 @@ pub const V2f = struct {
     pub fn splat(s: f32) V2f {
         return .{ .data = @splat(s) };
     }
+    pub fn v2d(v: V2f) V2d {
+        return .{ .data = @floatCast(v) };
+    }
 
     pub fn floor(v: V2f) V2f {
         return .{ .data = @floor(v.data) };
@@ -149,11 +152,35 @@ pub const M2f = struct {
         .{ 0, 1 },
     } };
 
-    pub fn splat(s: f32) M2f {
+    pub fn transpose(m: M2f) M2f {
         return .{ .data = .{
-            @splat(s),
-            @splat(s),
+            .{
+                m.data[0][0],
+                m.data[1][0],
+            },
+            .{
+                m.data[0][1],
+                m.data[1][1],
+            },
         } };
+    }
+
+    pub fn mulmat(a: M2f, b: M2f) M2f {
+        const t = b.transpose();
+        var c: M2f = undefined;
+        for (0..2) |i| {
+            for (0..2) |j| {
+                c.data[i][j] = @reduce(.Add, a.data[i] * t.data[i]);
+            }
+        }
+        return c;
+    }
+    pub fn mulvec(m: M2f, v: V2f) V2f {
+        var w: V2f = undefined;
+        for (0..2) |i| {
+            w.data[i] = @reduce(.Add, m.data[i] * v.data);
+        }
+        return w;
     }
 };
 
@@ -164,6 +191,9 @@ pub const V3f = struct {
 
     pub fn splat(s: f32) V3f {
         return .{ .data = @splat(s) };
+    }
+    pub fn v3d(v: V3f) V3d {
+        return .{ .data = @floatCast(v) };
     }
 
     pub fn floor(v: V3f) V3f {
@@ -578,12 +608,42 @@ pub const M3f = struct {
         .{ 0, 0, 1 },
     } };
 
-    pub fn splat(s: f32) M3f {
+    pub fn transpose(m: M3f) M3f {
         return .{ .data = .{
-            @splat(s),
-            @splat(s),
-            @splat(s),
+            .{
+                m.data[0][0],
+                m.data[1][0],
+                m.data[2][0],
+            },
+            .{
+                m.data[0][1],
+                m.data[1][1],
+                m.data[2][1],
+            },
+            .{
+                m.data[0][2],
+                m.data[1][2],
+                m.data[2][2],
+            },
         } };
+    }
+
+    pub fn mulmat(a: M3f, b: M3f) M3f {
+        const t = b.transpose();
+        var c: M3f = undefined;
+        for (0..3) |i| {
+            for (0..3) |j| {
+                c.data[i][j] = @reduce(.Add, a.data[i] * t.data[i]);
+            }
+        }
+        return c;
+    }
+    pub fn mulvec(m: M3f, v: V3f) V3f {
+        var w: V3f = undefined;
+        for (0..3) |i| {
+            w.data[i] = @reduce(.Add, m.data[i] * v.data);
+        }
+        return w;
     }
 };
 
@@ -594,6 +654,9 @@ pub const V4f = struct {
 
     pub fn splat(s: f32) V4f {
         return .{ .data = @splat(s) };
+    }
+    pub fn v4d(v: V4f) V4d {
+        return .{ .data = @floatCast(v) };
     }
 
     pub fn floor(v: V4f) V4f {
@@ -1670,12 +1733,1831 @@ pub const M4f = struct {
         .{ 0, 0, 0, 1 },
     } };
 
-    pub fn splat(s: f32) M4f {
+    pub fn transpose(m: M4f) M4f {
         return .{ .data = .{
-            @splat(s),
-            @splat(s),
-            @splat(s),
-            @splat(s),
+            .{
+                m.data[0][0],
+                m.data[1][0],
+                m.data[2][0],
+                m.data[3][0],
+            },
+            .{
+                m.data[0][1],
+                m.data[1][1],
+                m.data[2][1],
+                m.data[3][1],
+            },
+            .{
+                m.data[0][2],
+                m.data[1][2],
+                m.data[2][2],
+                m.data[3][2],
+            },
+            .{
+                m.data[0][3],
+                m.data[1][3],
+                m.data[2][3],
+                m.data[3][3],
+            },
         } };
+    }
+
+    pub fn mulmat(a: M4f, b: M4f) M4f {
+        const t = b.transpose();
+        var c: M4f = undefined;
+        for (0..4) |i| {
+            for (0..4) |j| {
+                c.data[i][j] = @reduce(.Add, a.data[i] * t.data[i]);
+            }
+        }
+        return c;
+    }
+    pub fn mulvec(m: M4f, v: V4f) V4f {
+        var w: V4f = undefined;
+        for (0..4) |i| {
+            w.data[i] = @reduce(.Add, m.data[i] * v.data);
+        }
+        return w;
+    }
+};
+
+pub const V2d = struct {
+    data: @Vector(2, f64),
+
+    pub const zero: V2d = .{ .data = @splat(0) };
+
+    pub fn splat(s: f64) V2d {
+        return .{ .data = @splat(s) };
+    }
+    pub fn v2f(v: V2d) V2f {
+        return .{ .data = @floatCast(v) };
+    }
+
+    pub fn floor(v: V2d) V2d {
+        return .{ .data = @floor(v.data) };
+    }
+    pub fn ceil(v: V2d) V2d {
+        return .{ .data = @floor(v.data) };
+    }
+    pub fn len(v: V2d) f64 {
+        return @sqrt(@reduce(.Add, v.data * v.data));
+    }
+    pub fn len2(v: V2d) f64 {
+        return @reduce(.Add, v.data * v.data);
+    }
+
+    pub fn add(a: V2d, b: V2d) V2d {
+        return .{ .data = a.data + b.data };
+    }
+    pub fn sub(a: V2d, b: V2d) V2d {
+        return .{ .data = a.data - b.data };
+    }
+    pub fn mul(a: V2d, b: V2d) V2d {
+        return .{ .data = a.data * b.data };
+    }
+    pub fn div(a: V2d, b: V2d) V2d {
+        return .{ .data = a.data / b.data };
+    }
+    pub fn dot(a: V2d, b: V2d) V2d {
+        return .{ .data = @reduce(.Add, a.data * b.data) };
+    }
+
+    pub fn lerp(a: V2d, b: V2d, t: V2d) V2d {
+        return .{ .data = (@as(@Vector(2, f64), @splat(1)) - t.data) * a.data + t * b.data };
+    }
+
+    pub fn x(v: V2d) f64 {
+        return v.data[0];
+    }
+    pub fn y(v: V2d) f64 {
+        return v.data[1];
+    }
+
+    pub fn xx(v: V2d) V2d {
+        return .{ .data = .{ v.data[0], v.data[0] } };
+    }
+    pub fn xy(v: V2d) V2d {
+        return .{ .data = .{ v.data[0], v.data[1] } };
+    }
+    pub fn yx(v: V2d) V2d {
+        return .{ .data = .{ v.data[1], v.data[0] } };
+    }
+    pub fn yy(v: V2d) V2d {
+        return .{ .data = .{ v.data[1], v.data[1] } };
+    }
+
+    pub fn xxx(v: V2d) V3d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[0] } };
+    }
+    pub fn xxy(v: V2d) V3d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[1] } };
+    }
+    pub fn xyx(v: V2d) V3d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[0] } };
+    }
+    pub fn xyy(v: V2d) V3d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[1] } };
+    }
+    pub fn yxx(v: V2d) V3d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[0] } };
+    }
+    pub fn yxy(v: V2d) V3d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[1] } };
+    }
+    pub fn yyx(v: V2d) V3d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[0] } };
+    }
+    pub fn yyy(v: V2d) V3d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[1] } };
+    }
+
+    pub fn xxxx(v: V2d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[0], v.data[0] } };
+    }
+    pub fn xxxy(v: V2d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[0], v.data[1] } };
+    }
+    pub fn xxyx(v: V2d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[1], v.data[0] } };
+    }
+    pub fn xxyy(v: V2d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[1], v.data[1] } };
+    }
+    pub fn xyxx(v: V2d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[0], v.data[0] } };
+    }
+    pub fn xyxy(v: V2d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[0], v.data[1] } };
+    }
+    pub fn xyyx(v: V2d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[1], v.data[0] } };
+    }
+    pub fn xyyy(v: V2d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[1], v.data[1] } };
+    }
+    pub fn yxxx(v: V2d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[0], v.data[0] } };
+    }
+    pub fn yxxy(v: V2d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[0], v.data[1] } };
+    }
+    pub fn yxyx(v: V2d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[1], v.data[0] } };
+    }
+    pub fn yxyy(v: V2d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[1], v.data[1] } };
+    }
+    pub fn yyxx(v: V2d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[0], v.data[0] } };
+    }
+    pub fn yyxy(v: V2d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[0], v.data[1] } };
+    }
+    pub fn yyyx(v: V2d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[1], v.data[0] } };
+    }
+    pub fn yyyy(v: V2d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[1], v.data[1] } };
+    }
+};
+
+pub const M2d = struct {
+    data: [2]@Vector(2, f64),
+
+    pub const zero: M2d = .{ .data = .{
+        .{ 0, 0 },
+        .{ 0, 0 },
+    } };
+    pub const eye: M2d = .{ .data = .{
+        .{ 1, 0 },
+        .{ 0, 1 },
+    } };
+
+    pub fn transpose(m: M2d) M2d {
+        return .{ .data = .{
+            .{
+                m.data[0][0],
+                m.data[1][0],
+            },
+            .{
+                m.data[0][1],
+                m.data[1][1],
+            },
+        } };
+    }
+
+    pub fn mulmat(a: M2d, b: M2d) M2d {
+        const t = b.transpose();
+        var c: M2d = undefined;
+        for (0..2) |i| {
+            for (0..2) |j| {
+                c.data[i][j] = @reduce(.Add, a.data[i] * t.data[i]);
+            }
+        }
+        return c;
+    }
+    pub fn mulvec(m: M2d, v: V2d) V2d {
+        var w: V2d = undefined;
+        for (0..2) |i| {
+            w.data[i] = @reduce(.Add, m.data[i] * v.data);
+        }
+        return w;
+    }
+};
+
+pub const V3d = struct {
+    data: @Vector(3, f64),
+
+    pub const zero: V3d = .{ .data = @splat(0) };
+
+    pub fn splat(s: f64) V3d {
+        return .{ .data = @splat(s) };
+    }
+    pub fn v3f(v: V3d) V3f {
+        return .{ .data = @floatCast(v) };
+    }
+
+    pub fn floor(v: V3d) V3d {
+        return .{ .data = @floor(v.data) };
+    }
+    pub fn ceil(v: V3d) V3d {
+        return .{ .data = @floor(v.data) };
+    }
+    pub fn len(v: V3d) f64 {
+        return @sqrt(@reduce(.Add, v.data * v.data));
+    }
+    pub fn len2(v: V3d) f64 {
+        return @reduce(.Add, v.data * v.data);
+    }
+
+    pub fn add(a: V3d, b: V3d) V3d {
+        return .{ .data = a.data + b.data };
+    }
+    pub fn sub(a: V3d, b: V3d) V3d {
+        return .{ .data = a.data - b.data };
+    }
+    pub fn mul(a: V3d, b: V3d) V3d {
+        return .{ .data = a.data * b.data };
+    }
+    pub fn div(a: V3d, b: V3d) V3d {
+        return .{ .data = a.data / b.data };
+    }
+    pub fn dot(a: V3d, b: V3d) V3d {
+        return .{ .data = @reduce(.Add, a.data * b.data) };
+    }
+
+    pub fn lerp(a: V3d, b: V3d, t: V3d) V3d {
+        return .{ .data = (@as(@Vector(3, f64), @splat(1)) - t.data) * a.data + t * b.data };
+    }
+
+    pub fn x(v: V3d) f64 {
+        return v.data[0];
+    }
+    pub fn y(v: V3d) f64 {
+        return v.data[1];
+    }
+    pub fn z(v: V3d) f64 {
+        return v.data[2];
+    }
+
+    pub fn xx(v: V3d) V2d {
+        return .{ .data = .{ v.data[0], v.data[0] } };
+    }
+    pub fn xy(v: V3d) V2d {
+        return .{ .data = .{ v.data[0], v.data[1] } };
+    }
+    pub fn xz(v: V3d) V2d {
+        return .{ .data = .{ v.data[0], v.data[2] } };
+    }
+    pub fn yx(v: V3d) V2d {
+        return .{ .data = .{ v.data[1], v.data[0] } };
+    }
+    pub fn yy(v: V3d) V2d {
+        return .{ .data = .{ v.data[1], v.data[1] } };
+    }
+    pub fn yz(v: V3d) V2d {
+        return .{ .data = .{ v.data[1], v.data[2] } };
+    }
+    pub fn zx(v: V3d) V2d {
+        return .{ .data = .{ v.data[2], v.data[0] } };
+    }
+    pub fn zy(v: V3d) V2d {
+        return .{ .data = .{ v.data[2], v.data[1] } };
+    }
+    pub fn zz(v: V3d) V2d {
+        return .{ .data = .{ v.data[2], v.data[2] } };
+    }
+
+    pub fn xxx(v: V3d) V3d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[0] } };
+    }
+    pub fn xxy(v: V3d) V3d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[1] } };
+    }
+    pub fn xxz(v: V3d) V3d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[2] } };
+    }
+    pub fn xyx(v: V3d) V3d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[0] } };
+    }
+    pub fn xyy(v: V3d) V3d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[1] } };
+    }
+    pub fn xyz(v: V3d) V3d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[2] } };
+    }
+    pub fn xzx(v: V3d) V3d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[0] } };
+    }
+    pub fn xzy(v: V3d) V3d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[1] } };
+    }
+    pub fn xzz(v: V3d) V3d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[2] } };
+    }
+    pub fn yxx(v: V3d) V3d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[0] } };
+    }
+    pub fn yxy(v: V3d) V3d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[1] } };
+    }
+    pub fn yxz(v: V3d) V3d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[2] } };
+    }
+    pub fn yyx(v: V3d) V3d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[0] } };
+    }
+    pub fn yyy(v: V3d) V3d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[1] } };
+    }
+    pub fn yyz(v: V3d) V3d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[2] } };
+    }
+    pub fn yzx(v: V3d) V3d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[0] } };
+    }
+    pub fn yzy(v: V3d) V3d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[1] } };
+    }
+    pub fn yzz(v: V3d) V3d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[2] } };
+    }
+    pub fn zxx(v: V3d) V3d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[0] } };
+    }
+    pub fn zxy(v: V3d) V3d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[1] } };
+    }
+    pub fn zxz(v: V3d) V3d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[2] } };
+    }
+    pub fn zyx(v: V3d) V3d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[0] } };
+    }
+    pub fn zyy(v: V3d) V3d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[1] } };
+    }
+    pub fn zyz(v: V3d) V3d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[2] } };
+    }
+    pub fn zzx(v: V3d) V3d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[0] } };
+    }
+    pub fn zzy(v: V3d) V3d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[1] } };
+    }
+    pub fn zzz(v: V3d) V3d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[2] } };
+    }
+
+    pub fn xxxx(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[0], v.data[0] } };
+    }
+    pub fn xxxy(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[0], v.data[1] } };
+    }
+    pub fn xxxz(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[0], v.data[2] } };
+    }
+    pub fn xxyx(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[1], v.data[0] } };
+    }
+    pub fn xxyy(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[1], v.data[1] } };
+    }
+    pub fn xxyz(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[1], v.data[2] } };
+    }
+    pub fn xxzx(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[2], v.data[0] } };
+    }
+    pub fn xxzy(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[2], v.data[1] } };
+    }
+    pub fn xxzz(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[2], v.data[2] } };
+    }
+    pub fn xyxx(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[0], v.data[0] } };
+    }
+    pub fn xyxy(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[0], v.data[1] } };
+    }
+    pub fn xyxz(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[0], v.data[2] } };
+    }
+    pub fn xyyx(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[1], v.data[0] } };
+    }
+    pub fn xyyy(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[1], v.data[1] } };
+    }
+    pub fn xyyz(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[1], v.data[2] } };
+    }
+    pub fn xyzx(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[2], v.data[0] } };
+    }
+    pub fn xyzy(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[2], v.data[1] } };
+    }
+    pub fn xyzz(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[2], v.data[2] } };
+    }
+    pub fn xzxx(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[0], v.data[0] } };
+    }
+    pub fn xzxy(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[0], v.data[1] } };
+    }
+    pub fn xzxz(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[0], v.data[2] } };
+    }
+    pub fn xzyx(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[1], v.data[0] } };
+    }
+    pub fn xzyy(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[1], v.data[1] } };
+    }
+    pub fn xzyz(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[1], v.data[2] } };
+    }
+    pub fn xzzx(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[2], v.data[0] } };
+    }
+    pub fn xzzy(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[2], v.data[1] } };
+    }
+    pub fn xzzz(v: V3d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[2], v.data[2] } };
+    }
+    pub fn yxxx(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[0], v.data[0] } };
+    }
+    pub fn yxxy(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[0], v.data[1] } };
+    }
+    pub fn yxxz(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[0], v.data[2] } };
+    }
+    pub fn yxyx(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[1], v.data[0] } };
+    }
+    pub fn yxyy(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[1], v.data[1] } };
+    }
+    pub fn yxyz(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[1], v.data[2] } };
+    }
+    pub fn yxzx(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[2], v.data[0] } };
+    }
+    pub fn yxzy(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[2], v.data[1] } };
+    }
+    pub fn yxzz(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[2], v.data[2] } };
+    }
+    pub fn yyxx(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[0], v.data[0] } };
+    }
+    pub fn yyxy(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[0], v.data[1] } };
+    }
+    pub fn yyxz(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[0], v.data[2] } };
+    }
+    pub fn yyyx(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[1], v.data[0] } };
+    }
+    pub fn yyyy(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[1], v.data[1] } };
+    }
+    pub fn yyyz(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[1], v.data[2] } };
+    }
+    pub fn yyzx(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[2], v.data[0] } };
+    }
+    pub fn yyzy(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[2], v.data[1] } };
+    }
+    pub fn yyzz(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[2], v.data[2] } };
+    }
+    pub fn yzxx(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[0], v.data[0] } };
+    }
+    pub fn yzxy(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[0], v.data[1] } };
+    }
+    pub fn yzxz(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[0], v.data[2] } };
+    }
+    pub fn yzyx(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[1], v.data[0] } };
+    }
+    pub fn yzyy(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[1], v.data[1] } };
+    }
+    pub fn yzyz(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[1], v.data[2] } };
+    }
+    pub fn yzzx(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[2], v.data[0] } };
+    }
+    pub fn yzzy(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[2], v.data[1] } };
+    }
+    pub fn yzzz(v: V3d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[2], v.data[2] } };
+    }
+    pub fn zxxx(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[0], v.data[0] } };
+    }
+    pub fn zxxy(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[0], v.data[1] } };
+    }
+    pub fn zxxz(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[0], v.data[2] } };
+    }
+    pub fn zxyx(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[1], v.data[0] } };
+    }
+    pub fn zxyy(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[1], v.data[1] } };
+    }
+    pub fn zxyz(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[1], v.data[2] } };
+    }
+    pub fn zxzx(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[2], v.data[0] } };
+    }
+    pub fn zxzy(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[2], v.data[1] } };
+    }
+    pub fn zxzz(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[2], v.data[2] } };
+    }
+    pub fn zyxx(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[0], v.data[0] } };
+    }
+    pub fn zyxy(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[0], v.data[1] } };
+    }
+    pub fn zyxz(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[0], v.data[2] } };
+    }
+    pub fn zyyx(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[1], v.data[0] } };
+    }
+    pub fn zyyy(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[1], v.data[1] } };
+    }
+    pub fn zyyz(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[1], v.data[2] } };
+    }
+    pub fn zyzx(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[2], v.data[0] } };
+    }
+    pub fn zyzy(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[2], v.data[1] } };
+    }
+    pub fn zyzz(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[2], v.data[2] } };
+    }
+    pub fn zzxx(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[0], v.data[0] } };
+    }
+    pub fn zzxy(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[0], v.data[1] } };
+    }
+    pub fn zzxz(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[0], v.data[2] } };
+    }
+    pub fn zzyx(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[1], v.data[0] } };
+    }
+    pub fn zzyy(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[1], v.data[1] } };
+    }
+    pub fn zzyz(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[1], v.data[2] } };
+    }
+    pub fn zzzx(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[2], v.data[0] } };
+    }
+    pub fn zzzy(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[2], v.data[1] } };
+    }
+    pub fn zzzz(v: V3d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[2], v.data[2] } };
+    }
+};
+
+pub const M3d = struct {
+    data: [3]@Vector(3, f64),
+
+    pub const zero: M3d = .{ .data = .{
+        .{ 0, 0, 0 },
+        .{ 0, 0, 0 },
+        .{ 0, 0, 0 },
+    } };
+    pub const eye: M3d = .{ .data = .{
+        .{ 1, 0, 0 },
+        .{ 0, 1, 0 },
+        .{ 0, 0, 1 },
+    } };
+
+    pub fn transpose(m: M3d) M3d {
+        return .{ .data = .{
+            .{
+                m.data[0][0],
+                m.data[1][0],
+                m.data[2][0],
+            },
+            .{
+                m.data[0][1],
+                m.data[1][1],
+                m.data[2][1],
+            },
+            .{
+                m.data[0][2],
+                m.data[1][2],
+                m.data[2][2],
+            },
+        } };
+    }
+
+    pub fn mulmat(a: M3d, b: M3d) M3d {
+        const t = b.transpose();
+        var c: M3d = undefined;
+        for (0..3) |i| {
+            for (0..3) |j| {
+                c.data[i][j] = @reduce(.Add, a.data[i] * t.data[i]);
+            }
+        }
+        return c;
+    }
+    pub fn mulvec(m: M3d, v: V3d) V3d {
+        var w: V3d = undefined;
+        for (0..3) |i| {
+            w.data[i] = @reduce(.Add, m.data[i] * v.data);
+        }
+        return w;
+    }
+};
+
+pub const V4d = struct {
+    data: @Vector(4, f64),
+
+    pub const zero: V4d = .{ .data = @splat(0) };
+
+    pub fn splat(s: f64) V4d {
+        return .{ .data = @splat(s) };
+    }
+    pub fn v4f(v: V4d) V4f {
+        return .{ .data = @floatCast(v) };
+    }
+
+    pub fn floor(v: V4d) V4d {
+        return .{ .data = @floor(v.data) };
+    }
+    pub fn ceil(v: V4d) V4d {
+        return .{ .data = @floor(v.data) };
+    }
+    pub fn len(v: V4d) f64 {
+        return @sqrt(@reduce(.Add, v.data * v.data));
+    }
+    pub fn len2(v: V4d) f64 {
+        return @reduce(.Add, v.data * v.data);
+    }
+
+    pub fn add(a: V4d, b: V4d) V4d {
+        return .{ .data = a.data + b.data };
+    }
+    pub fn sub(a: V4d, b: V4d) V4d {
+        return .{ .data = a.data - b.data };
+    }
+    pub fn mul(a: V4d, b: V4d) V4d {
+        return .{ .data = a.data * b.data };
+    }
+    pub fn div(a: V4d, b: V4d) V4d {
+        return .{ .data = a.data / b.data };
+    }
+    pub fn dot(a: V4d, b: V4d) V4d {
+        return .{ .data = @reduce(.Add, a.data * b.data) };
+    }
+
+    pub fn lerp(a: V4d, b: V4d, t: V4d) V4d {
+        return .{ .data = (@as(@Vector(4, f64), @splat(1)) - t.data) * a.data + t * b.data };
+    }
+
+    pub fn x(v: V4d) f64 {
+        return v.data[0];
+    }
+    pub fn y(v: V4d) f64 {
+        return v.data[1];
+    }
+    pub fn z(v: V4d) f64 {
+        return v.data[2];
+    }
+    pub fn w(v: V4d) f64 {
+        return v.data[3];
+    }
+
+    pub fn xx(v: V4d) V2d {
+        return .{ .data = .{ v.data[0], v.data[0] } };
+    }
+    pub fn xy(v: V4d) V2d {
+        return .{ .data = .{ v.data[0], v.data[1] } };
+    }
+    pub fn xz(v: V4d) V2d {
+        return .{ .data = .{ v.data[0], v.data[2] } };
+    }
+    pub fn xw(v: V4d) V2d {
+        return .{ .data = .{ v.data[0], v.data[3] } };
+    }
+    pub fn yx(v: V4d) V2d {
+        return .{ .data = .{ v.data[1], v.data[0] } };
+    }
+    pub fn yy(v: V4d) V2d {
+        return .{ .data = .{ v.data[1], v.data[1] } };
+    }
+    pub fn yz(v: V4d) V2d {
+        return .{ .data = .{ v.data[1], v.data[2] } };
+    }
+    pub fn yw(v: V4d) V2d {
+        return .{ .data = .{ v.data[1], v.data[3] } };
+    }
+    pub fn zx(v: V4d) V2d {
+        return .{ .data = .{ v.data[2], v.data[0] } };
+    }
+    pub fn zy(v: V4d) V2d {
+        return .{ .data = .{ v.data[2], v.data[1] } };
+    }
+    pub fn zz(v: V4d) V2d {
+        return .{ .data = .{ v.data[2], v.data[2] } };
+    }
+    pub fn zw(v: V4d) V2d {
+        return .{ .data = .{ v.data[2], v.data[3] } };
+    }
+    pub fn wx(v: V4d) V2d {
+        return .{ .data = .{ v.data[3], v.data[0] } };
+    }
+    pub fn wy(v: V4d) V2d {
+        return .{ .data = .{ v.data[3], v.data[1] } };
+    }
+    pub fn wz(v: V4d) V2d {
+        return .{ .data = .{ v.data[3], v.data[2] } };
+    }
+    pub fn ww(v: V4d) V2d {
+        return .{ .data = .{ v.data[3], v.data[3] } };
+    }
+
+    pub fn xxx(v: V4d) V3d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[0] } };
+    }
+    pub fn xxy(v: V4d) V3d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[1] } };
+    }
+    pub fn xxz(v: V4d) V3d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[2] } };
+    }
+    pub fn xxw(v: V4d) V3d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[3] } };
+    }
+    pub fn xyx(v: V4d) V3d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[0] } };
+    }
+    pub fn xyy(v: V4d) V3d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[1] } };
+    }
+    pub fn xyz(v: V4d) V3d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[2] } };
+    }
+    pub fn xyw(v: V4d) V3d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[3] } };
+    }
+    pub fn xzx(v: V4d) V3d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[0] } };
+    }
+    pub fn xzy(v: V4d) V3d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[1] } };
+    }
+    pub fn xzz(v: V4d) V3d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[2] } };
+    }
+    pub fn xzw(v: V4d) V3d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[3] } };
+    }
+    pub fn xwx(v: V4d) V3d {
+        return .{ .data = .{ v.data[0], v.data[3], v.data[0] } };
+    }
+    pub fn xwy(v: V4d) V3d {
+        return .{ .data = .{ v.data[0], v.data[3], v.data[1] } };
+    }
+    pub fn xwz(v: V4d) V3d {
+        return .{ .data = .{ v.data[0], v.data[3], v.data[2] } };
+    }
+    pub fn xww(v: V4d) V3d {
+        return .{ .data = .{ v.data[0], v.data[3], v.data[3] } };
+    }
+    pub fn yxx(v: V4d) V3d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[0] } };
+    }
+    pub fn yxy(v: V4d) V3d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[1] } };
+    }
+    pub fn yxz(v: V4d) V3d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[2] } };
+    }
+    pub fn yxw(v: V4d) V3d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[3] } };
+    }
+    pub fn yyx(v: V4d) V3d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[0] } };
+    }
+    pub fn yyy(v: V4d) V3d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[1] } };
+    }
+    pub fn yyz(v: V4d) V3d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[2] } };
+    }
+    pub fn yyw(v: V4d) V3d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[3] } };
+    }
+    pub fn yzx(v: V4d) V3d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[0] } };
+    }
+    pub fn yzy(v: V4d) V3d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[1] } };
+    }
+    pub fn yzz(v: V4d) V3d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[2] } };
+    }
+    pub fn yzw(v: V4d) V3d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[3] } };
+    }
+    pub fn ywx(v: V4d) V3d {
+        return .{ .data = .{ v.data[1], v.data[3], v.data[0] } };
+    }
+    pub fn ywy(v: V4d) V3d {
+        return .{ .data = .{ v.data[1], v.data[3], v.data[1] } };
+    }
+    pub fn ywz(v: V4d) V3d {
+        return .{ .data = .{ v.data[1], v.data[3], v.data[2] } };
+    }
+    pub fn yww(v: V4d) V3d {
+        return .{ .data = .{ v.data[1], v.data[3], v.data[3] } };
+    }
+    pub fn zxx(v: V4d) V3d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[0] } };
+    }
+    pub fn zxy(v: V4d) V3d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[1] } };
+    }
+    pub fn zxz(v: V4d) V3d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[2] } };
+    }
+    pub fn zxw(v: V4d) V3d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[3] } };
+    }
+    pub fn zyx(v: V4d) V3d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[0] } };
+    }
+    pub fn zyy(v: V4d) V3d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[1] } };
+    }
+    pub fn zyz(v: V4d) V3d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[2] } };
+    }
+    pub fn zyw(v: V4d) V3d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[3] } };
+    }
+    pub fn zzx(v: V4d) V3d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[0] } };
+    }
+    pub fn zzy(v: V4d) V3d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[1] } };
+    }
+    pub fn zzz(v: V4d) V3d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[2] } };
+    }
+    pub fn zzw(v: V4d) V3d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[3] } };
+    }
+    pub fn zwx(v: V4d) V3d {
+        return .{ .data = .{ v.data[2], v.data[3], v.data[0] } };
+    }
+    pub fn zwy(v: V4d) V3d {
+        return .{ .data = .{ v.data[2], v.data[3], v.data[1] } };
+    }
+    pub fn zwz(v: V4d) V3d {
+        return .{ .data = .{ v.data[2], v.data[3], v.data[2] } };
+    }
+    pub fn zww(v: V4d) V3d {
+        return .{ .data = .{ v.data[2], v.data[3], v.data[3] } };
+    }
+    pub fn wxx(v: V4d) V3d {
+        return .{ .data = .{ v.data[3], v.data[0], v.data[0] } };
+    }
+    pub fn wxy(v: V4d) V3d {
+        return .{ .data = .{ v.data[3], v.data[0], v.data[1] } };
+    }
+    pub fn wxz(v: V4d) V3d {
+        return .{ .data = .{ v.data[3], v.data[0], v.data[2] } };
+    }
+    pub fn wxw(v: V4d) V3d {
+        return .{ .data = .{ v.data[3], v.data[0], v.data[3] } };
+    }
+    pub fn wyx(v: V4d) V3d {
+        return .{ .data = .{ v.data[3], v.data[1], v.data[0] } };
+    }
+    pub fn wyy(v: V4d) V3d {
+        return .{ .data = .{ v.data[3], v.data[1], v.data[1] } };
+    }
+    pub fn wyz(v: V4d) V3d {
+        return .{ .data = .{ v.data[3], v.data[1], v.data[2] } };
+    }
+    pub fn wyw(v: V4d) V3d {
+        return .{ .data = .{ v.data[3], v.data[1], v.data[3] } };
+    }
+    pub fn wzx(v: V4d) V3d {
+        return .{ .data = .{ v.data[3], v.data[2], v.data[0] } };
+    }
+    pub fn wzy(v: V4d) V3d {
+        return .{ .data = .{ v.data[3], v.data[2], v.data[1] } };
+    }
+    pub fn wzz(v: V4d) V3d {
+        return .{ .data = .{ v.data[3], v.data[2], v.data[2] } };
+    }
+    pub fn wzw(v: V4d) V3d {
+        return .{ .data = .{ v.data[3], v.data[2], v.data[3] } };
+    }
+    pub fn wwx(v: V4d) V3d {
+        return .{ .data = .{ v.data[3], v.data[3], v.data[0] } };
+    }
+    pub fn wwy(v: V4d) V3d {
+        return .{ .data = .{ v.data[3], v.data[3], v.data[1] } };
+    }
+    pub fn wwz(v: V4d) V3d {
+        return .{ .data = .{ v.data[3], v.data[3], v.data[2] } };
+    }
+    pub fn www(v: V4d) V3d {
+        return .{ .data = .{ v.data[3], v.data[3], v.data[3] } };
+    }
+
+    pub fn xxxx(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[0], v.data[0] } };
+    }
+    pub fn xxxy(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[0], v.data[1] } };
+    }
+    pub fn xxxz(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[0], v.data[2] } };
+    }
+    pub fn xxxw(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[0], v.data[3] } };
+    }
+    pub fn xxyx(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[1], v.data[0] } };
+    }
+    pub fn xxyy(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[1], v.data[1] } };
+    }
+    pub fn xxyz(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[1], v.data[2] } };
+    }
+    pub fn xxyw(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[1], v.data[3] } };
+    }
+    pub fn xxzx(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[2], v.data[0] } };
+    }
+    pub fn xxzy(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[2], v.data[1] } };
+    }
+    pub fn xxzz(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[2], v.data[2] } };
+    }
+    pub fn xxzw(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[2], v.data[3] } };
+    }
+    pub fn xxwx(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[3], v.data[0] } };
+    }
+    pub fn xxwy(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[3], v.data[1] } };
+    }
+    pub fn xxwz(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[3], v.data[2] } };
+    }
+    pub fn xxww(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[0], v.data[3], v.data[3] } };
+    }
+    pub fn xyxx(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[0], v.data[0] } };
+    }
+    pub fn xyxy(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[0], v.data[1] } };
+    }
+    pub fn xyxz(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[0], v.data[2] } };
+    }
+    pub fn xyxw(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[0], v.data[3] } };
+    }
+    pub fn xyyx(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[1], v.data[0] } };
+    }
+    pub fn xyyy(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[1], v.data[1] } };
+    }
+    pub fn xyyz(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[1], v.data[2] } };
+    }
+    pub fn xyyw(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[1], v.data[3] } };
+    }
+    pub fn xyzx(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[2], v.data[0] } };
+    }
+    pub fn xyzy(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[2], v.data[1] } };
+    }
+    pub fn xyzz(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[2], v.data[2] } };
+    }
+    pub fn xyzw(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[2], v.data[3] } };
+    }
+    pub fn xywx(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[3], v.data[0] } };
+    }
+    pub fn xywy(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[3], v.data[1] } };
+    }
+    pub fn xywz(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[3], v.data[2] } };
+    }
+    pub fn xyww(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[3], v.data[3] } };
+    }
+    pub fn xzxx(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[0], v.data[0] } };
+    }
+    pub fn xzxy(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[0], v.data[1] } };
+    }
+    pub fn xzxz(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[0], v.data[2] } };
+    }
+    pub fn xzxw(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[0], v.data[3] } };
+    }
+    pub fn xzyx(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[1], v.data[0] } };
+    }
+    pub fn xzyy(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[1], v.data[1] } };
+    }
+    pub fn xzyz(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[1], v.data[2] } };
+    }
+    pub fn xzyw(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[1], v.data[3] } };
+    }
+    pub fn xzzx(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[2], v.data[0] } };
+    }
+    pub fn xzzy(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[2], v.data[1] } };
+    }
+    pub fn xzzz(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[2], v.data[2] } };
+    }
+    pub fn xzzw(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[2], v.data[3] } };
+    }
+    pub fn xzwx(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[3], v.data[0] } };
+    }
+    pub fn xzwy(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[3], v.data[1] } };
+    }
+    pub fn xzwz(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[3], v.data[2] } };
+    }
+    pub fn xzww(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[2], v.data[3], v.data[3] } };
+    }
+    pub fn xwxx(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[3], v.data[0], v.data[0] } };
+    }
+    pub fn xwxy(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[3], v.data[0], v.data[1] } };
+    }
+    pub fn xwxz(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[3], v.data[0], v.data[2] } };
+    }
+    pub fn xwxw(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[3], v.data[0], v.data[3] } };
+    }
+    pub fn xwyx(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[3], v.data[1], v.data[0] } };
+    }
+    pub fn xwyy(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[3], v.data[1], v.data[1] } };
+    }
+    pub fn xwyz(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[3], v.data[1], v.data[2] } };
+    }
+    pub fn xwyw(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[3], v.data[1], v.data[3] } };
+    }
+    pub fn xwzx(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[3], v.data[2], v.data[0] } };
+    }
+    pub fn xwzy(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[3], v.data[2], v.data[1] } };
+    }
+    pub fn xwzz(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[3], v.data[2], v.data[2] } };
+    }
+    pub fn xwzw(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[3], v.data[2], v.data[3] } };
+    }
+    pub fn xwwx(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[3], v.data[3], v.data[0] } };
+    }
+    pub fn xwwy(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[3], v.data[3], v.data[1] } };
+    }
+    pub fn xwwz(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[3], v.data[3], v.data[2] } };
+    }
+    pub fn xwww(v: V4d) V4d {
+        return .{ .data = .{ v.data[0], v.data[3], v.data[3], v.data[3] } };
+    }
+    pub fn yxxx(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[0], v.data[0] } };
+    }
+    pub fn yxxy(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[0], v.data[1] } };
+    }
+    pub fn yxxz(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[0], v.data[2] } };
+    }
+    pub fn yxxw(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[0], v.data[3] } };
+    }
+    pub fn yxyx(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[1], v.data[0] } };
+    }
+    pub fn yxyy(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[1], v.data[1] } };
+    }
+    pub fn yxyz(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[1], v.data[2] } };
+    }
+    pub fn yxyw(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[1], v.data[3] } };
+    }
+    pub fn yxzx(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[2], v.data[0] } };
+    }
+    pub fn yxzy(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[2], v.data[1] } };
+    }
+    pub fn yxzz(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[2], v.data[2] } };
+    }
+    pub fn yxzw(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[2], v.data[3] } };
+    }
+    pub fn yxwx(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[3], v.data[0] } };
+    }
+    pub fn yxwy(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[3], v.data[1] } };
+    }
+    pub fn yxwz(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[3], v.data[2] } };
+    }
+    pub fn yxww(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[0], v.data[3], v.data[3] } };
+    }
+    pub fn yyxx(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[0], v.data[0] } };
+    }
+    pub fn yyxy(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[0], v.data[1] } };
+    }
+    pub fn yyxz(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[0], v.data[2] } };
+    }
+    pub fn yyxw(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[0], v.data[3] } };
+    }
+    pub fn yyyx(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[1], v.data[0] } };
+    }
+    pub fn yyyy(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[1], v.data[1] } };
+    }
+    pub fn yyyz(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[1], v.data[2] } };
+    }
+    pub fn yyyw(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[1], v.data[3] } };
+    }
+    pub fn yyzx(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[2], v.data[0] } };
+    }
+    pub fn yyzy(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[2], v.data[1] } };
+    }
+    pub fn yyzz(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[2], v.data[2] } };
+    }
+    pub fn yyzw(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[2], v.data[3] } };
+    }
+    pub fn yywx(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[3], v.data[0] } };
+    }
+    pub fn yywy(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[3], v.data[1] } };
+    }
+    pub fn yywz(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[3], v.data[2] } };
+    }
+    pub fn yyww(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[1], v.data[3], v.data[3] } };
+    }
+    pub fn yzxx(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[0], v.data[0] } };
+    }
+    pub fn yzxy(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[0], v.data[1] } };
+    }
+    pub fn yzxz(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[0], v.data[2] } };
+    }
+    pub fn yzxw(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[0], v.data[3] } };
+    }
+    pub fn yzyx(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[1], v.data[0] } };
+    }
+    pub fn yzyy(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[1], v.data[1] } };
+    }
+    pub fn yzyz(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[1], v.data[2] } };
+    }
+    pub fn yzyw(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[1], v.data[3] } };
+    }
+    pub fn yzzx(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[2], v.data[0] } };
+    }
+    pub fn yzzy(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[2], v.data[1] } };
+    }
+    pub fn yzzz(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[2], v.data[2] } };
+    }
+    pub fn yzzw(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[2], v.data[3] } };
+    }
+    pub fn yzwx(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[3], v.data[0] } };
+    }
+    pub fn yzwy(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[3], v.data[1] } };
+    }
+    pub fn yzwz(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[3], v.data[2] } };
+    }
+    pub fn yzww(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[2], v.data[3], v.data[3] } };
+    }
+    pub fn ywxx(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[3], v.data[0], v.data[0] } };
+    }
+    pub fn ywxy(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[3], v.data[0], v.data[1] } };
+    }
+    pub fn ywxz(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[3], v.data[0], v.data[2] } };
+    }
+    pub fn ywxw(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[3], v.data[0], v.data[3] } };
+    }
+    pub fn ywyx(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[3], v.data[1], v.data[0] } };
+    }
+    pub fn ywyy(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[3], v.data[1], v.data[1] } };
+    }
+    pub fn ywyz(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[3], v.data[1], v.data[2] } };
+    }
+    pub fn ywyw(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[3], v.data[1], v.data[3] } };
+    }
+    pub fn ywzx(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[3], v.data[2], v.data[0] } };
+    }
+    pub fn ywzy(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[3], v.data[2], v.data[1] } };
+    }
+    pub fn ywzz(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[3], v.data[2], v.data[2] } };
+    }
+    pub fn ywzw(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[3], v.data[2], v.data[3] } };
+    }
+    pub fn ywwx(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[3], v.data[3], v.data[0] } };
+    }
+    pub fn ywwy(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[3], v.data[3], v.data[1] } };
+    }
+    pub fn ywwz(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[3], v.data[3], v.data[2] } };
+    }
+    pub fn ywww(v: V4d) V4d {
+        return .{ .data = .{ v.data[1], v.data[3], v.data[3], v.data[3] } };
+    }
+    pub fn zxxx(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[0], v.data[0] } };
+    }
+    pub fn zxxy(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[0], v.data[1] } };
+    }
+    pub fn zxxz(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[0], v.data[2] } };
+    }
+    pub fn zxxw(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[0], v.data[3] } };
+    }
+    pub fn zxyx(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[1], v.data[0] } };
+    }
+    pub fn zxyy(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[1], v.data[1] } };
+    }
+    pub fn zxyz(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[1], v.data[2] } };
+    }
+    pub fn zxyw(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[1], v.data[3] } };
+    }
+    pub fn zxzx(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[2], v.data[0] } };
+    }
+    pub fn zxzy(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[2], v.data[1] } };
+    }
+    pub fn zxzz(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[2], v.data[2] } };
+    }
+    pub fn zxzw(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[2], v.data[3] } };
+    }
+    pub fn zxwx(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[3], v.data[0] } };
+    }
+    pub fn zxwy(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[3], v.data[1] } };
+    }
+    pub fn zxwz(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[3], v.data[2] } };
+    }
+    pub fn zxww(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[0], v.data[3], v.data[3] } };
+    }
+    pub fn zyxx(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[0], v.data[0] } };
+    }
+    pub fn zyxy(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[0], v.data[1] } };
+    }
+    pub fn zyxz(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[0], v.data[2] } };
+    }
+    pub fn zyxw(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[0], v.data[3] } };
+    }
+    pub fn zyyx(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[1], v.data[0] } };
+    }
+    pub fn zyyy(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[1], v.data[1] } };
+    }
+    pub fn zyyz(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[1], v.data[2] } };
+    }
+    pub fn zyyw(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[1], v.data[3] } };
+    }
+    pub fn zyzx(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[2], v.data[0] } };
+    }
+    pub fn zyzy(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[2], v.data[1] } };
+    }
+    pub fn zyzz(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[2], v.data[2] } };
+    }
+    pub fn zyzw(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[2], v.data[3] } };
+    }
+    pub fn zywx(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[3], v.data[0] } };
+    }
+    pub fn zywy(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[3], v.data[1] } };
+    }
+    pub fn zywz(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[3], v.data[2] } };
+    }
+    pub fn zyww(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[1], v.data[3], v.data[3] } };
+    }
+    pub fn zzxx(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[0], v.data[0] } };
+    }
+    pub fn zzxy(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[0], v.data[1] } };
+    }
+    pub fn zzxz(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[0], v.data[2] } };
+    }
+    pub fn zzxw(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[0], v.data[3] } };
+    }
+    pub fn zzyx(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[1], v.data[0] } };
+    }
+    pub fn zzyy(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[1], v.data[1] } };
+    }
+    pub fn zzyz(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[1], v.data[2] } };
+    }
+    pub fn zzyw(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[1], v.data[3] } };
+    }
+    pub fn zzzx(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[2], v.data[0] } };
+    }
+    pub fn zzzy(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[2], v.data[1] } };
+    }
+    pub fn zzzz(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[2], v.data[2] } };
+    }
+    pub fn zzzw(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[2], v.data[3] } };
+    }
+    pub fn zzwx(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[3], v.data[0] } };
+    }
+    pub fn zzwy(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[3], v.data[1] } };
+    }
+    pub fn zzwz(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[3], v.data[2] } };
+    }
+    pub fn zzww(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[2], v.data[3], v.data[3] } };
+    }
+    pub fn zwxx(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[3], v.data[0], v.data[0] } };
+    }
+    pub fn zwxy(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[3], v.data[0], v.data[1] } };
+    }
+    pub fn zwxz(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[3], v.data[0], v.data[2] } };
+    }
+    pub fn zwxw(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[3], v.data[0], v.data[3] } };
+    }
+    pub fn zwyx(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[3], v.data[1], v.data[0] } };
+    }
+    pub fn zwyy(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[3], v.data[1], v.data[1] } };
+    }
+    pub fn zwyz(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[3], v.data[1], v.data[2] } };
+    }
+    pub fn zwyw(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[3], v.data[1], v.data[3] } };
+    }
+    pub fn zwzx(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[3], v.data[2], v.data[0] } };
+    }
+    pub fn zwzy(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[3], v.data[2], v.data[1] } };
+    }
+    pub fn zwzz(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[3], v.data[2], v.data[2] } };
+    }
+    pub fn zwzw(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[3], v.data[2], v.data[3] } };
+    }
+    pub fn zwwx(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[3], v.data[3], v.data[0] } };
+    }
+    pub fn zwwy(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[3], v.data[3], v.data[1] } };
+    }
+    pub fn zwwz(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[3], v.data[3], v.data[2] } };
+    }
+    pub fn zwww(v: V4d) V4d {
+        return .{ .data = .{ v.data[2], v.data[3], v.data[3], v.data[3] } };
+    }
+    pub fn wxxx(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[0], v.data[0], v.data[0] } };
+    }
+    pub fn wxxy(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[0], v.data[0], v.data[1] } };
+    }
+    pub fn wxxz(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[0], v.data[0], v.data[2] } };
+    }
+    pub fn wxxw(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[0], v.data[0], v.data[3] } };
+    }
+    pub fn wxyx(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[0], v.data[1], v.data[0] } };
+    }
+    pub fn wxyy(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[0], v.data[1], v.data[1] } };
+    }
+    pub fn wxyz(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[0], v.data[1], v.data[2] } };
+    }
+    pub fn wxyw(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[0], v.data[1], v.data[3] } };
+    }
+    pub fn wxzx(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[0], v.data[2], v.data[0] } };
+    }
+    pub fn wxzy(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[0], v.data[2], v.data[1] } };
+    }
+    pub fn wxzz(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[0], v.data[2], v.data[2] } };
+    }
+    pub fn wxzw(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[0], v.data[2], v.data[3] } };
+    }
+    pub fn wxwx(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[0], v.data[3], v.data[0] } };
+    }
+    pub fn wxwy(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[0], v.data[3], v.data[1] } };
+    }
+    pub fn wxwz(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[0], v.data[3], v.data[2] } };
+    }
+    pub fn wxww(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[0], v.data[3], v.data[3] } };
+    }
+    pub fn wyxx(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[1], v.data[0], v.data[0] } };
+    }
+    pub fn wyxy(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[1], v.data[0], v.data[1] } };
+    }
+    pub fn wyxz(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[1], v.data[0], v.data[2] } };
+    }
+    pub fn wyxw(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[1], v.data[0], v.data[3] } };
+    }
+    pub fn wyyx(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[1], v.data[1], v.data[0] } };
+    }
+    pub fn wyyy(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[1], v.data[1], v.data[1] } };
+    }
+    pub fn wyyz(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[1], v.data[1], v.data[2] } };
+    }
+    pub fn wyyw(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[1], v.data[1], v.data[3] } };
+    }
+    pub fn wyzx(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[1], v.data[2], v.data[0] } };
+    }
+    pub fn wyzy(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[1], v.data[2], v.data[1] } };
+    }
+    pub fn wyzz(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[1], v.data[2], v.data[2] } };
+    }
+    pub fn wyzw(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[1], v.data[2], v.data[3] } };
+    }
+    pub fn wywx(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[1], v.data[3], v.data[0] } };
+    }
+    pub fn wywy(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[1], v.data[3], v.data[1] } };
+    }
+    pub fn wywz(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[1], v.data[3], v.data[2] } };
+    }
+    pub fn wyww(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[1], v.data[3], v.data[3] } };
+    }
+    pub fn wzxx(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[2], v.data[0], v.data[0] } };
+    }
+    pub fn wzxy(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[2], v.data[0], v.data[1] } };
+    }
+    pub fn wzxz(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[2], v.data[0], v.data[2] } };
+    }
+    pub fn wzxw(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[2], v.data[0], v.data[3] } };
+    }
+    pub fn wzyx(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[2], v.data[1], v.data[0] } };
+    }
+    pub fn wzyy(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[2], v.data[1], v.data[1] } };
+    }
+    pub fn wzyz(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[2], v.data[1], v.data[2] } };
+    }
+    pub fn wzyw(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[2], v.data[1], v.data[3] } };
+    }
+    pub fn wzzx(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[2], v.data[2], v.data[0] } };
+    }
+    pub fn wzzy(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[2], v.data[2], v.data[1] } };
+    }
+    pub fn wzzz(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[2], v.data[2], v.data[2] } };
+    }
+    pub fn wzzw(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[2], v.data[2], v.data[3] } };
+    }
+    pub fn wzwx(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[2], v.data[3], v.data[0] } };
+    }
+    pub fn wzwy(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[2], v.data[3], v.data[1] } };
+    }
+    pub fn wzwz(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[2], v.data[3], v.data[2] } };
+    }
+    pub fn wzww(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[2], v.data[3], v.data[3] } };
+    }
+    pub fn wwxx(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[3], v.data[0], v.data[0] } };
+    }
+    pub fn wwxy(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[3], v.data[0], v.data[1] } };
+    }
+    pub fn wwxz(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[3], v.data[0], v.data[2] } };
+    }
+    pub fn wwxw(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[3], v.data[0], v.data[3] } };
+    }
+    pub fn wwyx(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[3], v.data[1], v.data[0] } };
+    }
+    pub fn wwyy(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[3], v.data[1], v.data[1] } };
+    }
+    pub fn wwyz(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[3], v.data[1], v.data[2] } };
+    }
+    pub fn wwyw(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[3], v.data[1], v.data[3] } };
+    }
+    pub fn wwzx(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[3], v.data[2], v.data[0] } };
+    }
+    pub fn wwzy(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[3], v.data[2], v.data[1] } };
+    }
+    pub fn wwzz(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[3], v.data[2], v.data[2] } };
+    }
+    pub fn wwzw(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[3], v.data[2], v.data[3] } };
+    }
+    pub fn wwwx(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[3], v.data[3], v.data[0] } };
+    }
+    pub fn wwwy(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[3], v.data[3], v.data[1] } };
+    }
+    pub fn wwwz(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[3], v.data[3], v.data[2] } };
+    }
+    pub fn wwww(v: V4d) V4d {
+        return .{ .data = .{ v.data[3], v.data[3], v.data[3], v.data[3] } };
+    }
+};
+
+pub const M4d = struct {
+    data: [4]@Vector(4, f64),
+
+    pub const zero: M4d = .{ .data = .{
+        .{ 0, 0, 0, 0 },
+        .{ 0, 0, 0, 0 },
+        .{ 0, 0, 0, 0 },
+        .{ 0, 0, 0, 0 },
+    } };
+    pub const eye: M4d = .{ .data = .{
+        .{ 1, 0, 0, 0 },
+        .{ 0, 1, 0, 0 },
+        .{ 0, 0, 1, 0 },
+        .{ 0, 0, 0, 1 },
+    } };
+
+    pub fn transpose(m: M4d) M4d {
+        return .{ .data = .{
+            .{
+                m.data[0][0],
+                m.data[1][0],
+                m.data[2][0],
+                m.data[3][0],
+            },
+            .{
+                m.data[0][1],
+                m.data[1][1],
+                m.data[2][1],
+                m.data[3][1],
+            },
+            .{
+                m.data[0][2],
+                m.data[1][2],
+                m.data[2][2],
+                m.data[3][2],
+            },
+            .{
+                m.data[0][3],
+                m.data[1][3],
+                m.data[2][3],
+                m.data[3][3],
+            },
+        } };
+    }
+
+    pub fn mulmat(a: M4d, b: M4d) M4d {
+        const t = b.transpose();
+        var c: M4d = undefined;
+        for (0..4) |i| {
+            for (0..4) |j| {
+                c.data[i][j] = @reduce(.Add, a.data[i] * t.data[i]);
+            }
+        }
+        return c;
+    }
+    pub fn mulvec(m: M4d, v: V4d) V4d {
+        var w: V4d = undefined;
+        for (0..4) |i| {
+            w.data[i] = @reduce(.Add, m.data[i] * v.data);
+        }
+        return w;
     }
 };

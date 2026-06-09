@@ -8,7 +8,7 @@ __location__ = os.path.realpath(
     os.path.join(os.getcwd(), os.path.dirname(__file__)))
 
 
-def write_vector(f, dim, type):
+def write_vector(f, dim, type, casts):
     abbrev = {
         "f32": "f",
         "f64": "d",
@@ -28,6 +28,15 @@ def write_vector(f, dim, type):
     f.write(f"    pub fn splat(s: {type}) {typename} {{\n")
     f.write(f"         return .{{ .data = @splat(s) }};\n")
     f.write(f"    }}\n")
+
+    for other in casts:
+        oa = {
+            "f32": "f",
+            "f64": "d",
+        }[other]
+        f.write(f"    pub fn v{dim}{oa}(v: {typename}) V{dim}{oa}  {{\n")
+        f.write(f"         return .{{ .data = @floatCast(v) }};\n")
+        f.write(f"    }}\n")
 
     f.write("\n");
 
@@ -137,11 +146,32 @@ def write_matrix(f, dim, type):
 
     f.write("\n");
 
-    f.write(f"    pub fn splat(s: {type}) {typename} {{\n")
+    f.write(f"    pub fn transpose(m: {typename}) {typename} {{\n")
     f.write(f"        return .{{ .data = .{{\n")
-    for _ in range(dim):
-        f.write(f"            @splat(s),\n")
+    for i in range(dim):
+        f.write(f"            .{{ {', '.join([f"m.data[{j}][{i}]" for j in range(dim)])}, }},\n")
     f.write(f"        }} }};\n")
+    f.write(f"    }}\n")
+
+    f.write("\n");
+
+    f.write(f"    pub fn mulmat(a: {typename}, b: {typename}) {typename} {{\n")
+    f.write(f"        const t = b.transpose();\n")
+    f.write(f"        var c: {typename} = undefined;\n")
+    f.write(f"        for (0..{dim}) |i| {{\n")
+    f.write(f"            for (0..{dim}) |j| {{\n")
+    f.write(f"                c.data[i][j] = @reduce(.Add, a.data[i] * t.data[i]);\n")
+    f.write(f"            }}\n")
+    f.write(f"        }}\n")
+    f.write(f"        return c;\n")
+    f.write(f"    }}\n")
+
+    f.write(f"    pub fn mulvec(m: {typename}, v: V{dim}{abbrev}) V{dim}{abbrev} {{\n")
+    f.write(f"        var w: V{dim}{abbrev} = undefined;\n")
+    f.write(f"        for (0..{dim}) |i| {{\n")
+    f.write(f"            w.data[i] = @reduce(.Add, m.data[i] * v.data);\n")
+    f.write(f"        }}\n")
+    f.write(f"        return w;\n")
     f.write(f"    }}\n")
 
     f.write(f"}};\n\n")
@@ -151,11 +181,18 @@ f = open(os.path.join(__location__, f"lin.zig"), "w+");
 
 f.write(f"const std = @import(\"std\");\n\n")
 
-write_vector(f, 2, "f32")
+write_vector(f, 2, "f32", ["f64"])
 write_matrix(f, 2, "f32")
-write_vector(f, 3, "f32")
+write_vector(f, 3, "f32", ["f64"])
 write_matrix(f, 3, "f32")
-write_vector(f, 4, "f32")
+write_vector(f, 4, "f32", ["f64"])
 write_matrix(f, 4, "f32")
+
+write_vector(f, 2, "f64", ["f32"])
+write_matrix(f, 2, "f64")
+write_vector(f, 3, "f64", ["f32"])
+write_matrix(f, 3, "f64")
+write_vector(f, 4, "f64", ["f32"])
+write_matrix(f, 4, "f64")
 
 f.close();
