@@ -41,6 +41,10 @@ pub const V2f = struct {
     pub fn len2(v: V2f) f32 {
         return @reduce(.Add, v.data * v.data);
     }
+    pub fn normalized(v: V2f) f32 {
+        const inorm: @Vector(2, f32) = @splat(1.0 / v.len());
+        return .{ .data = v.data * inorm };
+    }
 
     pub fn add(a: V2f, b: V2f) V2f {
         return .{ .data = a.data + b.data };
@@ -169,6 +173,7 @@ pub const M2f = struct {
         .{ 0, 1 },
     } };
 
+
     pub fn transpose(m: M2f) M2f {
         return .{ .data = .{
             .{ m.data[0][0], m.data[1][0] },
@@ -203,6 +208,7 @@ pub const V3f = struct {
     data: @Vector(3, f32),
 
     pub const zero: V3f = .{ .data = @splat(0) };
+    pub const up: V3f = .{ .data = .{ 0, 1, 0 } };
 
     pub fn splat(s: f32) V3f {
         return .{ .data = @splat(s) };
@@ -232,6 +238,10 @@ pub const V3f = struct {
     }
     pub fn len2(v: V3f) f32 {
         return @reduce(.Add, v.data * v.data);
+    }
+    pub fn normalized(v: V3f) f32 {
+        const inorm: @Vector(3, f32) = @splat(1.0 / v.len());
+        return .{ .data = v.data * inorm };
     }
 
     pub fn add(a: V3f, b: V3f) V3f {
@@ -640,6 +650,7 @@ pub const M3f = struct {
         .{ 0, 0, 1 },
     } };
 
+
     pub fn transpose(m: M3f) M3f {
         return .{ .data = .{
             .{ m.data[0][0], m.data[1][0], m.data[2][0] },
@@ -701,6 +712,10 @@ pub const V4f = struct {
     }
     pub fn len2(v: V4f) f32 {
         return @reduce(.Add, v.data * v.data);
+    }
+    pub fn normalized(v: V4f) f32 {
+        const inorm: @Vector(4, f32) = @splat(1.0 / v.len());
+        return .{ .data = v.data * inorm };
     }
 
     pub fn add(a: V4f, b: V4f) V4f {
@@ -1764,6 +1779,30 @@ pub const M4f = struct {
         .{ 0, 0, 0, 1 },
     } };
 
+    /// right handed, infinite far plane
+    pub fn perspective(fovy: f32, aspect: f32, near: f32) M4f {
+        const h = 1 / @tan(0.5 * fovy);
+        const w = h / aspect;
+        return .{ .data = .{
+            .{ w, 0, 0, 0 },
+            .{ 0, h, 0, 0 },
+            .{ 0, 0, 0, -1 },
+            .{ 0, 0, near, 0 },
+        } };
+    }
+    /// right handed, camera at origin
+    pub fn look(focus: V3f) M4f {
+        const r = focus.cross(.up).normalized();
+        const u = r.cross(focus).normalized();
+        const d = focus.mul(.splat(-1)).normalized();
+        return .{ .data = .{
+            .{ r.data[0], r.data[1], r.data[2], 0 },
+            .{ u.data[0], u.data[1], u.data[2], 0 },
+            .{ d.data[0], d.data[1], d.data[2], 0 },
+            .{ 0, 0, 0, 1 },
+        } };
+    }
+
     pub fn transpose(m: M4f) M4f {
         return .{ .data = .{
             .{ m.data[0][0], m.data[1][0], m.data[2][0], m.data[3][0] },
@@ -1832,6 +1871,10 @@ pub const V2d = struct {
     }
     pub fn len2(v: V2d) f64 {
         return @reduce(.Add, v.data * v.data);
+    }
+    pub fn normalized(v: V2d) f64 {
+        const inorm: @Vector(2, f64) = @splat(1.0 / v.len());
+        return .{ .data = v.data * inorm };
     }
 
     pub fn add(a: V2d, b: V2d) V2d {
@@ -1961,6 +2004,7 @@ pub const M2d = struct {
         .{ 0, 1 },
     } };
 
+
     pub fn transpose(m: M2d) M2d {
         return .{ .data = .{
             .{ m.data[0][0], m.data[1][0] },
@@ -1995,6 +2039,7 @@ pub const V3d = struct {
     data: @Vector(3, f64),
 
     pub const zero: V3d = .{ .data = @splat(0) };
+    pub const up: V3d = .{ .data = .{ 0, 1, 0 } };
 
     pub fn splat(s: f64) V3d {
         return .{ .data = @splat(s) };
@@ -2024,6 +2069,10 @@ pub const V3d = struct {
     }
     pub fn len2(v: V3d) f64 {
         return @reduce(.Add, v.data * v.data);
+    }
+    pub fn normalized(v: V3d) f64 {
+        const inorm: @Vector(3, f64) = @splat(1.0 / v.len());
+        return .{ .data = v.data * inorm };
     }
 
     pub fn add(a: V3d, b: V3d) V3d {
@@ -2432,6 +2481,7 @@ pub const M3d = struct {
         .{ 0, 0, 1 },
     } };
 
+
     pub fn transpose(m: M3d) M3d {
         return .{ .data = .{
             .{ m.data[0][0], m.data[1][0], m.data[2][0] },
@@ -2493,6 +2543,10 @@ pub const V4d = struct {
     }
     pub fn len2(v: V4d) f64 {
         return @reduce(.Add, v.data * v.data);
+    }
+    pub fn normalized(v: V4d) f64 {
+        const inorm: @Vector(4, f64) = @splat(1.0 / v.len());
+        return .{ .data = v.data * inorm };
     }
 
     pub fn add(a: V4d, b: V4d) V4d {
@@ -3555,6 +3609,30 @@ pub const M4d = struct {
         .{ 0, 0, 1, 0 },
         .{ 0, 0, 0, 1 },
     } };
+
+    /// right handed, infinite far plane
+    pub fn perspective(fovy: f64, aspect: f64, near: f64) M4d {
+        const h = 1 / @tan(0.5 * fovy);
+        const w = h / aspect;
+        return .{ .data = .{
+            .{ w, 0, 0, 0 },
+            .{ 0, h, 0, 0 },
+            .{ 0, 0, 0, -1 },
+            .{ 0, 0, near, 0 },
+        } };
+    }
+    /// right handed, camera at origin
+    pub fn look(focus: V3d) M4d {
+        const r = focus.cross(.up).normalized();
+        const u = r.cross(focus).normalized();
+        const d = focus.mul(.splat(-1)).normalized();
+        return .{ .data = .{
+            .{ r.data[0], r.data[1], r.data[2], 0 },
+            .{ u.data[0], u.data[1], u.data[2], 0 },
+            .{ d.data[0], d.data[1], d.data[2], 0 },
+            .{ 0, 0, 0, 1 },
+        } };
+    }
 
     pub fn transpose(m: M4d) M4d {
         return .{ .data = .{

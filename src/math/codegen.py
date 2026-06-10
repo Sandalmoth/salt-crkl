@@ -27,6 +27,9 @@ def write_vector(f, dim, type, casts):
 
     f.write(f"    pub const zero: {typename} = .{{ .data = @splat(0) }};\n")
 
+    if dim == 3:
+        f.write(f"    pub const up: {typename} = .{{ .data = .{{ 0, 1, 0 }} }};\n")
+
     f.write("\n")
 
     f.write(f"    pub fn splat(s: {type}) {typename} {{\n")
@@ -73,6 +76,11 @@ def write_vector(f, dim, type, casts):
 
     f.write(f"    pub fn len2(v: {typename}) {type} {{\n")
     f.write(f"        return @reduce(.Add, v.data * v.data);\n")
+    f.write(f"    }}\n")
+
+    f.write(f"    pub fn normalized(v: {typename}) {type} {{\n")
+    f.write(f"        const inorm: {vector} = @splat(1.0 / v.len());\n")
+    f.write(f"        return .{{ .data = v.data * inorm }};\n")
     f.write(f"    }}\n")
 
     f.write("\n")
@@ -171,6 +179,34 @@ def write_matrix(f, dim, type):
     for i in range(dim):
         f.write(f"        .{{ {', '.join(['1' if i == j else '0' for j in range(dim)])} }},\n")
     f.write(f"    }} }};\n")
+
+    f.write("\n")
+
+    if dim == 4:
+        f.write(f"    /// right handed, infinite far plane\n")
+        f.write(f"    pub fn perspective(fovy: {type}, aspect: {type}, near: {type}) {typename} {{\n")
+        f.write(f"        const h = 1 / @tan(0.5 * fovy);\n")
+        f.write(f"        const w = h / aspect;\n")
+        f.write(f"        return .{{ .data = .{{\n")
+        f.write(f"            .{{ w, 0, 0, 0 }},\n")
+        f.write(f"            .{{ 0, h, 0, 0 }},\n")
+        f.write(f"            .{{ 0, 0, 0, -1 }},\n")
+        f.write(f"            .{{ 0, 0, near, 0 }},\n")
+        f.write(f"        }} }};\n")
+        f.write(f"    }}\n")
+
+        f.write(f"    /// right handed, camera at origin\n")
+        f.write(f"    pub fn look(focus: V3{abbrev}) {typename} {{\n")
+        f.write(f"        const r = focus.cross(.up).normalized();\n")
+        f.write(f"        const u = r.cross(focus).normalized();\n")
+        f.write(f"        const d = focus.mul(.splat(-1)).normalized();\n")
+        f.write(f"        return .{{ .data = .{{\n")
+        f.write(f"            .{{ r.data[0], r.data[1], r.data[2], 0 }},\n")
+        f.write(f"            .{{ u.data[0], u.data[1], u.data[2], 0 }},\n")
+        f.write(f"            .{{ d.data[0], d.data[1], d.data[2], 0 }},\n")
+        f.write(f"            .{{ 0, 0, 0, 1 }},\n")
+        f.write(f"        }} }};\n")
+        f.write(f"    }}\n")
 
     f.write("\n")
 
