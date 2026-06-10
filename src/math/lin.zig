@@ -19,6 +19,12 @@ pub const V2f = struct {
         a.* = v.data;
     }
 
+    pub fn v3f(v: V2f, _z: f32) V3f {
+        return .{ .data = .{ v.data[0], v.data[1], _z } };
+    }
+    pub fn v4f(v: V2f, _z: f32, _w: f32) V4f {
+        return .{ .data = .{ v.data[0], v.data[1], _z, _w } };
+    }
     pub fn v2d(v: V2f) V2d {
         return .{ .data = @floatCast(v) };
     }
@@ -208,6 +214,9 @@ pub const V3f = struct {
         a.* = v.data;
     }
 
+    pub fn v4f(v: V3f, _w: f32) V4f {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[2], _w } };
+    }
     pub fn v3d(v: V3f) V3d {
         return .{ .data = @floatCast(v) };
     }
@@ -1802,6 +1811,12 @@ pub const V2d = struct {
         a.* = v.data;
     }
 
+    pub fn v3d(v: V2d, _z: f64) V3d {
+        return .{ .data = .{ v.data[0], v.data[1], _z } };
+    }
+    pub fn v4d(v: V2d, _z: f64, _w: f64) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], _z, _w } };
+    }
     pub fn v2f(v: V2d) V2f {
         return .{ .data = @floatCast(v) };
     }
@@ -1991,6 +2006,9 @@ pub const V3d = struct {
         a.* = v.data;
     }
 
+    pub fn v4d(v: V3d, _w: f64) V4d {
+        return .{ .data = .{ v.data[0], v.data[1], v.data[2], _w } };
+    }
     pub fn v3f(v: V3d) V3f {
         return .{ .data = @floatCast(v) };
     }
@@ -3565,3 +3583,4 @@ pub const M4d = struct {
         return w;
     }
 };
+
