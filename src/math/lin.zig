@@ -1,5 +1,9 @@
 const std = @import("std");
 
+pub fn v2f(x: f32, y: f32) V2f {
+    return .{ .data = .{ x, y } };
+}
+
 pub const V2f = struct {
     data: @Vector(2, f32),
 
@@ -8,6 +12,13 @@ pub const V2f = struct {
     pub fn splat(s: f32) V2f {
         return .{ .data = @splat(s) };
     }
+    pub fn load(a: *const [2]f32) V2f {
+        return .{ .data = a };
+    }
+    pub fn store(v: V2f, a: *[2]f32) V2f {
+        a.* = v.data;
+    }
+
     pub fn v2d(v: V2f) V2d {
         return .{ .data = @floatCast(v) };
     }
@@ -154,14 +165,8 @@ pub const M2f = struct {
 
     pub fn transpose(m: M2f) M2f {
         return .{ .data = .{
-            .{
-                m.data[0][0],
-                m.data[1][0],
-            },
-            .{
-                m.data[0][1],
-                m.data[1][1],
-            },
+            .{ m.data[0][0], m.data[1][0] },
+            .{ m.data[0][1], m.data[1][1] },
         } };
     }
 
@@ -184,6 +189,10 @@ pub const M2f = struct {
     }
 };
 
+pub fn v3f(x: f32, y: f32, z: f32) V3f {
+    return .{ .data = .{ x, y, z } };
+}
+
 pub const V3f = struct {
     data: @Vector(3, f32),
 
@@ -192,6 +201,13 @@ pub const V3f = struct {
     pub fn splat(s: f32) V3f {
         return .{ .data = @splat(s) };
     }
+    pub fn load(a: *const [3]f32) V3f {
+        return .{ .data = a };
+    }
+    pub fn store(v: V3f, a: *[3]f32) V3f {
+        a.* = v.data;
+    }
+
     pub fn v3d(v: V3f) V3d {
         return .{ .data = @floatCast(v) };
     }
@@ -223,6 +239,13 @@ pub const V3f = struct {
     }
     pub fn dot(a: V3f, b: V3f) V3f {
         return .{ .data = @reduce(.Add, a.data * b.data) };
+    }
+    pub fn cross(a: V3f, b: V3f) V3f {
+        return .{ .data = .{
+            a.data[1] * b.data[2] - a.data[2] * b.data[1],
+            a.data[2] * b.data[0] - a.data[0] * b.data[2],
+            a.data[0] * b.data[1] - a.data[1] * b.data[0],
+        } };
     }
 
     pub fn lerp(a: V3f, b: V3f, t: V3f) V3f {
@@ -610,21 +633,9 @@ pub const M3f = struct {
 
     pub fn transpose(m: M3f) M3f {
         return .{ .data = .{
-            .{
-                m.data[0][0],
-                m.data[1][0],
-                m.data[2][0],
-            },
-            .{
-                m.data[0][1],
-                m.data[1][1],
-                m.data[2][1],
-            },
-            .{
-                m.data[0][2],
-                m.data[1][2],
-                m.data[2][2],
-            },
+            .{ m.data[0][0], m.data[1][0], m.data[2][0] },
+            .{ m.data[0][1], m.data[1][1], m.data[2][1] },
+            .{ m.data[0][2], m.data[1][2], m.data[2][2] },
         } };
     }
 
@@ -647,6 +658,10 @@ pub const M3f = struct {
     }
 };
 
+pub fn v4f(x: f32, y: f32, z: f32, w: f32) V4f {
+    return .{ .data = .{ x, y, z, w } };
+}
+
 pub const V4f = struct {
     data: @Vector(4, f32),
 
@@ -655,6 +670,13 @@ pub const V4f = struct {
     pub fn splat(s: f32) V4f {
         return .{ .data = @splat(s) };
     }
+    pub fn load(a: *const [4]f32) V4f {
+        return .{ .data = a };
+    }
+    pub fn store(v: V4f, a: *[4]f32) V4f {
+        a.* = v.data;
+    }
+
     pub fn v4d(v: V4f) V4d {
         return .{ .data = @floatCast(v) };
     }
@@ -1735,30 +1757,10 @@ pub const M4f = struct {
 
     pub fn transpose(m: M4f) M4f {
         return .{ .data = .{
-            .{
-                m.data[0][0],
-                m.data[1][0],
-                m.data[2][0],
-                m.data[3][0],
-            },
-            .{
-                m.data[0][1],
-                m.data[1][1],
-                m.data[2][1],
-                m.data[3][1],
-            },
-            .{
-                m.data[0][2],
-                m.data[1][2],
-                m.data[2][2],
-                m.data[3][2],
-            },
-            .{
-                m.data[0][3],
-                m.data[1][3],
-                m.data[2][3],
-                m.data[3][3],
-            },
+            .{ m.data[0][0], m.data[1][0], m.data[2][0], m.data[3][0] },
+            .{ m.data[0][1], m.data[1][1], m.data[2][1], m.data[3][1] },
+            .{ m.data[0][2], m.data[1][2], m.data[2][2], m.data[3][2] },
+            .{ m.data[0][3], m.data[1][3], m.data[2][3], m.data[3][3] },
         } };
     }
 
@@ -1781,6 +1783,10 @@ pub const M4f = struct {
     }
 };
 
+pub fn v2d(x: f64, y: f64) V2d {
+    return .{ .data = .{ x, y } };
+}
+
 pub const V2d = struct {
     data: @Vector(2, f64),
 
@@ -1789,6 +1795,13 @@ pub const V2d = struct {
     pub fn splat(s: f64) V2d {
         return .{ .data = @splat(s) };
     }
+    pub fn load(a: *const [2]f64) V2d {
+        return .{ .data = a };
+    }
+    pub fn store(v: V2d, a: *[2]f64) V2d {
+        a.* = v.data;
+    }
+
     pub fn v2f(v: V2d) V2f {
         return .{ .data = @floatCast(v) };
     }
@@ -1935,14 +1948,8 @@ pub const M2d = struct {
 
     pub fn transpose(m: M2d) M2d {
         return .{ .data = .{
-            .{
-                m.data[0][0],
-                m.data[1][0],
-            },
-            .{
-                m.data[0][1],
-                m.data[1][1],
-            },
+            .{ m.data[0][0], m.data[1][0] },
+            .{ m.data[0][1], m.data[1][1] },
         } };
     }
 
@@ -1965,6 +1972,10 @@ pub const M2d = struct {
     }
 };
 
+pub fn v3d(x: f64, y: f64, z: f64) V3d {
+    return .{ .data = .{ x, y, z } };
+}
+
 pub const V3d = struct {
     data: @Vector(3, f64),
 
@@ -1973,6 +1984,13 @@ pub const V3d = struct {
     pub fn splat(s: f64) V3d {
         return .{ .data = @splat(s) };
     }
+    pub fn load(a: *const [3]f64) V3d {
+        return .{ .data = a };
+    }
+    pub fn store(v: V3d, a: *[3]f64) V3d {
+        a.* = v.data;
+    }
+
     pub fn v3f(v: V3d) V3f {
         return .{ .data = @floatCast(v) };
     }
@@ -2004,6 +2022,13 @@ pub const V3d = struct {
     }
     pub fn dot(a: V3d, b: V3d) V3d {
         return .{ .data = @reduce(.Add, a.data * b.data) };
+    }
+    pub fn cross(a: V3d, b: V3d) V3d {
+        return .{ .data = .{
+            a.data[1] * b.data[2] - a.data[2] * b.data[1],
+            a.data[2] * b.data[0] - a.data[0] * b.data[2],
+            a.data[0] * b.data[1] - a.data[1] * b.data[0],
+        } };
     }
 
     pub fn lerp(a: V3d, b: V3d, t: V3d) V3d {
@@ -2391,21 +2416,9 @@ pub const M3d = struct {
 
     pub fn transpose(m: M3d) M3d {
         return .{ .data = .{
-            .{
-                m.data[0][0],
-                m.data[1][0],
-                m.data[2][0],
-            },
-            .{
-                m.data[0][1],
-                m.data[1][1],
-                m.data[2][1],
-            },
-            .{
-                m.data[0][2],
-                m.data[1][2],
-                m.data[2][2],
-            },
+            .{ m.data[0][0], m.data[1][0], m.data[2][0] },
+            .{ m.data[0][1], m.data[1][1], m.data[2][1] },
+            .{ m.data[0][2], m.data[1][2], m.data[2][2] },
         } };
     }
 
@@ -2428,6 +2441,10 @@ pub const M3d = struct {
     }
 };
 
+pub fn v4d(x: f64, y: f64, z: f64, w: f64) V4d {
+    return .{ .data = .{ x, y, z, w } };
+}
+
 pub const V4d = struct {
     data: @Vector(4, f64),
 
@@ -2436,6 +2453,13 @@ pub const V4d = struct {
     pub fn splat(s: f64) V4d {
         return .{ .data = @splat(s) };
     }
+    pub fn load(a: *const [4]f64) V4d {
+        return .{ .data = a };
+    }
+    pub fn store(v: V4d, a: *[4]f64) V4d {
+        a.* = v.data;
+    }
+
     pub fn v4f(v: V4d) V4f {
         return .{ .data = @floatCast(v) };
     }
@@ -3516,30 +3540,10 @@ pub const M4d = struct {
 
     pub fn transpose(m: M4d) M4d {
         return .{ .data = .{
-            .{
-                m.data[0][0],
-                m.data[1][0],
-                m.data[2][0],
-                m.data[3][0],
-            },
-            .{
-                m.data[0][1],
-                m.data[1][1],
-                m.data[2][1],
-                m.data[3][1],
-            },
-            .{
-                m.data[0][2],
-                m.data[1][2],
-                m.data[2][2],
-                m.data[3][2],
-            },
-            .{
-                m.data[0][3],
-                m.data[1][3],
-                m.data[2][3],
-                m.data[3][3],
-            },
+            .{ m.data[0][0], m.data[1][0], m.data[2][0], m.data[3][0] },
+            .{ m.data[0][1], m.data[1][1], m.data[2][1], m.data[3][1] },
+            .{ m.data[0][2], m.data[1][2], m.data[2][2], m.data[3][2] },
+            .{ m.data[0][3], m.data[1][3], m.data[2][3], m.data[3][3] },
         } };
     }
 

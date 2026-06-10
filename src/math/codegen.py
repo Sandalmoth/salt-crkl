@@ -16,6 +16,12 @@ def write_vector(f, dim, type, casts):
     typename = f"V{dim}{abbrev}"
     vector = f"@Vector({dim}, {type})"
 
+    f.write(f"pub fn v{dim}{abbrev}({', '.join([f"{d}: {type}" for d in ['x', 'y', 'z', 'w'][:dim]])}) {typename} {{\n")
+    f.write(f"    return .{{ .data = .{{ {', '.join([d for d in ['x', 'y', 'z', 'w'][:dim]])} }} }};\n")
+    f.write(f"}}\n")
+
+    f.write("\n");
+
     f.write(f"pub const {typename} = struct {{\n")
     f.write(f"    data: {vector},\n")
 
@@ -26,16 +32,26 @@ def write_vector(f, dim, type, casts):
     f.write("\n");
 
     f.write(f"    pub fn splat(s: {type}) {typename} {{\n")
-    f.write(f"         return .{{ .data = @splat(s) }};\n")
+    f.write(f"        return .{{ .data = @splat(s) }};\n")
     f.write(f"    }}\n")
+
+    f.write(f"    pub fn load(a: *const [{dim}]{type}) {typename} {{\n")
+    f.write(f"        return .{{ .data = a }};\n")
+    f.write(f"    }}\n")
+
+    f.write(f"    pub fn store(v: {typename}, a: *[{dim}]{type}) {typename} {{\n")
+    f.write(f"        a.* = v.data;\n")
+    f.write(f"    }}\n")
+
+    f.write("\n");
 
     for other in casts:
         oa = {
             "f32": "f",
             "f64": "d",
         }[other]
-        f.write(f"    pub fn v{dim}{oa}(v: {typename}) V{dim}{oa}  {{\n")
-        f.write(f"         return .{{ .data = @floatCast(v) }};\n")
+        f.write(f"    pub fn v{dim}{oa}(v: {typename}) V{dim}{oa} {{\n")
+        f.write(f"        return .{{ .data = @floatCast(v) }};\n")
         f.write(f"    }}\n")
 
     f.write("\n");
@@ -77,6 +93,15 @@ def write_vector(f, dim, type, casts):
     f.write(f"    pub fn dot(a: {typename}, b: {typename}) {typename} {{\n")
     f.write(f"        return .{{ .data = @reduce(.Add, a.data * b.data) }};\n")
     f.write(f"    }}\n")
+
+    if dim == 3:
+        f.write(f"    pub fn cross(a: {typename}, b: {typename}) {typename} {{\n")
+        f.write(f"        return .{{ .data = .{{\n")
+        f.write(f"            a.data[1] * b.data[2] - a.data[2] * b.data[1],\n")
+        f.write(f"            a.data[2] * b.data[0] - a.data[0] * b.data[2],\n")
+        f.write(f"            a.data[0] * b.data[1] - a.data[1] * b.data[0],\n")
+        f.write(f"        }} }};\n")
+        f.write(f"    }}\n")
 
     f.write("\n");
 
@@ -149,7 +174,7 @@ def write_matrix(f, dim, type):
     f.write(f"    pub fn transpose(m: {typename}) {typename} {{\n")
     f.write(f"        return .{{ .data = .{{\n")
     for i in range(dim):
-        f.write(f"            .{{ {', '.join([f"m.data[{j}][{i}]" for j in range(dim)])}, }},\n")
+        f.write(f"            .{{ {', '.join([f"m.data[{j}][{i}]" for j in range(dim)])} }},\n")
     f.write(f"        }} }};\n")
     f.write(f"    }}\n")
 
