@@ -1831,6 +1831,40 @@ pub const M4f = struct {
     }
 };
 
+pub const Qf = struct {
+    data: @Vector(4, f32)
+
+    pub const eye: Qf = .{ .data = .{ 0, 0, 0, 1 } };
+
+    pub fn between(a: V3f32, b: V3f32) Qf {
+        const d = from.dot(to);
+        if (d > -0.99999) { // FIXME make precision depend on type
+            const c = from.cross(to);
+            return .{ .data = .{ c.data[0], c.data[1], c.data[2], 1 + d } }.normalized() 
+        } else {
+            @panic("TODO");
+            
+            
+            
+        }
+    }
+
+    pub fn normalized(q: Qf) Qf {
+        const inorm: @Vector(4, type) = @splat(1.0 / @sqrt(@reduce(.Add, q.data * q.data)));
+        return .{ .data = v.data * inorm };
+    }
+    pub fn conj(q: Qf) Qf {
+        return .{ .data = .{ -q.data[0], -q.data[1], -q.data[2], q.data[3] } };
+    }
+    pub fn rotate(q: Qf, v: V3f32) Qf {
+        const q012 = v3f32(q.data[0], q.data[1], q.data[2]);
+        const a: V3f32 = .mul(.cross(q012, v), .splat(2));
+        const b: V3f32 = .cross(q012, a);
+        const q3: @Vector(3, f32) = @splat(q.data[3]);
+        return .{ .data = v + q3 * a + b };
+    }
+};
+
 pub fn v2d(x: f64, y: f64) V2d {
     return .{ .data = .{ x, y } };
 }
@@ -3659,6 +3693,40 @@ pub const M4d = struct {
             w.data[i] = @reduce(.Add, m.data[i] * v.data);
         }
         return w;
+    }
+};
+
+pub const Qd = struct {
+    data: @Vector(4, f64)
+
+    pub const eye: Qd = .{ .data = .{ 0, 0, 0, 1 } };
+
+    pub fn between(a: V3f64, b: V3f64) Qd {
+        const d = from.dot(to);
+        if (d > -0.99999) { // FIXME make precision depend on type
+            const c = from.cross(to);
+            return .{ .data = .{ c.data[0], c.data[1], c.data[2], 1 + d } }.normalized() 
+        } else {
+            @panic("TODO");
+            
+            
+            
+        }
+    }
+
+    pub fn normalized(q: Qd) Qd {
+        const inorm: @Vector(4, type) = @splat(1.0 / @sqrt(@reduce(.Add, q.data * q.data)));
+        return .{ .data = v.data * inorm };
+    }
+    pub fn conj(q: Qd) Qd {
+        return .{ .data = .{ -q.data[0], -q.data[1], -q.data[2], q.data[3] } };
+    }
+    pub fn rotate(q: Qd, v: V3f64) Qd {
+        const q012 = v3f64(q.data[0], q.data[1], q.data[2]);
+        const a: V3f64 = .mul(.cross(q012, v), .splat(2));
+        const b: V3f64 = .cross(q012, a);
+        const q3: @Vector(3, f64) = @splat(q.data[3]);
+        return .{ .data = v + q3 * a + b };
     }
 };
 

@@ -240,6 +240,57 @@ def write_matrix(f, dim, type):
 
     f.write(f"}};\n\n")
 
+def write_quat(f, type):
+    abbrev = {
+        "f32": "f",
+        "f64": "d",
+    }[type]
+    typename = f"Q{abbrev}"
+    vector = f"@Vector(4, type)"
+
+    f.write(f"pub const {typename} = struct {{\n")
+    f.write(f"    data: @Vector(4, {type})\n")
+
+    f.write("\n")
+
+    f.write(f"    pub const eye: {typename} = .{{ .data = .{{ 0, 0, 0, 1 }} }};\n")
+
+    f.write("\n")
+
+    f.write(f"    pub fn between(a: V3{type}, b: V3{type}) {typename} {{\n")
+    f.write(f"        const d = from.dot(to);\n")
+    f.write(f"        if (d > -0.99999) {{ // FIXME make precision depend on type\n")
+    f.write(f"            const c = from.cross(to);\n")
+    f.write(f"            return .{{ .data = .{{ c.data[0], c.data[1], c.data[2], 1 + d }} }}.normalized() \n")
+    f.write(f"        }} else {{\n")
+    f.write(f"            @panic(\"TODO\");\n")
+    f.write(f"            \n")
+    f.write(f"            \n")
+    f.write(f"            \n")
+    f.write(f"        }}\n")
+    f.write(f"    }}\n")
+
+    f.write("\n")
+
+    f.write(f"    pub fn normalized(q: {typename}) {typename} {{\n")
+    f.write(f"        const inorm: {vector} = @splat(1.0 / @sqrt(@reduce(.Add, q.data * q.data)));\n")
+    f.write(f"        return .{{ .data = v.data * inorm }};\n")
+    f.write(f"    }}\n")
+
+    f.write(f"    pub fn conj(q: {typename}) {typename} {{\n")
+    f.write(f"        return .{{ .data = .{{ -q.data[0], -q.data[1], -q.data[2], q.data[3] }} }};\n")
+    f.write(f"    }}\n")
+
+    f.write(f"    pub fn rotate(q: {typename}, v: V3{type}) {typename} {{\n")
+    f.write(f"        const q012 = v3{type}(q.data[0], q.data[1], q.data[2]);\n")
+    f.write(f"        const a: V3{type} = .mul(.cross(q012, v), .splat(2));\n")
+    f.write(f"        const b: V3{type} = .cross(q012, a);\n")
+    f.write(f"        const q3: @Vector(3, {type}) = @splat(q.data[3]);\n")
+    f.write(f"        return .{{ .data = v + q3 * a + b }};\n")
+    f.write(f"    }}\n")
+
+    f.write(f"}};\n\n")
+
 
 f = open(os.path.join(__location__, f"lin.zig"), "w+")
 
@@ -251,6 +302,7 @@ write_vector(f, 3, "f32", ["f64"])
 write_matrix(f, 3, "f32")
 write_vector(f, 4, "f32", ["f64"])
 write_matrix(f, 4, "f32")
+write_quat(f, "f32")
 
 write_vector(f, 2, "f64", ["f32"])
 write_matrix(f, 2, "f64")
@@ -258,5 +310,6 @@ write_vector(f, 3, "f64", ["f32"])
 write_matrix(f, 3, "f64")
 write_vector(f, 4, "f64", ["f32"])
 write_matrix(f, 4, "f64")
+write_quat(f, "f64")
 
 f.close()
