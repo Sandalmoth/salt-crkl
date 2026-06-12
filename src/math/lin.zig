@@ -1832,34 +1832,71 @@ pub const M4f = struct {
 };
 
 pub const Qf = struct {
-    data: @Vector(4, f32)
+    data: @Vector(4, f32),
 
     pub const eye: Qf = .{ .data = .{ 0, 0, 0, 1 } };
 
-    pub fn between(a: V3f32, b: V3f32) Qf {
-        const d = from.dot(to);
-        if (d > -0.99999) { // FIXME make precision depend on type
-            const c = from.cross(to);
-            return .{ .data = .{ c.data[0], c.data[1], c.data[2], 1 + d } }.normalized() 
+    pub fn between(a: V3f, b: V3f) Qf {
+        const d = a.dot(b);
+        if (d > -0.999) { // FIXME make precision depend on type
+            const c = a.cross(b);
+            return .{ .data = .{ c.data[0], c.data[1], c.data[2], 1 + d } }.normalized();
         } else {
-            @panic("TODO");
-            
-            
-            
+            if (@abs(a.data[0]) < 0.1) {
+                return .{ .data = .{ 0, -a.data[2], a.data[1], 0 } }.normalized();
+            } else {
+                return .{ .data = .{ -a.data[2], 0, a.data[0], 0 } }.normalized();
+            }
         }
+        unreachable;
     }
 
     pub fn normalized(q: Qf) Qf {
         const inorm: @Vector(4, type) = @splat(1.0 / @sqrt(@reduce(.Add, q.data * q.data)));
-        return .{ .data = v.data * inorm };
+        return .{ .data = q.data * inorm };
     }
     pub fn conj(q: Qf) Qf {
         return .{ .data = .{ -q.data[0], -q.data[1], -q.data[2], q.data[3] } };
     }
-    pub fn rotate(q: Qf, v: V3f32) Qf {
-        const q012 = v3f32(q.data[0], q.data[1], q.data[2]);
-        const a: V3f32 = .mul(.cross(q012, v), .splat(2));
-        const b: V3f32 = .cross(q012, a);
+    pub fn neg(q: Qf) Qf {
+        return .{ .data = .{ -q.data[0], -q.data[1], -q.data[2], -q.data[3] } };
+    }
+
+    pub fn mul(a: Qf, b: Qf) Qf {
+        // TODO SIMD
+        const x0, const y0, const z0, const w0 = a.data;
+        const x1, const y1, const z1, const w1 = b.data;
+        return .{ .data = .{
+            w0 * x1 + x0 * w1 + y0 * z1 - z0 * y1,
+            w0 * y1 - x0 * z1 + y0 * w1 + z0 * x1,
+            w0 * z1 + x0 * y1 - y0 * x1 + z0 * w1,
+            w0 * w1 - x0 * x1 - y0 * y1 - z0 * z1,
+        } };
+    }
+    pub fn nlerp(a: Qf, b: Qf, t: f32) Qf {
+        const ts: @Vector(4, f32) = @splat(t);
+        const its: @Vector(4, f32) = @splat(1 - t);
+        return .{ .data = (its - t.data) * a.data + ts * b.data }.normalized();
+    }
+    pub fn slerp(a: Qf, b: Qf, t: f32) Qf {
+        var d = a.dot(b);
+        var b2 = b;
+        if (d < 0) {
+            d = -d;
+            b2 = b2.neg();
+        }
+        if (d > 0.999) return .nlerp(a, b, t);
+        const theta = @acos(d);
+        const sin_theta = @sqrt(1 - d * d);
+        const xa = @sin(1 - t) * theta) / sin_theta;
+        const xb = @sin(t * theta) / sin_theta;
+        return .{ .data = .{ xa * a.data + xb + b.data } };
+    }
+
+    pub fn rotate(q: Qf, v: V3f) Qf {
+        const q012 = v3f(q.data[0], q.data[1], q.data[2]);
+        const a: V3f = .mul(.cross(q012, v), .splat(2));
+        const b: V3f = .cross(q012, a);
         const q3: @Vector(3, f32) = @splat(q.data[3]);
         return .{ .data = v + q3 * a + b };
     }
@@ -3697,34 +3734,71 @@ pub const M4d = struct {
 };
 
 pub const Qd = struct {
-    data: @Vector(4, f64)
+    data: @Vector(4, f64),
 
     pub const eye: Qd = .{ .data = .{ 0, 0, 0, 1 } };
 
-    pub fn between(a: V3f64, b: V3f64) Qd {
-        const d = from.dot(to);
-        if (d > -0.99999) { // FIXME make precision depend on type
-            const c = from.cross(to);
-            return .{ .data = .{ c.data[0], c.data[1], c.data[2], 1 + d } }.normalized() 
+    pub fn between(a: V3d, b: V3d) Qd {
+        const d = a.dot(b);
+        if (d > -0.999) { // FIXME make precision depend on type
+            const c = a.cross(b);
+            return .{ .data = .{ c.data[0], c.data[1], c.data[2], 1 + d } }.normalized();
         } else {
-            @panic("TODO");
-            
-            
-            
+            if (@abs(a.data[0]) < 0.1) {
+                return .{ .data = .{ 0, -a.data[2], a.data[1], 0 } }.normalized();
+            } else {
+                return .{ .data = .{ -a.data[2], 0, a.data[0], 0 } }.normalized();
+            }
         }
+        unreachable;
     }
 
     pub fn normalized(q: Qd) Qd {
         const inorm: @Vector(4, type) = @splat(1.0 / @sqrt(@reduce(.Add, q.data * q.data)));
-        return .{ .data = v.data * inorm };
+        return .{ .data = q.data * inorm };
     }
     pub fn conj(q: Qd) Qd {
         return .{ .data = .{ -q.data[0], -q.data[1], -q.data[2], q.data[3] } };
     }
-    pub fn rotate(q: Qd, v: V3f64) Qd {
-        const q012 = v3f64(q.data[0], q.data[1], q.data[2]);
-        const a: V3f64 = .mul(.cross(q012, v), .splat(2));
-        const b: V3f64 = .cross(q012, a);
+    pub fn neg(q: Qd) Qd {
+        return .{ .data = .{ -q.data[0], -q.data[1], -q.data[2], -q.data[3] } };
+    }
+
+    pub fn mul(a: Qd, b: Qd) Qd {
+        // TODO SIMD
+        const x0, const y0, const z0, const w0 = a.data;
+        const x1, const y1, const z1, const w1 = b.data;
+        return .{ .data = .{
+            w0 * x1 + x0 * w1 + y0 * z1 - z0 * y1,
+            w0 * y1 - x0 * z1 + y0 * w1 + z0 * x1,
+            w0 * z1 + x0 * y1 - y0 * x1 + z0 * w1,
+            w0 * w1 - x0 * x1 - y0 * y1 - z0 * z1,
+        } };
+    }
+    pub fn nlerp(a: Qd, b: Qd, t: f64) Qd {
+        const ts: @Vector(4, f64) = @splat(t);
+        const its: @Vector(4, f64) = @splat(1 - t);
+        return .{ .data = (its - t.data) * a.data + ts * b.data }.normalized();
+    }
+    pub fn slerp(a: Qd, b: Qd, t: f64) Qd {
+        var d = a.dot(b);
+        var b2 = b;
+        if (d < 0) {
+            d = -d;
+            b2 = b2.neg();
+        }
+        if (d > 0.999) return .nlerp(a, b, t);
+        const theta = std.math.acos(d);
+        const sin_theta = @sqrt(1 - d * d);
+        const xa = @sin(1 - t) * theta) / sin_theta;
+        const xb = @sin(t * theta) / sin_theta;
+        return .{ .data = .{ xa * a.data + xb + b.data } };
+    }
+
+    pub fn rotate(q: Qd, v: V3d) Qd {
+        const q012 = v3d(q.data[0], q.data[1], q.data[2]);
+        const a: V3d = .mul(.cross(q012, v), .splat(2));
+        const b: V3d = .cross(q012, a);
         const q3: @Vector(3, f64) = @splat(q.data[3]);
         return .{ .data = v + q3 * a + b };
     }
