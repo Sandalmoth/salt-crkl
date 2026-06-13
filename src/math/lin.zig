@@ -1836,6 +1836,14 @@ pub const Qf = struct {
 
     pub const eye: Qf = .{ .data = .{ 0, 0, 0, 1 } };
 
+    /// axis should be normalized
+    pub fn axisAngle(axis: V3f32, angle: f32) Qf {
+        const sin_half_theta = @sin(0.5 * angle)
+        const cos_half_theta = @cos(0.5 * angle)
+        const a = axis.mul(.splat(sin_half_theta));
+        return .{ .data = .{ a.data[0], a.data[1], a.data[2], cos_half_theta } };
+    }
+    /// a and b should be normalized
     pub fn between(a: V3f, b: V3f) Qf {
         const d = a.dot(b);
         if (d > -0.999) { // FIXME make precision depend on type
@@ -3738,6 +3746,14 @@ pub const Qd = struct {
 
     pub const eye: Qd = .{ .data = .{ 0, 0, 0, 1 } };
 
+    /// axis should be normalized
+    pub fn axisAngle(axis: V3f64, angle: f64) Qd {
+        const sin_half_theta = @sin(0.5 * angle)
+        const cos_half_theta = @cos(0.5 * angle)
+        const a = axis.mul(.splat(sin_half_theta));
+        return .{ .data = .{ a.data[0], a.data[1], a.data[2], cos_half_theta } };
+    }
+    /// a and b should be normalized
     pub fn between(a: V3d, b: V3d) Qd {
         const d = a.dot(b);
         if (d > -0.999) { // FIXME make precision depend on type
@@ -3788,7 +3804,7 @@ pub const Qd = struct {
             b2 = b2.neg();
         }
         if (d > 0.999) return .nlerp(a, b, t);
-        const theta = std.math.acos(d);
+        const theta = @acos(d);
         const sin_theta = @sqrt(1 - d * d);
         const xa = @sin(1 - t) * theta) / sin_theta;
         const xb = @sin(t * theta) / sin_theta;
