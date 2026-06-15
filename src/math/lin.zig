@@ -1837,7 +1837,7 @@ pub const Qf = struct {
     pub const eye: Qf = .{ .data = .{ 0, 0, 0, 1 } };
 
     /// axis should be normalized
-    pub fn axisAngle(axis: V3f32, angle: f32) Qf {
+    pub fn axisAngle(axis: V3f, angle: f32) Qf {
         const sin_half_theta = @sin(0.5 * angle);
         const cos_half_theta = @cos(0.5 * angle);
         const a = axis.mul(.splat(sin_half_theta));
@@ -1894,9 +1894,9 @@ pub const Qf = struct {
             b2 = b2.neg();
         }
         if (d > 0.999) return .nlerp(a, b, t);
-        const theta = @acos(d);
+        const theta = std.math.acos(d);
         const sin_theta = @sqrt(1 - d * d);
-        const xa = @sin(1 - t) * theta) / sin_theta;
+        const xa = @sin((1 - t) * theta) / sin_theta;
         const xb = @sin(t * theta) / sin_theta;
         return .{ .data = .{ xa * a.data + xb + b.data } };
     }
@@ -3747,7 +3747,7 @@ pub const Qd = struct {
     pub const eye: Qd = .{ .data = .{ 0, 0, 0, 1 } };
 
     /// axis should be normalized
-    pub fn axisAngle(axis: V3f64, angle: f64) Qd {
+    pub fn axisAngle(axis: V3d, angle: f64) Qd {
         const sin_half_theta = @sin(0.5 * angle);
         const cos_half_theta = @cos(0.5 * angle);
         const a = axis.mul(.splat(sin_half_theta));
@@ -3804,9 +3804,9 @@ pub const Qd = struct {
             b2 = b2.neg();
         }
         if (d > 0.999) return .nlerp(a, b, t);
-        const theta = @acos(d);
+        const theta = std.math.acos(d);
         const sin_theta = @sqrt(1 - d * d);
-        const xa = @sin(1 - t) * theta) / sin_theta;
+        const xa = @sin((1 - t) * theta) / sin_theta;
         const xb = @sin(t * theta) / sin_theta;
         return .{ .data = .{ xa * a.data + xb + b.data } };
     }
