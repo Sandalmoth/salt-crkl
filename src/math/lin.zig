@@ -9,6 +9,9 @@ pub const V2f = struct {
 
     pub const zero: V2f = .{ .data = @splat(0) };
 
+    pub fn init(_x: f32, _y: f32) V2f {
+        return .{ .data = .{ _x, _y } };
+    }
     pub fn splat(s: f32) V2f {
         return .{ .data = @splat(s) };
     }
@@ -210,6 +213,9 @@ pub const V3f = struct {
     pub const zero: V3f = .{ .data = @splat(0) };
     pub const up: V3f = .{ .data = .{ 0, 1, 0 } };
 
+    pub fn init(_x: f32, _y: f32, _z: f32) V3f {
+        return .{ .data = .{ _x, _y, _z } };
+    }
     pub fn splat(s: f32) V3f {
         return .{ .data = @splat(s) };
     }
@@ -687,6 +693,9 @@ pub const V4f = struct {
 
     pub const zero: V4f = .{ .data = @splat(0) };
 
+    pub fn init(_x: f32, _y: f32, _z: f32, _w: f32) V4f {
+        return .{ .data = .{ _x, _y, _z, _w } };
+    }
     pub fn splat(s: f32) V4f {
         return .{ .data = @splat(s) };
     }
@@ -1919,6 +1928,9 @@ pub const V2d = struct {
 
     pub const zero: V2d = .{ .data = @splat(0) };
 
+    pub fn init(_x: f64, _y: f64) V2d {
+        return .{ .data = .{ _x, _y } };
+    }
     pub fn splat(s: f64) V2d {
         return .{ .data = @splat(s) };
     }
@@ -2120,6 +2132,9 @@ pub const V3d = struct {
     pub const zero: V3d = .{ .data = @splat(0) };
     pub const up: V3d = .{ .data = .{ 0, 1, 0 } };
 
+    pub fn init(_x: f64, _y: f64, _z: f64) V3d {
+        return .{ .data = .{ _x, _y, _z } };
+    }
     pub fn splat(s: f64) V3d {
         return .{ .data = @splat(s) };
     }
@@ -2597,6 +2612,9 @@ pub const V4d = struct {
 
     pub const zero: V4d = .{ .data = @splat(0) };
 
+    pub fn init(_x: f64, _y: f64, _z: f64, _w: f64) V4d {
+        return .{ .data = .{ _x, _y, _z, _w } };
+    }
     pub fn splat(s: f64) V4d {
         return .{ .data = @splat(s) };
     }

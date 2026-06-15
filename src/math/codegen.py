@@ -32,6 +32,10 @@ def write_vector(f, dim, type, casts):
 
     f.write("\n")
 
+    f.write(f"    pub fn init({', '.join([f"{d}: {type}" for d in ['_x', '_y', '_z', '_w'][:dim]])}) {typename} {{\n")
+    f.write(f"        return .{{ .data = .{{ {', '.join([d for d in ['_x', '_y', '_z', '_w'][:dim]])} }} }};\n")
+    f.write(f"    }}\n")
+
     f.write(f"    pub fn splat(s: {type}) {typename} {{\n")
     f.write(f"        return .{{ .data = @splat(s) }};\n")
     f.write(f"    }}\n")
