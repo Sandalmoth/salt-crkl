@@ -259,8 +259,8 @@ def write_quat(f, type):
 
     f.write(f"    /// axis should be normalized\n")
     f.write(f"    pub fn axisAngle(axis: V3{type}, angle: {type}) {typename} {{\n")
-    f.write(f"        const sin_half_theta = @sin(0.5 * angle)\n")
-    f.write(f"        const cos_half_theta = @cos(0.5 * angle)\n")
+    f.write(f"        const sin_half_theta = @sin(0.5 * angle);\n")
+    f.write(f"        const cos_half_theta = @cos(0.5 * angle);\n")
     f.write(f"        const a = axis.mul(.splat(sin_half_theta));\n")
     f.write(f"        return .{{ .data = .{{ a.data[0], a.data[1], a.data[2], cos_half_theta }} }};\n")
     f.write(f"    }}\n")

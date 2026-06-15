@@ -1838,8 +1838,8 @@ pub const Qf = struct {
 
     /// axis should be normalized
     pub fn axisAngle(axis: V3f32, angle: f32) Qf {
-        const sin_half_theta = @sin(0.5 * angle)
-        const cos_half_theta = @cos(0.5 * angle)
+        const sin_half_theta = @sin(0.5 * angle);
+        const cos_half_theta = @cos(0.5 * angle);
         const a = axis.mul(.splat(sin_half_theta));
         return .{ .data = .{ a.data[0], a.data[1], a.data[2], cos_half_theta } };
     }
@@ -3748,8 +3748,8 @@ pub const Qd = struct {
 
     /// axis should be normalized
     pub fn axisAngle(axis: V3f64, angle: f64) Qd {
-        const sin_half_theta = @sin(0.5 * angle)
-        const cos_half_theta = @cos(0.5 * angle)
+        const sin_half_theta = @sin(0.5 * angle);
+        const cos_half_theta = @cos(0.5 * angle);
         const a = axis.mul(.splat(sin_half_theta));
         return .{ .data = .{ a.data[0], a.data[1], a.data[2], cos_half_theta } };
     }
