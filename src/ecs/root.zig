@@ -4,6 +4,10 @@ pub const BlockPool = @import("block_pool.zig").BlockPool;
 
 const log = std.log.scoped(.ecs);
 
+const keygen_weyl = 0xbf072894ec36014d;
+var keygen_counter: u64 = keygen_weyl;
+var keygen_seed: u64 = 1;
+
 pub const Key = enum(u64) {
     nil = 0,
     _,
@@ -26,20 +30,22 @@ pub const Key = enum(u64) {
             return a == b;
         }
     };
-};
 
-pub const KeyGen = struct {
-    counter: u64 = 1,
-
-    pub fn next(keygen: *KeyGen) Key {
-        var x = @atomicRmw(u64, &keygen.counter, .Add, 0xbf072894ec36014d, .monotonic);
+    pub fn new() Key {
+        var x = @atomicRmw(u64, &keygen_counter, .Add, keygen_weyl, .monotonic);
         // SplitMix64
         x = (x ^ (x >> 30)) *% 0xbf58476d1ce4e5b9;
         x = (x ^ (x >> 27)) *% 0x94d049bb133111eb;
         x ^= (x >> 31);
-        return @enumFromInt(x);
+        return @enumFromInt(x *% keygen_seed);
     }
 };
+
+/// lowest bit is not used
+pub fn seed(_seed: u64) void {
+    std.debug.assert(keygen_counter == keygen_weyl); // must have generated no keys yet
+    keygen_seed = _seed | 1;
+}
 
 pub fn World(comptime Spec: type) type {
     return struct {
@@ -235,6 +241,98 @@ pub fn World(comptime Spec: type) type {
             exclude: ComponentSet,
         };
 
+        pub const CommandList = struct {
+            const Node = struct {
+                command: enum { create, destroy, insert, remove },
+                key: Key,
+                data: *anyopaque,
+                next: ?*Node,
+            };
+
+            arena: std.mem.Allocator,
+            head: ?*Node = null,
+            tail: ?*Node = null,
+
+            pub fn create(list: *CommandList, record: Record) !Key {
+                const node = try list.arena.create(Node);
+                const data = try list.arena.create(Record);
+                const key: Key = .new();
+                node.* = .{
+                    .command = .create,
+                    .key = key,
+                    .data = data,
+                    .next = null,
+                };
+                data.* = record;
+                list.append(node);
+            }
+
+            pub fn destroy(list: *CommandList, key: Key) !void {
+                const node = try list.arena.create(Node);
+                node.* = .{
+                    .command = .create,
+                    .key = key,
+                    .data = undefined,
+                    .next = null,
+                };
+                list.append(node);
+            }
+
+            pub fn insert(
+                list: *CommandList,
+                key: Key,
+                comptime component: Component,
+                value: ComponentType(component),
+            ) !void {
+                const node = try list.arena.create(Node);
+                const data = try list.arena.create(struct {
+                    component: Component,
+                    value: ComponentType(component),
+                });
+                node.* = .{
+                    .command = .create,
+                    .key = key,
+                    .data = data,
+                    .next = null,
+                };
+                data.* = .{
+                    .component = component,
+                    .value = value,
+                };
+                list.append(node);
+            }
+
+            pub fn remove(list: *CommandList, key: Key, component: Component) !void {
+                const node = try list.arena.create(Node);
+                const data = try list.arena.create(struct {
+                    key: Key,
+                    component: Component,
+                });
+                node.* = .{
+                    .command = .create,
+                    .key = key,
+                    .data = data,
+                    .next = null,
+                };
+                data.* = .{
+                    .component = component,
+                };
+                list.append(node);
+            }
+
+            fn append(list: *CommandList, node: *Node) void {
+                if (list.head == null) {
+                    std.debug.assert(list.tail == null);
+                    list.head = node;
+                    list.tail = node;
+                } else {
+                    std.debug.assert(list.tail != null);
+                    list.tail.?.next = node;
+                    list.tail = node;
+                }
+            }
+        };
+
         pub fn PageView(comptime raw_query: RawQuery) type {
             return struct {
                 const _PageView = @This();
@@ -371,10 +469,10 @@ pub fn World(comptime Spec: type) type {
         keygen: *KeyGen,
 
         queue_arena: std.heap.ArenaAllocator,
-        create_queue: UntypedList,
-        destroy_queue: UntypedList,
-        insert_queues: std.EnumArray(Component, UntypedList),
-        remove_queues: std.EnumArray(Component, UntypedList),
+        // create_queue: UntypedList,
+        // destroy_queue: UntypedList,
+        // insert_queues: std.EnumArray(Component, UntypedList),
+        // remove_queues: std.EnumArray(Component, UntypedList),
 
         cache_rng_state: u64,
         pages: std.MultiArrayList(PageInfo), // first cache_size slots form cache
@@ -422,6 +520,86 @@ pub fn World(comptime Spec: type) type {
                 .page = null,
                 .cursor = 0,
             };
+        }
+
+        pub fn acquire(world: *_World, arena: std.mem.Allocator) CommandList {
+            return .{ .arena = arena };
+        }
+
+        pub fn submit(world: *_World, command_lists: []const CommandList) !void {
+            // NOTE idempotent design allows rerunning a submit twice with no extra effect
+            // which makes error recovery easy, just redo the submit after fixing the oom
+            for (command_list) |command_lists| {
+                var walk: ?*CommandList.Node = command_list.head;
+                while (walk) |command| : (walk = command.next) {
+                    const key = command.key;
+                    switch (command.command) {
+                        .create => {
+                            if (world.map.contains(key)) continue;
+
+                            const record: *Record = @ptrCast(@alignCast(command.data));
+                            try world.map.ensureUnusedCapacity(world.pool.gpa, 1);
+                            var set = ComponentSet.initEmpty();
+                            inline for (std.meta.fields(Record), 0..) |field, i| {
+                                if (@field(q.record, field.name) != null) set.insert(
+                                    @as(Component, @enumFromInt(i)),
+                                );
+                            }
+                            const page = try world.getPage(set);
+                            const index = page.append(key, record.*);
+                            world.map.putAssumeCapacity(key, .{ .index = index, .page = page });
+                        },
+                        .destroy => {
+                            const location = world.map.get(key) orelse continue;
+
+                            _ = world.map.remove(key);
+                            if (location.page.header.len > 1) {
+                                const moved = location.page.erase(location.index);
+                                if (moved != .nil) world.map.putAssumeCapacity(
+                                    moved,
+                                    .{ .page = location.page, .index = location.index },
+                                ); // overwrites, hence there is capacity by definition
+                            } else {
+                                // page is empty, destroy entirely
+                                for (world.pages.items(.page), 0..) |p, i| {
+                                    if (p == location.page) {
+                                        world.pool.destroy(p);
+                                        world.pages.swapRemove(i);
+                                        break;
+                                    }
+                                }
+                            }
+                        },
+                        .insert => {
+                            // so here's a problem, we cant cast to the struct
+                            // since the struct depends on a comptime only type
+                            // so we need to change the insert data
+                            // so we can switch on the runtime component to cast the value
+
+                            const q = insert_queue.get(
+                                struct { key: Key, value: ComponentType(c) },
+                                insert_queue.cursor,
+                            );
+                            const location = world.map.get(q.key) orelse continue;
+                            if (location.page.hasComponent(c)) continue; // NOTE double insert is noop
+                            var set = location.page.componentSet();
+                            set.insert(c);
+                            const page = try world.getPage(set);
+                            var record = location.record();
+                            @field(record, @tagName(c)) = q.value;
+                            const index = page.append(q.key, record);
+                            world.map.putAssumeCapacity(q.key, .{ .page = page, .index = index });
+                            const moved = location.page.erase(location.index);
+                            if (moved != .nil) world.map.putAssumeCapacity(
+                                moved,
+                                .{ .page = location.page, .index = location.index },
+                            );
+                        },
+                        .remove => {},
+                    }
+                }
+            }
+            _ = world;
         }
 
         /// lock free thread safe
@@ -660,104 +838,3 @@ test "basic create insert remove destroy functionality" {
     try std.testing.expectEqual(null, world.entity(e2));
     try std.testing.expectEqual(null, world.entity(e3));
 }
-
-/// an untyped version of whats in arenautils
-const UntypedList = struct {
-    const Self = @This();
-
-    shelves: usize, //?*[63]?[*]T,
-    len: usize,
-    cursor: usize,
-
-    pub const empty = Self{ .shelves = 0, .len = 0, .cursor = 0 };
-
-    /// assumes that index is in range
-    pub fn get(self: Self, comptime T: type, index: usize) T {
-        const shelf_index = shelfIndex(index);
-        const box_index = boxIndex(index, shelf_index);
-        const shelves: ?*[63]?[*]T = @ptrFromInt(@atomicLoad(usize, &self.shelves, .acquire));
-        return shelves.?[shelf_index].?[box_index];
-    }
-
-    /// increase length by 1, returning pointer to the new item
-    /// thread safe, may overallocate during a race
-    pub fn addOne(self: *Self, comptime T: type, arena: std.mem.Allocator) !*T {
-        // ensure that there is a shelves array
-        var addr: usize = @atomicLoad(usize, &self.shelves, .acquire);
-        if (addr == 0) {
-            const new_shelves = try arena.create([63]?[*]T);
-            new_shelves.* = @splat(null);
-            const new_addr: usize = @intFromPtr(new_shelves);
-            if (@cmpxchgStrong(
-                usize,
-                &self.shelves,
-                0,
-                new_addr,
-                .release,
-                .acquire,
-            )) |actual| {
-                // another thread made the new shelf first
-                arena.destroy(new_shelves); // might work
-                addr = actual;
-            }
-            // we made the new shelf
-            addr = new_addr;
-        }
-        std.debug.assert(addr != 0);
-        const shelves: *[63]?[*]T = @ptrFromInt(addr);
-
-        // get a guess at what the index will be
-        var index = @atomicLoad(usize, &self.len, .acquire);
-        while (true) {
-            const shelf_index = shelfIndex(index);
-
-            // ensure that the shelf exists
-            const shelf = @atomicLoad(?[*]T, &shelves[shelf_index], .acquire) orelse
-                blk: {
-                    const new_shelf = try arena.alloc(T, shelfSize(shelf_index));
-                    if (@cmpxchgStrong(
-                        ?[*]T,
-                        &shelves[shelf_index],
-                        null,
-                        new_shelf.ptr,
-                        .release,
-                        .acquire,
-                    )) |actual| {
-                        // another thread made the new shelf first
-                        arena.free(new_shelf); // might work
-                        break :blk actual.?;
-                    }
-                    // we made the new shelf
-                    break :blk new_shelf.ptr;
-                };
-
-            // try to get the index we saw from the start
-            if (@cmpxchgWeak(
-                usize,
-                &self.len,
-                index,
-                index + 1,
-                .acq_rel,
-                .acquire,
-            )) |latest_len| {
-                // someone else took it, try again
-                index = latest_len;
-                continue;
-            }
-
-            return &shelf[boxIndex(index, shelf_index)];
-        }
-    }
-
-    fn shelfIndex(list_index: usize) usize {
-        return std.math.log2_int(usize, list_index + 1);
-    }
-
-    fn shelfSize(shelf_index: usize) usize {
-        return @as(usize, 1) << @intCast(shelf_index);
-    }
-
-    fn boxIndex(list_index: usize, shelf_index: usize) usize {
-        return list_index + 1 - (@as(usize, 1) << @intCast(shelf_index));
-    }
-};
