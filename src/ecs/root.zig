@@ -4,9 +4,28 @@ pub const BlockPool = @import("block_pool.zig").BlockPool;
 
 const log = std.log.scoped(.ecs);
 
-const keygen_weyl = 0xbf072894ec36014d;
-var keygen_counter: u64 = keygen_weyl;
-var keygen_seed: u64 = 1;
+pub const KeyGen = struct {
+    // current design produces different sequences for different seeds
+    // but they are highly correlated since they're just proportional modulo 2**64
+    const weyl = 0xbf072894ec36014d;
+
+    counter: u64 = weyl,
+    seed: u64,
+
+    /// note lowest bit of seed it not used  (it must be odd))
+    pub fn init(seed: u64) KeyGen {
+        return .{ .seed = seed | 1 };
+    }
+
+    pub fn next(keygen: *KeyGen) Key {
+        var x = @atomicRmw(u64, &keygen.counter, .Add, weyl, .monotonic);
+        // SplitMix64
+        x = (x ^ (x >> 30)) *% 0xbf58476d1ce4e5b9;
+        x = (x ^ (x >> 27)) *% 0x94d049bb133111eb;
+        x ^= (x >> 31);
+        return @enumFromInt(x *% keygen.seed);
+    }
+};
 
 pub const Key = enum(u64) {
     nil = 0,
@@ -30,22 +49,7 @@ pub const Key = enum(u64) {
             return a == b;
         }
     };
-
-    pub fn new() Key {
-        var x = @atomicRmw(u64, &keygen_counter, .Add, keygen_weyl, .monotonic);
-        // SplitMix64
-        x = (x ^ (x >> 30)) *% 0xbf58476d1ce4e5b9;
-        x = (x ^ (x >> 27)) *% 0x94d049bb133111eb;
-        x ^= (x >> 31);
-        return @enumFromInt(x *% keygen_seed);
-    }
 };
-
-/// lowest bit is not used
-pub fn seed(_seed: u64) void {
-    std.debug.assert(keygen_counter == keygen_weyl); // must have generated no keys yet
-    keygen_seed = _seed | 1;
-}
 
 pub fn World(comptime Spec: type) type {
     return struct {
@@ -242,40 +246,54 @@ pub fn World(comptime Spec: type) type {
         };
 
         pub const CommandList = struct {
-            const Node = struct {
+            const Command = struct {
                 command: enum { create, destroy, insert, remove },
                 key: Key,
-                data: *anyopaque,
-                next: ?*Node,
+                next: ?*Command,
             };
+            const CommandRecord = struct {
+                command: Command,
+                record: Record,
+            };
+            const CommandComponent = struct {
+                command: Command,
+                component: Component,
+            };
+            fn CommandInsert(comptime c: Component) type {
+                return struct {
+                    command: CommandComponent,
+                    value: ComponentType(c),
+                };
+            }
 
             arena: std.mem.Allocator,
-            head: ?*Node = null,
-            tail: ?*Node = null,
+            keygen: *KeyGen,
+            head: ?*Command = null,
+            tail: ?*Command = null,
 
             pub fn create(list: *CommandList, record: Record) !Key {
-                const node = try list.arena.create(Node);
-                const data = try list.arena.create(Record);
-                const key: Key = .new();
-                node.* = .{
-                    .command = .create,
-                    .key = key,
-                    .data = data,
-                    .next = null,
+                const command = try list.arena.create(CommandRecord);
+                const key: Key = list.keygen.next();
+                command.* = .{
+                    .command = .{
+                        .command = .create,
+                        .key = key,
+                        .next = null,
+                    },
+                    .record = record,
                 };
-                data.* = record;
-                list.append(node);
+                list.append(&command.command);
+                return key;
             }
 
             pub fn destroy(list: *CommandList, key: Key) !void {
-                const node = try list.arena.create(Node);
-                node.* = .{
-                    .command = .create,
+                const command = try list.arena.create(Command);
+                command.* = .{
+                    .command = .destroy,
                     .key = key,
-                    .data = undefined,
                     .next = null,
                 };
-                list.append(node);
+                list.append(command);
             }
 
             pub fn insert(
@@ -284,51 +302,43 @@ pub fn World(comptime Spec: type) type {
                 comptime component: Component,
                 value: ComponentType(component),
             ) !void {
-                const node = try list.arena.create(Node);
-                const data = try list.arena.create(struct {
-                    component: Component,
-                    value: ComponentType(component),
-                });
-                node.* = .{
-                    .command = .create,
-                    .key = key,
-                    .data = data,
-                    .next = null,
-                };
-                data.* = .{
-                    .component = component,
+                const command = try list.arena.create(CommandInsert(component));
+                command.* = .{
+                    .command = .{
+                        .command = .{
+                            .command = .insert,
+                            .key = key,
+                            .next = null,
+                        },
+                        .component = component,
+                    },
                     .value = value,
                 };
-                list.append(node);
+                list.append(&command.command.command);
             }
 
             pub fn remove(list: *CommandList, key: Key, component: Component) !void {
-                const node = try list.arena.create(Node);
-                const data = try list.arena.create(struct {
-                    key: Key,
-                    component: Component,
-                });
-                node.* = .{
-                    .command = .create,
-                    .key = key,
-                    .data = data,
-                    .next = null,
-                };
-                data.* = .{
+                const command = try list.arena.create(CommandComponent);
+                command.* = .{
+                    .command = .{
+                        .command = .remove,
+                        .key = key,
+                        .next = null,
+                    },
                     .component = component,
                 };
-                list.append(node);
+                list.append(&command.command);
             }
 
-            fn append(list: *CommandList, node: *Node) void {
+            fn append(list: *CommandList, command: *Command) void {
                 if (list.head == null) {
                     std.debug.assert(list.tail == null);
-                    list.head = node;
-                    list.tail = node;
+                    list.head = command;
+                    list.tail = command;
                 } else {
                     std.debug.assert(list.tail != null);
-                    list.tail.?.next = node;
-                    list.tail = node;
+                    list.tail.?.next = command;
+                    list.tail = command;
                 }
             }
         };
@@ -468,12 +478,6 @@ pub fn World(comptime Spec: type) type {
         pool: *BlockPool,
         keygen: *KeyGen,
 
-        queue_arena: std.heap.ArenaAllocator,
-        // create_queue: UntypedList,
-        // destroy_queue: UntypedList,
-        // insert_queues: std.EnumArray(Component, UntypedList),
-        // remove_queues: std.EnumArray(Component, UntypedList),
-
         cache_rng_state: u64,
         pages: std.MultiArrayList(PageInfo), // first cache_size slots form cache
         map: std.HashMapUnmanaged(Key, EntityView(.{}), Key.HashContext, 80),
@@ -485,18 +489,12 @@ pub fn World(comptime Spec: type) type {
             world.cache_rng_state = @intFromEnum(keygen.next()); // it's free rng
             world.pages = .empty;
             world.map = .empty;
-            world.queue_arena = .init(pool.gpa);
-            world.create_queue = .empty;
-            world.destroy_queue = .empty;
-            world.insert_queues = .initFill(.empty);
-            world.remove_queues = .initFill(.empty);
             return world;
         }
 
         pub fn destroy(world: *_World) void {
             world.pages.deinit(world.pool.gpa);
             world.map.deinit(world.pool.gpa);
-            world.queue_arena.deinit();
             world.pool.gpa.destroy(world);
         }
 
@@ -523,30 +521,33 @@ pub fn World(comptime Spec: type) type {
         }
 
         pub fn acquire(world: *_World, arena: std.mem.Allocator) CommandList {
-            return .{ .arena = arena };
+            return .{ .arena = arena, .keygen = world.keygen };
         }
 
         pub fn submit(world: *_World, command_lists: []const CommandList) !void {
             // NOTE idempotent design allows rerunning a submit twice with no extra effect
             // which makes error recovery easy, just redo the submit after fixing the oom
-            for (command_list) |command_lists| {
-                var walk: ?*CommandList.Node = command_list.head;
+            for (command_lists) |command_list| {
+                var walk: ?*CommandList.Command = command_list.head;
                 while (walk) |command| : (walk = command.next) {
                     const key = command.key;
                     switch (command.command) {
                         .create => {
                             if (world.map.contains(key)) continue;
 
-                            const record: *Record = @ptrCast(@alignCast(command.data));
+                            const command_record: *CommandList.CommandRecord =
+                                @fieldParentPtr("command", command);
+                            const record = command_record.record;
+
                             try world.map.ensureUnusedCapacity(world.pool.gpa, 1);
                             var set = ComponentSet.initEmpty();
                             inline for (std.meta.fields(Record), 0..) |field, i| {
-                                if (@field(q.record, field.name) != null) set.insert(
+                                if (@field(record, field.name) != null) set.insert(
                                     @as(Component, @enumFromInt(i)),
                                 );
                             }
                             const page = try world.getPage(set);
-                            const index = page.append(key, record.*);
+                            const index = page.append(key, command_record.record);
                             world.map.putAssumeCapacity(key, .{ .index = index, .page = page });
                         },
                         .destroy => {
@@ -571,174 +572,62 @@ pub fn World(comptime Spec: type) type {
                             }
                         },
                         .insert => {
-                            // so here's a problem, we cant cast to the struct
-                            // since the struct depends on a comptime only type
-                            // so we need to change the insert data
-                            // so we can switch on the runtime component to cast the value
+                            const command_component: *CommandList.CommandComponent =
+                                @fieldParentPtr("command", command);
+                            switch (command_component.component) {
+                                inline else => |c| {
+                                    const command_insert: *CommandList.CommandInsert(c) =
+                                        @fieldParentPtr("command", command_component);
 
-                            const q = insert_queue.get(
-                                struct { key: Key, value: ComponentType(c) },
-                                insert_queue.cursor,
-                            );
-                            const location = world.map.get(q.key) orelse continue;
-                            if (location.page.hasComponent(c)) continue; // NOTE double insert is noop
-                            var set = location.page.componentSet();
-                            set.insert(c);
-                            const page = try world.getPage(set);
-                            var record = location.record();
-                            @field(record, @tagName(c)) = q.value;
-                            const index = page.append(q.key, record);
-                            world.map.putAssumeCapacity(q.key, .{ .page = page, .index = index });
-                            const moved = location.page.erase(location.index);
-                            if (moved != .nil) world.map.putAssumeCapacity(
-                                moved,
-                                .{ .page = location.page, .index = location.index },
-                            );
+                                    // insert into nonexisting is noop
+                                    const location = world.map.get(key) orelse continue;
+                                    // double insert is noop
+                                    if (location.page.hasComponent(c)) continue;
+                                    var set = location.page.componentSet();
+                                    set.insert(c);
+                                    const page = try world.getPage(set);
+                                    var record = location.record();
+                                    @field(record, @tagName(c)) = command_insert.value;
+                                    const index = page.append(key, record);
+                                    world.map.putAssumeCapacity(
+                                        key,
+                                        .{ .page = page, .index = index },
+                                    );
+                                    const moved = location.page.erase(location.index);
+                                    if (moved != .nil) world.map.putAssumeCapacity(
+                                        moved,
+                                        .{ .page = location.page, .index = location.index },
+                                    );
+                                },
+                            }
                         },
-                        .remove => {},
+                        .remove => {
+                            const command_component: *CommandList.CommandComponent =
+                                @fieldParentPtr("command", command);
+                            switch (command_component.component) {
+                                inline else => |c| {
+                                    // double remove is a noop
+                                    const location = world.map.get(key) orelse continue;
+
+                                    if (!location.page.hasComponent(c)) continue;
+                                    var set = location.page.componentSet();
+                                    set.remove(c);
+                                    const page = try world.getPage(set);
+                                    var record = location.record();
+                                    @field(record, @tagName(c)) = null;
+                                    const index = page.append(key, record);
+                                    world.map.putAssumeCapacity(key, .{ .page = page, .index = index });
+                                    const moved = location.page.erase(location.index);
+                                    if (moved != .nil) world.map.putAssumeCapacity(
+                                        moved,
+                                        .{ .page = location.page, .index = location.index },
+                                    );
+                                },
+                            }
+                        },
                     }
                 }
             }
-            _ = world;
-        }
-
-        /// lock free thread safe
-        pub fn queueCreate(world: *_World, record: Record) !Key {
-            const key = world.keygen.next();
-            (try world.create_queue.addOne(
-                struct { key: Key, record: Record },
-                world.queue_arena.allocator(),
-            )).* = .{ .key = key, .record = record };
-            return key;
-        }
-
-        /// lock free thread safe
-        pub fn queueInsert(
-            world: *_World,
-            key: Key,
-            comptime component: Component,
-            value: ComponentType(component),
-        ) !void {
-            std.debug.assert(key != .nil);
-            const queue = world.insert_queues.getPtr(component);
-            (try queue.addOne(
-                struct { key: Key, value: ComponentType(component) },
-                world.queue_arena.allocator(),
-            )).* = .{ .key = key, .value = value };
-        }
-
-        /// lock free thread safe
-        pub fn queueDestroy(world: *_World, key: Key) !void {
-            std.debug.assert(key != .nil);
-            (try world.destroy_queue.addOne(Key, world.queue_arena.allocator())).* = key;
-        }
-
-        /// lock free thread safe
-        pub fn queueRemove(
-            world: *_World,
-            key: Key,
-            comptime component: Component,
-        ) !void {
-            std.debug.assert(key != .nil);
-            const queue = world.remove_queues.getPtr(component);
-            (try queue.addOne(Key, world.queue_arena.allocator())).* = key;
-        }
-
-        pub fn resolveQueues(world: *_World) !void {
-            while (world.create_queue.cursor < world.create_queue.len) {
-                const q = world.create_queue.get(
-                    struct { key: Key, record: Record },
-                    world.create_queue.cursor,
-                );
-                try world.map.ensureUnusedCapacity(world.pool.gpa, 1);
-                var set = ComponentSet.initEmpty();
-                inline for (std.meta.fields(Record), 0..) |field, i| {
-                    if (@field(q.record, field.name) != null) set.insert(
-                        @as(Component, @enumFromInt(i)),
-                    );
-                }
-                const page = try world.getPage(set);
-                const index = page.append(q.key, q.record);
-
-                world.map.putAssumeCapacity(q.key, .{ .index = index, .page = page });
-                world.create_queue.cursor += 1;
-            }
-
-            while (world.destroy_queue.cursor < world.destroy_queue.len) {
-                const q = world.destroy_queue.get(Key, world.destroy_queue.cursor);
-                const location = world.map.get(q) orelse continue;
-                _ = world.map.remove(q);
-                if (location.page.header.len > 1) {
-                    const moved = location.page.erase(location.index);
-                    if (moved != .nil) world.map.putAssumeCapacity(
-                        moved,
-                        .{ .page = location.page, .index = location.index },
-                    ); // overwrites, hence there is capacity by definition
-                } else {
-                    // page is empty, destroy entirely
-                    for (world.pages.items(.page), 0..) |p, i| {
-                        if (p == location.page) {
-                            world.pool.destroy(p);
-                            world.pages.swapRemove(i);
-                            break;
-                        }
-                    }
-                }
-                world.destroy_queue.cursor += 1;
-            }
-
-            inline for (0..n_components) |i| {
-                const c: Component = @enumFromInt(i);
-                const insert_queue = world.insert_queues.getPtr(c);
-                const remove_queue = world.remove_queues.getPtr(c);
-
-                while (insert_queue.cursor < insert_queue.len) {
-                    const q = insert_queue.get(
-                        struct { key: Key, value: ComponentType(c) },
-                        insert_queue.cursor,
-                    );
-                    const location = world.map.get(q.key) orelse continue;
-                    if (location.page.hasComponent(c)) continue; // NOTE double insert is noop
-                    var set = location.page.componentSet();
-                    set.insert(c);
-                    const page = try world.getPage(set);
-                    var record = location.record();
-                    @field(record, @tagName(c)) = q.value;
-                    const index = page.append(q.key, record);
-                    world.map.putAssumeCapacity(q.key, .{ .page = page, .index = index });
-                    const moved = location.page.erase(location.index);
-                    if (moved != .nil) world.map.putAssumeCapacity(
-                        moved,
-                        .{ .page = location.page, .index = location.index },
-                    );
-                    insert_queue.cursor += 1;
-                }
-
-                while (remove_queue.cursor < remove_queue.len) {
-                    const q = remove_queue.get(Key, remove_queue.cursor);
-                    const location = world.map.get(q) orelse continue;
-                    if (!location.page.hasComponent(c)) continue;
-                    var set = location.page.componentSet();
-                    set.remove(c);
-                    const page = try world.getPage(set);
-                    var record = location.record();
-                    @field(record, @tagName(c)) = null;
-                    const index = page.append(q, record);
-                    world.map.putAssumeCapacity(q, .{ .page = page, .index = index });
-                    const moved = location.page.erase(location.index);
-                    if (moved != .nil) world.map.putAssumeCapacity(
-                        moved,
-                        .{ .page = location.page, .index = location.index },
-                    );
-                    remove_queue.cursor += 1;
-                }
-            }
-
-            _ = world.queue_arena.reset(.retain_capacity);
-            world.create_queue = .empty;
-            world.destroy_queue = .empty;
-            world.insert_queues = .initFill(.empty);
-            world.remove_queues = .initFill(.empty);
         }
 
         /// find or create page that has room for another entity with set components
@@ -776,19 +665,26 @@ pub fn World(comptime Spec: type) type {
 }
 
 test "basic create insert remove destroy functionality" {
+    var arena_impl: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
     const W = World(struct { x: i32, y: f32 });
     var pool = BlockPool.init(std.testing.allocator);
     defer pool.deinit();
-    var keygen: KeyGen = .{};
+    var seed: u64 = undefined;
+    std.testing.io.random(std.mem.asBytes(&seed));
+    var keygen: KeyGen = .init(seed);
 
     const world: *W = try .create(&pool, &keygen);
     defer world.destroy();
 
-    const e0 = try world.queueCreate(.{});
-    const e1 = try world.queueCreate(.{ .x = 1 });
-    const e2 = try world.queueCreate(.{ .y = 2.5 });
-    const e3 = try world.queueCreate(.{ .x = 3, .y = 3.5 });
-    try world.resolveQueues();
+    var q = world.acquire(arena);
+    const e0 = try q.create(.{});
+    const e1 = try q.create(.{ .x = 1 });
+    const e2 = try q.create(.{ .y = 2.5 });
+    const e3 = try q.create(.{ .x = 3, .y = 3.5 });
+    try world.submit(&.{q});
 
     // var it = world.entityIterator(.{});
     // while (it.next()) |e| std.debug.print("{} {}\n", .{ e.key(), e.record() });
@@ -802,15 +698,16 @@ test "basic create insert remove destroy functionality" {
     try std.testing.expectEqual(3, world.entity(e3).?.getOptional(.x).?);
     try std.testing.expectEqual(3.5, world.entity(e3).?.getOptional(.y).?);
 
-    try world.queueInsert(e0, .x, 99);
-    try world.queueInsert(e0, .y, 99.5);
-    try world.queueRemove(e1, .x);
-    try world.queueInsert(e1, .y, 999.5);
-    try world.queueInsert(e2, .x, 999);
-    try world.queueRemove(e2, .y);
-    try world.queueRemove(e3, .x);
-    try world.queueRemove(e3, .y);
-    try world.resolveQueues();
+    q = world.acquire(arena);
+    try q.insert(e0, .x, 99);
+    try q.insert(e0, .y, 99.5);
+    try q.remove(e1, .x);
+    try q.insert(e1, .y, 999.5);
+    try q.insert(e2, .x, 999);
+    try q.remove(e2, .y);
+    try q.remove(e3, .x);
+    try q.remove(e3, .y);
+    try world.submit(&.{q});
 
     // it = world.entityIterator(.{});
     // while (it.next()) |e| std.debug.print("{} {}\n", .{ e.key(), e.record() });
@@ -824,11 +721,12 @@ test "basic create insert remove destroy functionality" {
     try std.testing.expectEqual(null, world.entity(e3).?.getOptional(.x));
     try std.testing.expectEqual(null, world.entity(e3).?.getOptional(.y));
 
-    try world.queueDestroy(e0);
-    try world.queueDestroy(e1);
-    try world.queueDestroy(e2);
-    try world.queueDestroy(e3);
-    try world.resolveQueues();
+    q = world.acquire(arena);
+    try q.destroy(e0);
+    try q.destroy(e1);
+    try q.destroy(e2);
+    try q.destroy(e3);
+    try world.submit(&.{q});
 
     // it = world.entityIterator(.{});
     // while (it.next()) |e| std.debug.print("{} {}\n", .{ e.key(), e.record() });
