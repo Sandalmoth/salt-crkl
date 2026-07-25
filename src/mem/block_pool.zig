@@ -35,7 +35,7 @@ pub fn BlockAllocator(comptime config: Config) type {
         }
 
         gpa: std.mem.Allocator,
-        slabs: TaggedPointer align(16),
+        slabs: ?*Slab,
         blocks: TaggedPointer align(16),
         is_expanding: bool,
         capacity: usize,
@@ -43,7 +43,7 @@ pub fn BlockAllocator(comptime config: Config) type {
         pub fn init(gpa: std.mem.Allocator) Self {
             return .{
                 .gpa = gpa,
-                .slabs = .{ .ptr = 0, .tag = 0 },
+                .slabs = null,
                 .blocks = .{ .ptr = 0, .tag = 0 },
                 .is_expanding = false,
                 .capacity = 0,
@@ -51,10 +51,9 @@ pub fn BlockAllocator(comptime config: Config) type {
         }
 
         pub fn deinit(pool: *Self) void {
-            var walk: ?*Slab = @ptrFromInt(pool.slabs.ptr);
+            var walk: ?*Slab = pool.slabs;
             while (walk) |slab| {
                 walk = slab.next;
-                std.debug.print("{*} {}\n", .{ slab.bytes.ptr, slab.bytes.len });
                 pool.gpa.free(slab.bytes);
             }
         }
@@ -76,16 +75,14 @@ pub fn BlockAllocator(comptime config: Config) type {
         }
 
         fn pushSlab(pool: *Self, slab: *Slab) void {
-            std.debug.print("{*} {}\n", .{ slab.bytes.ptr, slab.bytes.len });
-            var old = @atomicLoad(TaggedPointer, &pool.slabs, .monotonic);
+            var old = @atomicLoad(?*Slab, &pool.slabs, .monotonic);
             while (true) {
-                slab.next = @ptrFromInt(old.ptr);
-                const new: TaggedPointer = .{ .ptr = @intFromPtr(slab), .tag = old.tag + 1 };
+                slab.next = old;
                 old = @cmpxchgWeak(
-                    TaggedPointer,
+                    ?*Slab,
                     &pool.slabs,
                     old,
-                    new,
+                    slab,
                     .release,
                     .monotonic,
                 ) orelse break;
@@ -217,11 +214,76 @@ pub fn BlockAllocator(comptime config: Config) type {
     };
 }
 
-test "allocator" {
-    var ba_impl: BlockAllocator(.{ .block_size = 1024 }) = .init(std.testing.allocator);
+test "basics" {
+    const block_size = 1024;
+    var ba_impl: BlockAllocator(.{ .block_size = block_size }) = .init(std.testing.allocator);
     defer ba_impl.deinit();
-    const ba = ba_impl.allocator();
+    const alloc = ba_impl.allocator();
 
-    const a = try ba.alloc(u32, 123);
-    defer ba.free(a);
+    // alignment
+    const b1 = try alloc.create([block_size]u8);
+    const b2 = try alloc.create([block_size]u8);
+    try std.testing.expect(std.mem.isAligned(@intFromPtr(b1), block_size));
+    try std.testing.expect(std.mem.isAligned(@intFromPtr(b2), block_size));
+
+    // stack behaviour
+    alloc.destroy(b1);
+    alloc.destroy(b2);
+    const b2_v2 = try alloc.create([block_size]u8);
+    const b1_v2 = try alloc.create([block_size]u8);
+    try std.testing.expectEqual(b1, b1_v2);
+    try std.testing.expectEqual(b2, b2_v2);
+
+    // make sure the blocks don't overlap
+    @memset(b1, 0x01);
+    @memset(b2, 0x02);
+    try std.testing.expectEqual(0x01, b1[0]);
+    try std.testing.expectEqual(0x01, b1[block_size - 1]);
+    try std.testing.expectEqual(0x02, b2[0]);
+    try std.testing.expectEqual(0x02, b2[block_size - 1]);
+
+    // expansion
+    var bs: std.ArrayList(*[block_size]u8) = .empty;
+    defer bs.deinit(std.testing.allocator);
+    for (0..1000) |i| {
+        const b = try alloc.create([block_size]u8);
+        try std.testing.expect(std.mem.isAligned(@intFromPtr(b), block_size));
+        @memset(b, @intCast(i % 255));
+        try bs.append(std.testing.allocator, b);
+    }
+    try std.testing.expect(ba_impl.capacity >= 1000);
+
+    // deletions
+    alloc.destroy(b1_v2);
+    alloc.destroy(b2_v2);
+    for (bs.items) |p| {
+        alloc.destroy(p);
+    }
+}
+
+test "failing" {
+    const block_size = 1024;
+    var ba_impl: BlockAllocator(.{ .block_size = block_size }) = .init(std.testing.allocator);
+    defer ba_impl.deinit();
+    const alloc = ba_impl.allocator();
+
+    const large = alloc.alloc(u8, block_size + 1);
+    try std.testing.expectError(error.OutOfMemory, large);
+    const bad_align = alloc.alignedAlloc(u8, .fromByteUnits(block_size * 2), 1);
+    try std.testing.expectError(error.OutOfMemory, bad_align);
+}
+
+test "resize and remap" {
+    const block_size = 1024;
+    var ba_impl: BlockAllocator(.{ .block_size = block_size }) = .init(std.testing.allocator);
+    defer ba_impl.deinit();
+    const alloc = ba_impl.allocator();
+
+    const mem = try alloc.alloc(u8, 100);
+    defer alloc.free(mem);
+
+    try std.testing.expect(alloc.resize(mem, 50));
+    try std.testing.expect(alloc.resize(mem, block_size));
+    try std.testing.expect(!alloc.resize(mem, block_size + 1));
+    try std.testing.expect(alloc.remap(mem, block_size + 1) == null);
 }
