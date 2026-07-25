@@ -72,6 +72,14 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const mem = b.addModule("mem", .{
+        .root_source_file = b.path("src/mem/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{},
+    });
+    _ = mem;
+
     // examples
     const example_rhi_translate_c = b.addTranslateC(.{
         .root_source_file = b.path("src/examples/rhi/c.h"),
