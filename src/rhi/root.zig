@@ -541,17 +541,17 @@ pub const SwapchainCreateInfo = struct {
     // NOTE swapchains always start as fifo sdr
     name: [:0]const u8 = &.{},
     window: Window,
+    present_mode: PresentMode,
+    composition: Composition,
+    old: *const Swapchain = null,
 };
 
 pub const Swapchain = struct {
     info: struct {
         name: [:0]const u8,
-    },
-    state: struct {
         present_mode: PresentMode,
         composition: Composition,
         size: [3]u32,
-        acquired: bool,
     },
 };
 
@@ -563,6 +563,7 @@ pub const Context = struct {
         Unsupported,
         Timeout,
         DeviceLost,
+        OutOfDate,
         Unknown,
         // TODO cleanup and narrow down to one uniform set of errors like what's above
         OutOfHostMemory,
@@ -587,9 +588,6 @@ pub const Context = struct {
     pub const VTable = struct {
         createSwapchain: *const fn (*anyopaque, SwapchainCreateInfo) Error!*const Swapchain,
         destroySwapchain: *const fn (*anyopaque, *const Swapchain) void,
-        setSwapchainPresentMode: *const fn (*anyopaque, *const Swapchain, PresentMode) Error!void,
-        setSwapchainComposition: *const fn (*anyopaque, *const Swapchain, Composition) Error!void,
-        acquireSwapchain: *const fn (*anyopaque, *const Swapchain, u64) Error!bool,
 
         createBuffer: *const fn (*anyopaque, BufferCreateInfo) Error!*const Buffer,
         createTexture: *const fn (*anyopaque, TextureCreateInfo) Error!*const Texture,
@@ -609,7 +607,7 @@ pub const Context = struct {
 
         stagingAllocator: *const fn (*anyopaque, StagingAllocatorUsage) std.mem.Allocator,
 
-        submit: *const fn (*anyopaque, io: std.Io, []const CommandBuffer, []const Present) Error!Fence,
+        submit: *const fn (*anyopaque, io: std.Io, []const CommandBuffer, ?Present) Error!Fence,
         wait: *const fn (*anyopaque, Fence, FenceMask, u64) Error!void,
 
         setBufferGroup: *const fn (*anyopaque, *const Buffer, ?*const Group) void,
@@ -623,9 +621,6 @@ pub const Context = struct {
     }
     pub fn destroySwapchain(ctx: Context, swapchain: *const Swapchain) void {
         ctx.vtable.destroySwapchain(ctx.ptr, swapchain);
-    }
-    pub fn acquireSwapchain(ctx: Context, swapchain: *const Swapchain, timeout: u64) Error!bool {
-        return ctx.vtable.acquireSwapchain(ctx.ptr, swapchain, timeout);
     }
     pub fn createTexture(ctx: Context, create_info: TextureCreateInfo) Error!*const Texture {
         return ctx.vtable.createTexture(ctx.ptr, create_info);
@@ -650,9 +645,9 @@ pub const Context = struct {
         ctx: Context,
         io: std.Io,
         command_buffers: []const CommandBuffer,
-        presents: []const Present,
+        present: ?Present,
     ) Error!Fence {
-        return ctx.vtable.submit(ctx.ptr, io, command_buffers, presents);
+        return ctx.vtable.submit(ctx.ptr, io, command_buffers, present);
     }
 };
 

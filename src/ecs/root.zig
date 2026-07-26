@@ -1,31 +1,7 @@
+const core = @import("core");
 const std = @import("std");
 
-pub const BlockPool = @import("block_pool.zig").BlockPool;
-
 const log = std.log.scoped(.ecs);
-
-pub const KeyGen = struct {
-    // current design produces different sequences for different seeds
-    // but they are highly correlated since they're just proportional modulo 2**64
-    const weyl = 0xbf072894ec36014d;
-
-    counter: u64 = weyl,
-    seed: u64,
-
-    /// note lowest bit of seed it not used  (it must be odd))
-    pub fn init(seed: u64) KeyGen {
-        return .{ .seed = seed | 1 };
-    }
-
-    pub fn next(keygen: *KeyGen) Key {
-        var x = @atomicRmw(u64, &keygen.counter, .Add, weyl, .monotonic);
-        // SplitMix64
-        x = (x ^ (x >> 30)) *% 0xbf58476d1ce4e5b9;
-        x = (x ^ (x >> 27)) *% 0x94d049bb133111eb;
-        x ^= (x >> 31);
-        return @enumFromInt(x *% keygen.seed);
-    }
-};
 
 pub const Key = enum(u64) {
     nil = 0,
@@ -103,10 +79,10 @@ pub fn World(comptime Spec: type) type {
                 len: usize,
             };
             header: Header,
-            data: [BlockPool.block_size - @sizeOf(Header)]u8,
+            data: [core.block_size - @sizeOf(Header)]u8,
 
-            fn create(pool: *BlockPool, set: ComponentSet) !*Page {
-                const page = try pool.create(Page);
+            fn create(blka: std.mem.Allocator, set: ComponentSet) !*Page {
+                const page = try blka.create(Page);
                 page.header.capacity = 0;
                 page.header.len = 0;
 
@@ -267,13 +243,13 @@ pub fn World(comptime Spec: type) type {
             }
 
             arena: std.mem.Allocator,
-            keygen: *KeyGen,
+            keygen: *core.KeyGen,
             head: ?*Command = null,
             tail: ?*Command = null,
 
             pub fn create(list: *CommandList, record: Record) !Key {
                 const command = try list.arena.create(CommandRecord);
-                const key: Key = list.keygen.next();
+                const key: Key = @enumFromInt(list.keygen.next());
                 command.* = .{
                     .command = .{
                         .command = .create,
@@ -475,27 +451,34 @@ pub fn World(comptime Spec: type) type {
             };
         }
 
-        pool: *BlockPool,
-        keygen: *KeyGen,
+        gpa: std.mem.Allocator,
+        blka: std.mem.Allocator,
+        keygen: *core.KeyGen,
 
         cache_rng_state: u64,
         pages: std.MultiArrayList(PageInfo), // first cache_size slots form cache
         map: std.HashMapUnmanaged(Key, EntityView(.{}), Key.HashContext, 80),
 
-        pub fn create(pool: *BlockPool, keygen: *KeyGen) !*_World {
-            const world = try pool.gpa.create(_World);
-            world.pool = pool;
+        pub fn create(
+            gpa: std.mem.Allocator,
+            blka: std.mem.Allocator,
+            keygen: *core.KeyGen,
+        ) !*_World {
+            const world = try gpa.create(_World);
+            world.gpa = gpa;
+            world.blka = blka;
             world.keygen = keygen;
-            world.cache_rng_state = @intFromEnum(keygen.next()); // it's free rng
+            world.cache_rng_state = keygen.next(); // it's free rng
             world.pages = .empty;
             world.map = .empty;
             return world;
         }
 
         pub fn destroy(world: *_World) void {
-            world.pages.deinit(world.pool.gpa);
-            world.map.deinit(world.pool.gpa);
-            world.pool.gpa.destroy(world);
+            for (world.pages.items(.page)) |page| world.blka.destroy(page);
+            world.pages.deinit(world.gpa);
+            world.map.deinit(world.gpa);
+            world.gpa.destroy(world);
         }
 
         pub fn entity(world: *_World, key: Key) ?EntityView(.{}) {
@@ -539,7 +522,7 @@ pub fn World(comptime Spec: type) type {
                                 @fieldParentPtr("command", command);
                             const record = command_record.record;
 
-                            try world.map.ensureUnusedCapacity(world.pool.gpa, 1);
+                            try world.map.ensureUnusedCapacity(world.gpa, 1);
                             var set = ComponentSet.initEmpty();
                             inline for (std.meta.fields(Record), 0..) |field, i| {
                                 if (@field(record, field.name) != null) set.insert(
@@ -564,7 +547,7 @@ pub fn World(comptime Spec: type) type {
                                 // page is empty, destroy entirely
                                 for (world.pages.items(.page), 0..) |p, i| {
                                     if (p == location.page) {
-                                        world.pool.destroy(p);
+                                        world.blka.destroy(p);
                                         world.pages.swapRemove(i);
                                         break;
                                     }
@@ -648,8 +631,8 @@ pub fn World(comptime Spec: type) type {
                 }
             }
             // no page exists with room for an entity like this, create one
-            try world.pages.ensureUnusedCapacity(world.pool.gpa, 1);
-            const page = try Page.create(world.pool, set);
+            try world.pages.ensureUnusedCapacity(world.gpa, 1);
+            const page = try Page.create(world.blka, set);
             world.pages.appendAssumeCapacity(.{ .page = page, .set = set });
             // add it to cache also since we just accessed it
             if (world.pages.len - 1 >= cache_size) {
@@ -670,13 +653,11 @@ test "basic create insert remove destroy functionality" {
     const arena = arena_impl.allocator();
 
     const W = World(struct { x: i32, y: f32 });
-    var pool = BlockPool.init(std.testing.allocator);
-    defer pool.deinit();
-    var seed: u64 = undefined;
+    var seed: u32 = undefined;
     std.testing.io.random(std.mem.asBytes(&seed));
-    var keygen: KeyGen = .init(seed);
+    var keygen: core.KeyGen = .init(seed);
 
-    const world: *W = try .create(&pool, &keygen);
+    const world: *W = try .create(std.testing.allocator, std.testing.allocator, &keygen);
     defer world.destroy();
 
     var q = world.acquire(arena);

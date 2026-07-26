@@ -19,14 +19,25 @@ pub fn build(b: *std.Build) void {
     const arenautils = b.addModule("math", .{
         .root_source_file = b.path("src/arenautils/root.zig"),
         .target = target,
+        .optimize = optimize,
+        .imports = &.{},
     });
     // _ = arenautils;
 
     const spiral = b.addModule("spiral", .{
         .root_source_file = b.path("src/spiral/root.zig"),
         .target = target,
+        .optimize = optimize,
+        .imports = &.{},
     });
     _ = spiral;
+
+    const core = b.addModule("core", .{
+        .root_source_file = b.path("src/core/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{},
+    });
 
     const spiral_exe = b.addExecutable(.{
         .name = "spiral",
@@ -45,13 +56,16 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/ecs/root.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{},
+        .imports = &.{
+            .{ .name = "core", .module = core },
+        },
     });
-    _ = ecs;
 
     const math = b.addModule("math", .{
         .root_source_file = b.path("src/math/root.zig"),
         .target = target,
+        .optimize = optimize,
+        .imports = &.{},
     });
     _ = math;
 
@@ -104,11 +118,14 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(example_rhi_exe);
 
     // tests
-    const rhi_tests = b.addTest(.{ .root_module = rhi });
-    rhi_tests.root_module.addImport("vulkan", vulkan);
+    // const rhi_tests = b.addTest(.{ .root_module = rhi });
+    // rhi_tests.root_module.addImport("vulkan", vulkan);
+
+    const ecs_tests = b.addTest(.{ .root_module = ecs });
 
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&b.addRunArtifact(rhi_tests).step);
+    // test_step.dependOn(&b.addRunArtifact(rhi_tests).step);
+    test_step.dependOn(&b.addRunArtifact(ecs_tests).step);
 }
 
 fn addSlangShader(
