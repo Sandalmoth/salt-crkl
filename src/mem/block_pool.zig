@@ -59,7 +59,15 @@ pub fn BlockAllocator(comptime config: Config) type {
         }
 
         fn pushBlock(pool: *Self, block: *Block) void {
-            var old = @atomicLoad(TaggedPointer, &pool.blocks, .monotonic);
+            // var old = @atomicLoad(TaggedPointer, &pool.blocks, .monotonic);
+            var old: TaggedPointer = @cmpxchgStrong(
+                TaggedPointer,
+                &pool.blocks,
+                .{ .ptr = 0, .tag = std.math.maxInt(usize) },
+                .{ .ptr = 0, .tag = std.math.maxInt(usize) },
+                .acquire,
+                .acquire,
+            ) orelse unreachable;
             while (true) {
                 block.next = @ptrFromInt(old.ptr);
                 const new: TaggedPointer = .{ .ptr = @intFromPtr(block), .tag = old.tag + 1 };
@@ -90,7 +98,15 @@ pub fn BlockAllocator(comptime config: Config) type {
         }
 
         fn popBlock(pool: *Self) ?*Block {
-            var old = @atomicLoad(TaggedPointer, &pool.blocks, .acquire);
+            // var old = @atomicLoad(TaggedPointer, &pool.blocks, .acquire);
+            var old: TaggedPointer = @cmpxchgStrong(
+                TaggedPointer,
+                &pool.blocks,
+                .{ .ptr = 0, .tag = std.math.maxInt(usize) },
+                .{ .ptr = 0, .tag = std.math.maxInt(usize) },
+                .acquire,
+                .acquire,
+            ) orelse unreachable;
             while (old.ptr != 0) {
                 const block: *Block = @ptrFromInt(old.ptr);
                 const new: TaggedPointer = .{ .ptr = @intFromPtr(block.next), .tag = old.tag + 1 };
@@ -145,7 +161,6 @@ pub fn BlockAllocator(comptime config: Config) type {
                 slab_size = @max(min_slab, (slab_size *| 9) >> 5);
             }
             const bytes = pool.gpa.alloc(u8, (slab_size + 1) * block_size) catch return null;
-            _ = @atomicRmw(usize, &pool.capacity, .Add, slab_size, .monotonic);
             var addr: usize = @intFromPtr(bytes.ptr);
             addr = std.mem.alignForward(usize, addr, block_size);
             for (0..slab_size) |_| {
@@ -153,6 +168,7 @@ pub fn BlockAllocator(comptime config: Config) type {
                 addr += block_size;
             }
             std.debug.assert(addr < @intFromPtr(bytes.ptr) + bytes.len);
+            _ = @atomicRmw(usize, &pool.capacity, .Add, slab_size, .monotonic);
 
             var slab_addr = addr;
             if (addr + @sizeOf(Slab) > @intFromPtr(bytes.ptr) + bytes.len) {
@@ -167,7 +183,8 @@ pub fn BlockAllocator(comptime config: Config) type {
 
             if (ticket) @atomicStore(bool, &pool.is_expanding, false, .monotonic);
 
-            return @call(.always_tail, alloc, .{ ctx, len, alignment, ret_addr });
+            // return @call(.always_tail, alloc, .{ ctx, len, alignment, ret_addr });
+            return alloc(ctx, len, alignment, ret_addr);
         }
 
         fn resize(
