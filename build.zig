@@ -5,9 +5,9 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // dependencies
-    const vulkan = b.dependency("vulkan", .{
-        .registry = b.dependency("vulkan_headers", .{}).path("registry/vk.xml"),
-    }).module("vulkan-zig");
+    // const vulkan = b.dependency("vulkan", .{
+    //     .registry = b.dependency("vulkan_headers", .{}).path("registry/vk.xml"),
+    // }).module("vulkan-zig");
 
     const sdl_dep = b.dependency("sdl", .{
         .target = target,
@@ -30,7 +30,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{},
     });
-    _ = spiral;
 
     const core = b.addModule("core", .{
         .root_source_file = b.path("src/core/root.zig"),
@@ -67,7 +66,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{},
     });
-    _ = math;
 
     const profiler = b.addModule("profiler", .{
         .root_source_file = b.path("src/profiler/root.zig"),
@@ -77,14 +75,14 @@ pub fn build(b: *std.Build) void {
     });
     _ = profiler;
 
-    const rhi = b.addModule("rhi", .{
-        .root_source_file = b.path("src/rhi/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "vulkan", .module = vulkan },
-        },
-    });
+    // const rhi = b.addModule("rhi", .{
+    //     .root_source_file = b.path("src/rhi/root.zig"),
+    //     .target = target,
+    //     .optimize = optimize,
+    //     .imports = &.{
+    //         .{ .name = "vulkan", .module = vulkan },
+    //     },
+    // });
 
     const mem = b.addModule("mem", .{
         .root_source_file = b.path("src/mem/root.zig"),
@@ -92,30 +90,61 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{},
     });
-    _ = mem;
 
-    // examples
-    const example_rhi_translate_c = b.addTranslateC(.{
-        .root_source_file = b.path("src/examples/rhi/c.h"),
+    const framework_translate_c = b.addTranslateC(.{
+        .root_source_file = b.path("src/c.h"),
         .target = target,
         .optimize = optimize,
     });
-    const example_rhi_exe = b.addExecutable(.{
-        .name = "example_rhi",
+    const framework = b.addModule("framework", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "c", .module = framework_translate_c.createModule() },
+            .{ .name = "mem", .module = mem },
+            .{ .name = "core", .module = core },
+            .{ .name = "math", .module = math },
+            .{ .name = "spiral", .module = spiral },
+        },
+    });
+
+    // examples
+    // const example_rhi_translate_c = b.addTranslateC(.{
+    //     .root_source_file = b.path("src/examples/rhi/c.h"),
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
+    // const example_rhi_exe = b.addExecutable(.{
+    //     .name = "example_rhi",
+    //     .root_module = b.createModule(.{
+    //         .root_source_file = b.path("src/examples/rhi/main.zig"),
+    //         .target = target,
+    //         .optimize = optimize,
+    //         .imports = &.{
+    //             .{ .name = "rhi", .module = rhi },
+    //             .{ .name = "c", .module = example_rhi_translate_c.createModule() },
+    //         },
+    //     }),
+    // });
+    // addSlangShader(b, "src/examples/rhi/shader.slang", "vertex", example_rhi_exe);
+    // addSlangShader(b, "src/examples/rhi/shader.slang", "fragment", example_rhi_exe);
+    // example_rhi_exe.root_module.linkLibrary(sdl_lib);
+    // b.installArtifact(example_rhi_exe);
+
+    const example_framework_exe = b.addExecutable(.{
+        .name = "example_framework",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/examples/rhi/main.zig"),
+            .root_source_file = b.path("src/examples/framework/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "rhi", .module = rhi },
-                .{ .name = "c", .module = example_rhi_translate_c.createModule() },
+                .{ .name = "framework", .module = framework },
             },
         }),
     });
-    addSlangShader(b, "src/examples/rhi/shader.slang", "vertex", example_rhi_exe);
-    addSlangShader(b, "src/examples/rhi/shader.slang", "fragment", example_rhi_exe);
-    example_rhi_exe.root_module.linkLibrary(sdl_lib);
-    b.installArtifact(example_rhi_exe);
+    example_framework_exe.root_module.linkLibrary(sdl_lib);
+    b.installArtifact(example_framework_exe);
 
     // tests
     // const rhi_tests = b.addTest(.{ .root_module = rhi });
