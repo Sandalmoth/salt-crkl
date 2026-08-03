@@ -31,8 +31,8 @@ pub fn build(b: *std.Build) void {
         .imports = &.{},
     });
 
-    const core = b.addModule("core", .{
-        .root_source_file = b.path("src/core/root.zig"),
+    const keygen = b.addModule("keygen", .{
+        .root_source_file = b.path("src/keygen/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{},
@@ -56,7 +56,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "core", .module = core },
+            .{ .name = "keygen", .module = keygen },
         },
     });
 
@@ -103,9 +103,10 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "c", .module = framework_translate_c.createModule() },
             .{ .name = "mem", .module = mem },
-            .{ .name = "core", .module = core },
             .{ .name = "math", .module = math },
             .{ .name = "spiral", .module = spiral },
+            .{ .name = "ecs", .module = ecs },
+            .{ .name = "keygen", .module = keygen },
         },
     });
 

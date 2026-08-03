@@ -1,7 +1,12 @@
-const core = @import("core");
 const std = @import("std");
 
+const KeyGen = @import("keygen").KeyGen;
+
 const log = std.log.scoped(.ecs);
+
+pub const Config = struct {
+    block_size: usize,
+};
 
 pub const Key = enum(u64) {
     nil = 0,
@@ -27,7 +32,7 @@ pub const Key = enum(u64) {
     };
 };
 
-pub fn World(comptime Spec: type) type {
+pub fn World(comptime config: Config, comptime Spec: type) type {
     return struct {
         const cache_size = 32;
         const _World = @This();
@@ -79,7 +84,7 @@ pub fn World(comptime Spec: type) type {
                 len: usize,
             };
             header: Header,
-            data: [core.block_size - @sizeOf(Header)]u8,
+            data: [config.block_size - @sizeOf(Header)]u8,
 
             fn create(blka: std.mem.Allocator, set: ComponentSet) !*Page {
                 const page = try blka.create(Page);
@@ -243,7 +248,7 @@ pub fn World(comptime Spec: type) type {
             }
 
             arena: std.mem.Allocator,
-            keygen: *core.KeyGen,
+            keygen: *KeyGen,
             head: ?*Command = null,
             tail: ?*Command = null,
 
@@ -453,32 +458,31 @@ pub fn World(comptime Spec: type) type {
 
         gpa: std.mem.Allocator,
         blka: std.mem.Allocator,
-        keygen: *core.KeyGen,
+        keygen: *KeyGen,
 
         cache_rng_state: u64,
         pages: std.MultiArrayList(PageInfo), // first cache_size slots form cache
         map: std.HashMapUnmanaged(Key, EntityView(.{}), Key.HashContext, 80),
 
-        pub fn create(
+        pub fn init(
             gpa: std.mem.Allocator,
             blka: std.mem.Allocator,
-            keygen: *core.KeyGen,
-        ) !*_World {
-            const world = try gpa.create(_World);
-            world.gpa = gpa;
-            world.blka = blka;
-            world.keygen = keygen;
-            world.cache_rng_state = keygen.next(); // it's free rng
-            world.pages = .empty;
-            world.map = .empty;
-            return world;
+            keygen: *KeyGen,
+        ) _World {
+            return .{
+                .gpa = gpa,
+                .blka = blka,
+                .keygen = keygen,
+                .cache_rng_state = keygen.next(), // it's free rng
+                .pages = .empty,
+                .map = .empty,
+            };
         }
 
-        pub fn destroy(world: *_World) void {
+        pub fn deinit(world: *_World) void {
             for (world.pages.items(.page)) |page| world.blka.destroy(page);
             world.pages.deinit(world.gpa);
             world.map.deinit(world.gpa);
-            world.gpa.destroy(world);
         }
 
         pub fn entity(world: *_World, key: Key) ?EntityView(.{}) {
@@ -652,13 +656,13 @@ test "basic create insert remove destroy functionality" {
     defer arena_impl.deinit();
     const arena = arena_impl.allocator();
 
-    const W = World(struct { x: i32, y: f32 });
+    const W = World(.{ .block_size = 65536 }, struct { x: i32, y: f32 });
     var seed: u32 = undefined;
     std.testing.io.random(std.mem.asBytes(&seed));
-    var keygen: core.KeyGen = .init(seed);
+    var keygen: KeyGen = .init(seed);
 
-    const world: *W = try .create(std.testing.allocator, std.testing.allocator, &keygen);
-    defer world.destroy();
+    var world: W = .init(std.testing.allocator, std.testing.allocator, &keygen);
+    defer world.deinit();
 
     var q = world.acquire(arena);
     const e0 = try q.create(.{});
