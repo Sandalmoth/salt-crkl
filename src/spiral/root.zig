@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const Uuid = @import("Uuid.zig");
+pub const Uuid = @import("Uuid.zig");
 
 const log = std.log.scoped(.spiral);
 

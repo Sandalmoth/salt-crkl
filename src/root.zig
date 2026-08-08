@@ -4,6 +4,8 @@ pub const sdl = @import("sdl.zig");
 
 pub const defines = @import("defines.zig");
 
+pub const renderer = @import("renderer.zig");
+
 pub const KeyGen = @import("keygen").KeyGen;
 
 pub const ecs = struct {
