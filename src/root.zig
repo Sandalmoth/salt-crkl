@@ -1,10 +1,8 @@
 const std = @import("std");
 
-pub const sdl = @import("sdl.zig");
-
 pub const defines = @import("defines.zig");
-
-pub const renderer = @import("renderer.zig");
+pub const sdl = @import("sdl.zig");
+pub const Renderer = @import("renderer.zig");
 
 pub const KeyGen = @import("keygen").KeyGen;
 

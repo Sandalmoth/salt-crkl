@@ -23,14 +23,12 @@ pub fn main(init: std.process.Init) !void {
         sc.sdl.c.SDL_WINDOW_RESIZABLE,
     );
     defer window.destroy();
-    // const gpu_device = try sc.sdl.createGPUDevice(
-    //     sc.sdl.c.SDL_GPU_SHADERFORMAT_SPIRV,
-    //     true,
-    //     "example-framework",
-    // );
-    // defer gpu_device.destroy();
 
-    // try gpu_device.claimWindow(window);
+    var renderer: sc.Renderer = try .init(gpa, blka, window, .{
+        .width = 800,
+        .height = 600,
+    });
+    defer renderer.deinit();
 
     const W = sc.ecs.World(struct { x: u32 });
     var w: W = .init(gpa, blka, &keygen);

@@ -9,6 +9,34 @@ pub const sdl = @import("sdl.zig");
 
 const Self = @This();
 
+pub const VertexGeometry = extern struct {
+    position: [3]f32,
+    texcoord: [2]f16,
+};
+
+pub const VertexMaterial = extern struct {
+    packed_normal: u32, // octahedral 16_16 snorm
+    packed_tangent: u32, // octahedral 15_pad_15_sign snorm
+    color: [4]u8,
+};
+
+pub const VertexRigged = extern struct {
+    bone_ids: [4]u8,
+    bone_weights: [4]u8,
+};
+
+pub const VertexMorph = extern struct {
+    packed_position_delta: u32, // 10_10_10_pad snorm
+    packed_normal_delta: u32, // 10_10_10_pad snorm
+    packed_tangent_delta: u32, // 10_10_10_pad snorm
+};
+
+pub const Config = struct {
+    width: u32,
+    height: u32,
+    // sample_count: sdl.c.SDL_GPUSampleCount,
+};
+
 pub const CommandList = struct {
     // createDrawable(transform, model_uuid) -> handle
     // setTransform(handle, transform)
@@ -74,18 +102,77 @@ const Page = struct {
 
 gpa: std.mem.Allocator,
 blka: std.mem.Allocator,
+config: Config,
 
-origin: lin.V3d,
+hdr_backbuffer: *sdl.GPUTexture,
+sdr_backbuffer: *sdl.GPUTexture,
 
-pub fn init(_gpa: std.mem.Allocator, _blka: std.mem.Allocator) Self {
+// suballocated
+vertex_geometry_buffer: *sdl.GPUBuffer,
+vertex_material_buffer: *sdl.GPUBuffer,
+vertex_rigged_buffer: *sdl.GPUBuffer,
+vertex_morph_buffer: *sdl.GPUBuffer,
+// bump allocated, recycled each frame
+rigged_vertex_geometry_buffer: *sdl.GPUBuffer,
+rigged_vertex_material_buffer: *sdl.GPUBuffer,
+
+device: *sdl.GPUDevice,
+
+// origin: lin.V3d,
+
+pub fn init(
+    _gpa: std.mem.Allocator,
+    _blka: std.mem.Allocator,
+    window: *sdl.Window,
+    config: Config,
+) !Self {
+    const device = try sdl.createGPUDevice(
+        sdl.c.SDL_GPU_SHADERFORMAT_SPIRV,
+        true,
+        "vulkan",
+    );
+    defer sdl.destroyGPUDevice(device);
+    try sdl.claimWindowForGPUDevice(device, window);
+
+    const hdr_backbuffer = sdl.createGPUTexture(device, &.{
+        .type = sdl.c.SDL_GPU_TEXTURETYPE_2D,
+        .format = sdl.c.SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+        .usage = sdl.c.SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+            sdl.c.SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ,
+        .width = config.width,
+        .height = config.height,
+        .layer_count_or_depth = 1,
+        .num_levels = 1,
+        .sample_count = sdl.c.SDL_GPU_SAMPLECOUNT_4,
+    });
+    errdefer sdl.releaseGPUTexture(device, hdr_backbuffer);
+    const sdr_backbuffer = sdl.createGPUTexture(device, &.{
+        .type = sdl.c.SDL_GPU_TEXTURETYPE_2D,
+        .format = sdl.c.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB,
+        .usage = sdl.c.SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+            sdl.c.SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE,
+        .width = config.width,
+        .height = config.height,
+        .layer_count_or_depth = 1,
+        .num_levels = 1,
+        .sample_count = sdl.c.SDL_GPU_SAMPLECOUNT_1,
+    });
+    errdefer sdl.releaseGPUTexture(device, sdr_backbuffer);
+
     return .{
         .gpa = _gpa,
         .blka = _blka,
+        .config = config,
+        .hdr_backbuffer = hdr_backbuffer,
+        .sdr_backbuffer = sdr_backbuffer,
+        .device = device,
     };
 }
 
 pub fn deinit(renderer: *Self) void {
-    _ = renderer;
+    sdl.releaseGPUTexture(renderer.device, renderer.hdr_backbuffer);
+    sdl.releaseGPUTexture(renderer.device, renderer.sdr_backbuffer);
+    sdl.destroyGPUDevice(renderer.device);
 }
 
 // for each model, if dirty update its instances
