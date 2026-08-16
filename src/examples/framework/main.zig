@@ -22,7 +22,7 @@ pub fn main(init: std.process.Init) !void {
         600,
         sc.sdl.c.SDL_WINDOW_RESIZABLE,
     );
-    defer window.destroy();
+    defer sc.sdl.destroyWindow(window);
 
     var renderer: sc.Renderer = try .init(gpa, blka, window, .{
         .width = 800,

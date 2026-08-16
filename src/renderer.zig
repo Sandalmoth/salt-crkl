@@ -108,13 +108,14 @@ hdr_backbuffer: *sdl.GPUTexture,
 sdr_backbuffer: *sdl.GPUTexture,
 
 // suballocated
+index_buffer: *sdl.GPUBuffer,
 vertex_geometry_buffer: *sdl.GPUBuffer,
 vertex_material_buffer: *sdl.GPUBuffer,
 vertex_rigged_buffer: *sdl.GPUBuffer,
 vertex_morph_buffer: *sdl.GPUBuffer,
 // bump allocated, recycled each frame
-rigged_vertex_geometry_buffer: *sdl.GPUBuffer,
-rigged_vertex_material_buffer: *sdl.GPUBuffer,
+scratch_vertex_geometry_buffer: *sdl.GPUBuffer,
+scratch_vertex_material_buffer: *sdl.GPUBuffer,
 
 device: *sdl.GPUDevice,
 
@@ -134,11 +135,11 @@ pub fn init(
     defer sdl.destroyGPUDevice(device);
     try sdl.claimWindowForGPUDevice(device, window);
 
-    const hdr_backbuffer = sdl.createGPUTexture(device, &.{
+    const hdr_backbuffer = try sdl.createGPUTexture(device, &.{
         .type = sdl.c.SDL_GPU_TEXTURETYPE_2D,
         .format = sdl.c.SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
         .usage = sdl.c.SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
-            sdl.c.SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_READ,
+            sdl.c.SDL_GPU_TEXTUREUSAGE_SAMPLER,
         .width = config.width,
         .height = config.height,
         .layer_count_or_depth = 1,
@@ -146,7 +147,7 @@ pub fn init(
         .sample_count = sdl.c.SDL_GPU_SAMPLECOUNT_4,
     });
     errdefer sdl.releaseGPUTexture(device, hdr_backbuffer);
-    const sdr_backbuffer = sdl.createGPUTexture(device, &.{
+    const sdr_backbuffer = try sdl.createGPUTexture(device, &.{
         .type = sdl.c.SDL_GPU_TEXTURETYPE_2D,
         .format = sdl.c.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB,
         .usage = sdl.c.SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
@@ -159,12 +160,64 @@ pub fn init(
     });
     errdefer sdl.releaseGPUTexture(device, sdr_backbuffer);
 
+    // TODO think about how to size these, probably just add to config with usage logs?
+    const index_buffer = try sdl.createGPUBuffer(device, &.{
+        .usage = sdl.c.SDL_GPU_BUFFERUSAGE_INDEX,
+        .size = 128 * 1024 * 1024,
+    });
+    errdefer sdl.releaseGPUBuffer(device, index_buffer);
+    const vertex_geometry_buffer = try sdl.createGPUBuffer(device, &.{
+        .usage = sdl.c.SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ |
+            sdl.c.SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ,
+        .size = 128 * 1024 * 1024,
+    });
+    errdefer sdl.releaseGPUBuffer(device, vertex_geometry_buffer);
+    const vertex_material_buffer = try sdl.createGPUBuffer(device, &.{
+        .usage = sdl.c.SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ |
+            sdl.c.SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ,
+        .size = 128 * 1024 * 1024,
+    });
+    errdefer sdl.releaseGPUBuffer(device, vertex_material_buffer);
+    const vertex_rigged_buffer = try sdl.createGPUBuffer(device, &.{
+        .usage = sdl.c.SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ |
+            sdl.c.SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ,
+        .size = 128 * 1024 * 1024,
+    });
+    errdefer sdl.releaseGPUBuffer(device, vertex_rigged_buffer);
+    const vertex_morph_buffer = try sdl.createGPUBuffer(device, &.{
+        .usage = sdl.c.SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ |
+            sdl.c.SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ,
+        .size = 128 * 1024 * 1024,
+    });
+    errdefer sdl.releaseGPUBuffer(device, vertex_morph_buffer);
+    const scratch_vertex_geometry_buffer = try sdl.createGPUBuffer(device, &.{
+        .usage = sdl.c.SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ |
+            sdl.c.SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ |
+            sdl.c.SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE,
+        .size = 128 * 1024 * 1024,
+    });
+    errdefer sdl.releaseGPUBuffer(device, scratch_vertex_geometry_buffer);
+    const scratch_vertex_material_buffer = try sdl.createGPUBuffer(device, &.{
+        .usage = sdl.c.SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ |
+            sdl.c.SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ |
+            sdl.c.SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE,
+        .size = 128 * 1024 * 1024,
+    });
+    errdefer sdl.releaseGPUBuffer(device, scratch_vertex_material_buffer);
+
     return .{
         .gpa = _gpa,
         .blka = _blka,
         .config = config,
         .hdr_backbuffer = hdr_backbuffer,
         .sdr_backbuffer = sdr_backbuffer,
+        .index_buffer = index_buffer,
+        .vertex_geometry_buffer = vertex_geometry_buffer,
+        .vertex_material_buffer = vertex_material_buffer,
+        .vertex_rigged_buffer = vertex_rigged_buffer,
+        .vertex_morph_buffer = vertex_morph_buffer,
+        .scratch_vertex_geometry_buffer = scratch_vertex_geometry_buffer,
+        .scratch_vertex_material_buffer = scratch_vertex_material_buffer,
         .device = device,
     };
 }
@@ -172,6 +225,15 @@ pub fn init(
 pub fn deinit(renderer: *Self) void {
     sdl.releaseGPUTexture(renderer.device, renderer.hdr_backbuffer);
     sdl.releaseGPUTexture(renderer.device, renderer.sdr_backbuffer);
+
+    sdl.releaseGPUBuffer(renderer.device, renderer.index_buffer);
+    sdl.releaseGPUBuffer(renderer.device, renderer.vertex_geometry_buffer);
+    sdl.releaseGPUBuffer(renderer.device, renderer.vertex_material_buffer);
+    sdl.releaseGPUBuffer(renderer.device, renderer.vertex_rigged_buffer);
+    sdl.releaseGPUBuffer(renderer.device, renderer.vertex_morph_buffer);
+    sdl.releaseGPUBuffer(renderer.device, renderer.scratch_vertex_geometry_buffer);
+    sdl.releaseGPUBuffer(renderer.device, renderer.scratch_vertex_material_buffer);
+
     sdl.destroyGPUDevice(renderer.device);
 }
 
