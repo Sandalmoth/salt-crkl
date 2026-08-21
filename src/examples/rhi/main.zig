@@ -42,7 +42,11 @@ pub fn main() !void {
     }, window);
     defer rhi.Vulkan.deinit(ctx);
 
-    const swapchain = try ctx.createSwapchain(.{ .window = window });
+    const swapchain = try ctx.createSwapchain(.{
+        .window = window,
+        .present_mode = .fifo,
+        .composition = .sdr,
+    });
     defer ctx.destroySwapchain(swapchain);
 
     const color_target = try ctx.createTexture(.{

@@ -42,19 +42,19 @@ pub const SampleCount = enum {
 };
 
 pub const TextureType = enum {
-    texture_2d,
-    texture_3d,
-    texture_cube,
-    texture_2d_array,
-    texture_cube_array,
+    type_2d,
+    type_3d,
+    type_cube,
+    type_2d_array,
+    type_cube_array,
 };
 
 pub const ViewType = enum {
-    view_2d,
-    view_3d,
-    view_cube,
-    view_2d_array,
-    view_cube_array,
+    type_2d,
+    type_3d,
+    type_cube,
+    type_2d_array,
+    type_cube_array,
 };
 
 pub const TextureUsage = struct {
@@ -457,13 +457,13 @@ pub const Buffer = struct {
 pub const SamplerCreateInfo = struct {
     mag_filter: Filter,
     min_filter: Filter,
-    mipmap_filter: Filter,
+    mipmap_filter: Filter = .linear,
     address_mode_u: AddressMode,
     address_mode_v: AddressMode,
     address_mode_w: AddressMode,
     mip_lod_bias: f32 = 0.0,
     max_anisotropy: ?f32 = null,
-    compare_op: ?CompareOp,
+    compare_op: ?CompareOp = null,
     min_lod: f32 = 0.0,
     max_lod: ?f32 = null,
     name: [:0]const u8 = &.{},
@@ -538,12 +538,10 @@ pub const ComputePipeline = struct {
 };
 
 pub const SwapchainCreateInfo = struct {
-    // NOTE swapchains always start as fifo sdr
     name: [:0]const u8 = &.{},
     window: Window,
     present_mode: PresentMode,
     composition: Composition,
-    old: *const Swapchain = null,
 };
 
 pub const Swapchain = struct {
@@ -565,7 +563,7 @@ pub const Context = struct {
         DeviceLost,
         OutOfDate,
         Unknown,
-        // TODO cleanup and narrow down to one uniform set of errors like what's above
+        // TODO cleanup vulkan specific and narrow down to one uniform set of errors
         OutOfHostMemory,
         ValidationFailed,
         SurfaceLostKHR,
@@ -586,7 +584,7 @@ pub const Context = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        createSwapchain: *const fn (*anyopaque, SwapchainCreateInfo) Error!*const Swapchain,
+        createSwapchain: *const fn (*anyopaque, SwapchainCreateInfo, ?*const Swapchain) Error!*const Swapchain,
         destroySwapchain: *const fn (*anyopaque, *const Swapchain) void,
 
         createBuffer: *const fn (*anyopaque, BufferCreateInfo) Error!*const Buffer,
@@ -607,6 +605,7 @@ pub const Context = struct {
 
         stagingAllocator: *const fn (*anyopaque, StagingAllocatorUsage) std.mem.Allocator,
 
+        // if submit has a Present, it will block and acquire a swapchain then execute the present
         submit: *const fn (*anyopaque, io: std.Io, []const CommandBuffer, ?Present) Error!Fence,
         wait: *const fn (*anyopaque, Fence, FenceMask, u64) Error!void,
 

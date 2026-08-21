@@ -251,11 +251,11 @@ const Stage = enum {
 
 fn vulkanImageType(texture_type: rhi.TextureType) vk.ImageType {
     return switch (texture_type) {
-        .texture_2d => .@"2d",
-        .texture_3d => .@"3d",
-        .texture_cube => .@"2d",
-        .texture_2d_array => .@"2d",
-        .texture_cube_array => .@"2d",
+        .type_2d => .@"2d",
+        .type_3d => .@"3d",
+        .type_cube => .@"2d",
+        .type_2d_array => .@"2d",
+        .type_cube_array => .@"2d",
     };
 }
 
@@ -263,20 +263,20 @@ fn vulkanImageViewType(texture_view_type: anytype) vk.ImageViewType {
     const T = @TypeOf(texture_view_type);
     if (T == rhi.TextureType) {
         return switch (texture_view_type) {
-            .texture_2d => .@"2d",
-            .texture_3d => .@"3d",
-            .texture_cube => .cube,
-            .texture_2d_array => .@"2d_array",
-            .texture_cube_array => .cube_array,
+            .type_2d => .@"2d",
+            .type_3d => .@"3d",
+            .type_cube => .cube,
+            .type_2d_array => .@"2d_array",
+            .type_cube_array => .cube_array,
         };
     }
     if (T == rhi.ViewType) {
         return switch (texture_view_type) {
-            .view_2d => .@"2d",
-            .view_3d => .@"3d",
-            .view_cube => .cube,
-            .view_2d_array => .@"2d_array",
-            .view_cube_array => .cube_array,
+            .type_2d => .@"2d",
+            .type_3d => .@"3d",
+            .type_cube => .cube,
+            .type_2d_array => .@"2d_array",
+            .type_cube_array => .cube_array,
         };
     }
     @compileError("vulkanImageViewType takes either an rhi.TextureType or an rhi.ViewType");
@@ -457,9 +457,6 @@ const Context = @This();
 const vtable: rhi.Context.VTable = .{
     .createSwapchain = createSwapchain,
     .destroySwapchain = destroySwapchain,
-    .setSwapchainComposition = undefined,
-    .setSwapchainPresentMode = undefined,
-    .acquireSwapchain = acquireSwapchain,
     .createBuffer = undefined,
     .createTexture = createTexture,
     .createSampler = undefined,
