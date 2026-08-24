@@ -341,6 +341,7 @@ pub const ComputePassAccess = struct {
 pub const Present = struct {
     swapchain: *const Swapchain,
     texture: *const Texture,
+    timeout: u64 = 100_000_000,
 };
 
 pub const DrawIndexedIndirectCommand = extern struct {
@@ -615,8 +616,8 @@ pub const Context = struct {
         // readTimestamps: *const fn (*anyopaque, []const u8) ?u64, // could maybe happen on wait?
     };
 
-    pub fn createSwapchain(ctx: Context, create_info: SwapchainCreateInfo) Error!*const Swapchain {
-        return ctx.vtable.createSwapchain(ctx.ptr, create_info);
+    pub fn createSwapchain(ctx: Context, create_info: SwapchainCreateInfo, old: ?*const Swapchain) Error!*const Swapchain {
+        return ctx.vtable.createSwapchain(ctx.ptr, create_info, old);
     }
     pub fn destroySwapchain(ctx: Context, swapchain: *const Swapchain) void {
         ctx.vtable.destroySwapchain(ctx.ptr, swapchain);

@@ -24,12 +24,12 @@ pub fn build(b: *std.Build) void {
     });
     // _ = arenautils;
 
-    const spiral = b.addModule("spiral", .{
-        .root_source_file = b.path("src/spiral/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{},
-    });
+    // const spiral = b.addModule("spiral", .{
+    //     .root_source_file = b.path("src/spiral/root.zig"),
+    //     .target = target,
+    //     .optimize = optimize,
+    //     .imports = &.{},
+    // });
 
     const keygen = b.addModule("keygen", .{
         .root_source_file = b.path("src/keygen/root.zig"),
@@ -60,12 +60,12 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    const math = b.addModule("math", .{
-        .root_source_file = b.path("src/math/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{},
-    });
+    // const math = b.addModule("math", .{
+    //     .root_source_file = b.path("src/math/root.zig"),
+    //     .target = target,
+    //     .optimize = optimize,
+    //     .imports = &.{},
+    // });
 
     const profiler = b.addModule("profiler", .{
         .root_source_file = b.path("src/profiler/root.zig"),
@@ -84,31 +84,32 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    const mem = b.addModule("mem", .{
-        .root_source_file = b.path("src/mem/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{},
-    });
+    // const mem = b.addModule("mem", .{
+    //     .root_source_file = b.path("src/mem/root.zig"),
+    //     .target = target,
+    //     .optimize = optimize,
+    //     .imports = &.{},
+    // });
 
-    const framework_translate_c = b.addTranslateC(.{
-        .root_source_file = b.path("src/c.h"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const framework = b.addModule("framework", .{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "c", .module = framework_translate_c.createModule() },
-            .{ .name = "mem", .module = mem },
-            .{ .name = "math", .module = math },
-            .{ .name = "spiral", .module = spiral },
-            .{ .name = "ecs", .module = ecs },
-            .{ .name = "keygen", .module = keygen },
-        },
-    });
+    // const framework_translate_c = b.addTranslateC(.{
+    //     .root_source_file = b.path("src/c.h"),
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
+    // framework_translate_c.addIncludePath(sdl_dep.path("include"));
+    // const framework = b.addModule("framework", .{
+    //     .root_source_file = b.path("src/root.zig"),
+    //     .target = target,
+    //     .optimize = optimize,
+    //     .imports = &.{
+    //         .{ .name = "c", .module = framework_translate_c.createModule() },
+    //         .{ .name = "mem", .module = mem },
+    //         .{ .name = "math", .module = math },
+    //         .{ .name = "spiral", .module = spiral },
+    //         .{ .name = "ecs", .module = ecs },
+    //         .{ .name = "keygen", .module = keygen },
+    //     },
+    // });
 
     // examples
     const example_rhi_translate_c = b.addTranslateC(.{
@@ -116,6 +117,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    example_rhi_translate_c.addIncludePath(sdl_dep.path("include"));
     const example_rhi_exe = b.addExecutable(.{
         .name = "example_rhi",
         .root_module = b.createModule(.{
@@ -133,19 +135,19 @@ pub fn build(b: *std.Build) void {
     example_rhi_exe.root_module.linkLibrary(sdl_lib);
     b.installArtifact(example_rhi_exe);
 
-    const example_framework_exe = b.addExecutable(.{
-        .name = "example_framework",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/examples/framework/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "framework", .module = framework },
-            },
-        }),
-    });
-    example_framework_exe.root_module.linkLibrary(sdl_lib);
-    b.installArtifact(example_framework_exe);
+    // const example_framework_exe = b.addExecutable(.{
+    //     .name = "example_framework",
+    //     .root_module = b.createModule(.{
+    //         .root_source_file = b.path("src/examples/framework/main.zig"),
+    //         .target = target,
+    //         .optimize = optimize,
+    //         .imports = &.{
+    //             .{ .name = "framework", .module = framework },
+    //         },
+    //     }),
+    // });
+    // example_framework_exe.root_module.linkLibrary(sdl_lib);
+    // b.installArtifact(example_framework_exe);
 
     // tests
     const rhi_tests = b.addTest(.{ .root_module = rhi });

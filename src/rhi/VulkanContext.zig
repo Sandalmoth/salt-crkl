@@ -636,7 +636,10 @@ pub fn deinit(rhi_ctx: rhi.Context) void {
 fn createSwapchain(
     ptr: *anyopaque,
     create_info: rhi.SwapchainCreateInfo,
+    old: ?*const rhi.Swapchain,
 ) rhi.Context.Error!*const rhi.Swapchain {
+    _ = old;
+
     const ctx: *Context = @ptrCast(@alignCast(ptr));
     const swapchain: *Swapchain = try ctx.swapchain_pool.create(ctx.gpa);
 
@@ -646,8 +649,6 @@ fn createSwapchain(
     swapchain.* = Swapchain{
         .public = .{ .info = .{
             .name = create_info.name,
-        }, .state = .{
-            .acquired = false,
             .composition = .sdr,
             .present_mode = .fifo,
             .size = .{ 0, 0, 0 },
@@ -982,7 +983,7 @@ fn submit(
     ptr: *anyopaque,
     io: std.Io,
     command_buffers: []const rhi.CommandBuffer,
-    presents: []const rhi.Present,
+    present: ?rhi.Present,
 ) rhi.Context.Error!rhi.Fence {
     const ctx: *Context = @ptrCast(@alignCast(ptr));
 
@@ -998,6 +999,54 @@ fn submit(
     };
 
     _ = io;
+
+    // acquire the swapchain if it will be needed later
+    if (present) |p| {
+        const swapchain: *Swapchain = @alignCast(@constCast(
+            @fieldParentPtr("public", p.swapchain),
+        ));
+
+        if (swapchain.swapchain == .null_handle) {
+            try ctx.recreateSwapchain(swapchain);
+        }
+
+        ctx.acquire_semaphore_depot.debugPrint();
+        const acquire_semaphore = ctx.acquire_semaphore_depot.pop(.{
+            .graphics = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.graphics).semaphore),
+            .compute = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.compute).semaphore),
+            .transfer = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.transfer).semaphore),
+            .present = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.present).semaphore),
+        }) orelse
+            ctx.device.createSemaphore(&.{}, null) catch return false;
+        // FIXME if we return early, this needs to be pushed
+
+        const result = ctx.device.acquireNextImageKHR(
+            swapchain.swapchain,
+            p.timeout,
+            acquire_semaphore,
+            .null_handle,
+        ) catch |e| switch (e) {
+            error.OutOfDateKHR => vk.DeviceWrapper.AcquireNextImageKHRResult{
+                .result = .error_out_of_date_khr,
+                .image_index = undefined,
+            },
+            else => return e,
+        };
+        std.debug.print("{}\n", .{result});
+        switch (result.result) {
+            .success => {
+                swapchain.public.state.acquired = true;
+                swapchain.image_index = result.image_index;
+                swapchain.acquire_semaphore = acquire_semaphore;
+            },
+            .timeout => {},
+            .not_ready => {},
+            .suboptimal_khr, .error_out_of_date_khr => {
+                try ctx.recreateSwapchain(swapchain);
+            },
+            else => unreachable,
+        }
+    }
 
     const command_pools = try arena.alloc(CommandPool, command_buffers.len);
     for (command_buffers, 0..) |command_buffer, i| {
@@ -1207,11 +1256,10 @@ fn submit(
     var image_indices: std.ArrayList(u32) = .empty;
     var swapchain_barriers: std.ArrayList(vk.ImageMemoryBarrier2) = .empty;
 
-    for (presents) |present| {
+    if (present) |p| {
         const swapchain: *Swapchain = @alignCast(@constCast(
-            @fieldParentPtr("public", present.swapchain),
+            @fieldParentPtr("public", p.swapchain),
         ));
-        std.debug.assert(swapchain.public.state.acquired);
         const image_index = swapchain.image_index.?;
 
         // FIXME acquire should actually relate to the first queue that writes to the swapchain
@@ -2365,11 +2413,11 @@ const TextureAllocator = struct {
                 .device_address = @intCast(default_view_slot),
                 .info = .{
                     .view_type = switch (texture_create_info.texture_type) {
-                        .texture_2d => .view_2d,
-                        .texture_3d => .view_3d,
-                        .texture_cube => .view_cube,
-                        .texture_2d_array => .view_2d_array,
-                        .texture_cube_array => .view_cube_array,
+                        .type_2d => .type_2d,
+                        .type_3d => .type_3d,
+                        .type_cube => .type_cube,
+                        .type_2d_array => .type_2d_array,
+                        .type_cube_array => .type_cube_array,
                     },
                     .format = texture_create_info.format,
                     .swizzle = .{},
