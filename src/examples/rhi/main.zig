@@ -42,11 +42,7 @@ pub fn main() !void {
     }, window);
     defer rhi.Vulkan.deinit(ctx);
 
-    const swapchain = try ctx.createSwapchain(.{
-        .window = window,
-        .present_mode = .fifo,
-        .composition = .sdr,
-    }, null);
+    const swapchain = try ctx.createSwapchain(.{ .window = window });
     defer ctx.destroySwapchain(swapchain);
 
     const color_target = try ctx.createTexture(.{
@@ -54,7 +50,7 @@ pub fn main() !void {
             .attachment = true,
             .sampled = true,
         },
-        .texture_type = .type_2d,
+        .texture_type = .texture_2d,
         .mip_levels = 1,
         .size = .{ 640, 480, 1 },
         .format = .r8g8b8a8_srgb,
@@ -97,6 +93,8 @@ pub fn main() !void {
 
         try io.sleep(.fromMilliseconds(10), .real);
 
+        if (!try ctx.acquireSwapchain(swapchain, 100_000_000)) continue :main_loop;
+
         var command_buffer: rhi.CommandBuffer = .init(arena, .graphics);
         try command_buffer.beginRenderPass(
             &.{.{
@@ -134,11 +132,11 @@ pub fn main() !void {
         // try command_buffer.drawIndexedInstanced(6, 1, 0, 0, 0);
         // try command_buffer.endRenderPass();
 
-        _ = try ctx.submit(
-            io,
-            &.{command_buffer},
+        _ = try ctx.submit(io, &.{
+            command_buffer,
+        }, &.{
             .{ .swapchain = swapchain, .texture = color_target },
-        );
+        });
     }
 
     // const ctx: *rhi.Context = try .create(gpa, .{

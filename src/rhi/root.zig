@@ -42,19 +42,19 @@ pub const SampleCount = enum {
 };
 
 pub const TextureType = enum {
-    type_2d,
-    type_3d,
-    type_cube,
-    type_2d_array,
-    type_cube_array,
+    texture_2d,
+    texture_3d,
+    texture_cube,
+    texture_2d_array,
+    texture_cube_array,
 };
 
 pub const ViewType = enum {
-    type_2d,
-    type_3d,
-    type_cube,
-    type_2d_array,
-    type_cube_array,
+    view_2d,
+    view_3d,
+    view_cube,
+    view_2d_array,
+    view_cube_array,
 };
 
 pub const TextureUsage = struct {
@@ -341,7 +341,6 @@ pub const ComputePassAccess = struct {
 pub const Present = struct {
     swapchain: *const Swapchain,
     texture: *const Texture,
-    timeout: u64 = 100_000_000,
 };
 
 pub const DrawIndexedIndirectCommand = extern struct {
@@ -458,13 +457,13 @@ pub const Buffer = struct {
 pub const SamplerCreateInfo = struct {
     mag_filter: Filter,
     min_filter: Filter,
-    mipmap_filter: Filter = .linear,
+    mipmap_filter: Filter,
     address_mode_u: AddressMode,
     address_mode_v: AddressMode,
     address_mode_w: AddressMode,
     mip_lod_bias: f32 = 0.0,
     max_anisotropy: ?f32 = null,
-    compare_op: ?CompareOp = null,
+    compare_op: ?CompareOp,
     min_lod: f32 = 0.0,
     max_lod: ?f32 = null,
     name: [:0]const u8 = &.{},
@@ -541,8 +540,9 @@ pub const ComputePipeline = struct {
 pub const SwapchainCreateInfo = struct {
     name: [:0]const u8 = &.{},
     window: Window,
-    present_mode: PresentMode,
-    composition: Composition,
+    present_mode: PresentMode = .fifo,
+    composition: Composition = .sdr,
+    recreate: ?*Swapchain = null,
 };
 
 pub const Swapchain = struct {
@@ -562,9 +562,8 @@ pub const Context = struct {
         Unsupported,
         Timeout,
         DeviceLost,
-        OutOfDate,
         Unknown,
-        // TODO cleanup vulkan specific and narrow down to one uniform set of errors
+        // TODO cleanup and narrow down to one uniform set of errors like what's above
         OutOfHostMemory,
         ValidationFailed,
         SurfaceLostKHR,
@@ -585,8 +584,9 @@ pub const Context = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        createSwapchain: *const fn (*anyopaque, SwapchainCreateInfo, ?*const Swapchain) Error!*const Swapchain,
+        createSwapchain: *const fn (*anyopaque, SwapchainCreateInfo) Error!*const Swapchain,
         destroySwapchain: *const fn (*anyopaque, *const Swapchain) void,
+        acquireSwapchain: *const fn (*anyopaque, *const Swapchain, u64) Error!bool,
 
         createBuffer: *const fn (*anyopaque, BufferCreateInfo) Error!*const Buffer,
         createTexture: *const fn (*anyopaque, TextureCreateInfo) Error!*const Texture,
@@ -606,8 +606,7 @@ pub const Context = struct {
 
         stagingAllocator: *const fn (*anyopaque, StagingAllocatorUsage) std.mem.Allocator,
 
-        // if submit has a Present, it will block and acquire a swapchain then execute the present
-        submit: *const fn (*anyopaque, io: std.Io, []const CommandBuffer, ?Present) Error!Fence,
+        submit: *const fn (*anyopaque, io: std.Io, []const CommandBuffer, []const Present) Error!Fence,
         wait: *const fn (*anyopaque, Fence, FenceMask, u64) Error!void,
 
         setBufferGroup: *const fn (*anyopaque, *const Buffer, ?*const Group) void,
@@ -616,11 +615,14 @@ pub const Context = struct {
         // readTimestamps: *const fn (*anyopaque, []const u8) ?u64, // could maybe happen on wait?
     };
 
-    pub fn createSwapchain(ctx: Context, create_info: SwapchainCreateInfo, old: ?*const Swapchain) Error!*const Swapchain {
-        return ctx.vtable.createSwapchain(ctx.ptr, create_info, old);
+    pub fn createSwapchain(ctx: Context, create_info: SwapchainCreateInfo) Error!*const Swapchain {
+        return ctx.vtable.createSwapchain(ctx.ptr, create_info);
     }
     pub fn destroySwapchain(ctx: Context, swapchain: *const Swapchain) void {
         ctx.vtable.destroySwapchain(ctx.ptr, swapchain);
+    }
+    pub fn acquireSwapchain(ctx: Context, swapchain: *const Swapchain, timeout: u64) Error!bool {
+        return ctx.vtable.acquireSwapchain(ctx.ptr, swapchain, timeout);
     }
     pub fn createTexture(ctx: Context, create_info: TextureCreateInfo) Error!*const Texture {
         return ctx.vtable.createTexture(ctx.ptr, create_info);
@@ -645,9 +647,9 @@ pub const Context = struct {
         ctx: Context,
         io: std.Io,
         command_buffers: []const CommandBuffer,
-        present: ?Present,
+        presents: []const Present,
     ) Error!Fence {
-        return ctx.vtable.submit(ctx.ptr, io, command_buffers, present);
+        return ctx.vtable.submit(ctx.ptr, io, command_buffers, presents);
     }
 };
 

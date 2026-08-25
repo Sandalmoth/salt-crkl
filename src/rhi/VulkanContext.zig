@@ -251,11 +251,11 @@ const Stage = enum {
 
 fn vulkanImageType(texture_type: rhi.TextureType) vk.ImageType {
     return switch (texture_type) {
-        .type_2d => .@"2d",
-        .type_3d => .@"3d",
-        .type_cube => .@"2d",
-        .type_2d_array => .@"2d",
-        .type_cube_array => .@"2d",
+        .texture_2d => .@"2d",
+        .texture_3d => .@"3d",
+        .texture_cube => .@"2d",
+        .texture_2d_array => .@"2d",
+        .texture_cube_array => .@"2d",
     };
 }
 
@@ -263,20 +263,20 @@ fn vulkanImageViewType(texture_view_type: anytype) vk.ImageViewType {
     const T = @TypeOf(texture_view_type);
     if (T == rhi.TextureType) {
         return switch (texture_view_type) {
-            .type_2d => .@"2d",
-            .type_3d => .@"3d",
-            .type_cube => .cube,
-            .type_2d_array => .@"2d_array",
-            .type_cube_array => .cube_array,
+            .texture_2d => .@"2d",
+            .texture_3d => .@"3d",
+            .texture_cube => .cube,
+            .texture_2d_array => .@"2d_array",
+            .texture_cube_array => .cube_array,
         };
     }
     if (T == rhi.ViewType) {
         return switch (texture_view_type) {
-            .type_2d => .@"2d",
-            .type_3d => .@"3d",
-            .type_cube => .cube,
-            .type_2d_array => .@"2d_array",
-            .type_cube_array => .cube_array,
+            .view_2d => .@"2d",
+            .view_3d => .@"3d",
+            .view_cube => .cube,
+            .view_2d_array => .@"2d_array",
+            .view_cube_array => .cube_array,
         };
     }
     @compileError("vulkanImageViewType takes either an rhi.TextureType or an rhi.ViewType");
@@ -442,6 +442,7 @@ const ComputePipeline = struct {
 
 const Swapchain = struct {
     public: rhi.Swapchain,
+    acquired: bool,
     window: rhi.Window,
     surface: vk.SurfaceKHR,
     swapchain: vk.SwapchainKHR,
@@ -457,6 +458,7 @@ const Context = @This();
 const vtable: rhi.Context.VTable = .{
     .createSwapchain = createSwapchain,
     .destroySwapchain = destroySwapchain,
+    .acquireSwapchain = acquireSwapchain,
     .createBuffer = undefined,
     .createTexture = createTexture,
     .createSampler = undefined,
@@ -636,10 +638,7 @@ pub fn deinit(rhi_ctx: rhi.Context) void {
 fn createSwapchain(
     ptr: *anyopaque,
     create_info: rhi.SwapchainCreateInfo,
-    old: ?*const rhi.Swapchain,
 ) rhi.Context.Error!*const rhi.Swapchain {
-    _ = old;
-
     const ctx: *Context = @ptrCast(@alignCast(ptr));
     const swapchain: *Swapchain = try ctx.swapchain_pool.create(ctx.gpa);
 
@@ -653,6 +652,7 @@ fn createSwapchain(
             .present_mode = .fifo,
             .size = .{ 0, 0, 0 },
         } },
+        .acquired = false,
         .surface = surface,
         .window = create_info.window,
         .swapchain = .null_handle,
@@ -703,7 +703,7 @@ fn acquireSwapchain(
         @fieldParentPtr("public", rhi_swapchain),
     ));
 
-    std.debug.assert(!swapchain.public.state.acquired);
+    std.debug.assert(!swapchain.acquired);
 
     if (swapchain.swapchain == .null_handle) {
         try ctx.recreateSwapchain(swapchain);
@@ -734,7 +734,7 @@ fn acquireSwapchain(
     std.debug.print("{}\n", .{result});
     switch (result.result) {
         .success => {
-            swapchain.public.state.acquired = true;
+            swapchain.acquired = true;
             swapchain.image_index = result.image_index;
             swapchain.acquire_semaphore = acquire_semaphore;
         },
@@ -746,7 +746,7 @@ fn acquireSwapchain(
         else => unreachable,
     }
 
-    return swapchain.public.state.acquired;
+    return swapchain.acquired;
 }
 
 fn createTexture(
@@ -983,7 +983,7 @@ fn submit(
     ptr: *anyopaque,
     io: std.Io,
     command_buffers: []const rhi.CommandBuffer,
-    present: ?rhi.Present,
+    presents: []const rhi.Present,
 ) rhi.Context.Error!rhi.Fence {
     const ctx: *Context = @ptrCast(@alignCast(ptr));
 
@@ -999,54 +999,6 @@ fn submit(
     };
 
     _ = io;
-
-    // acquire the swapchain if it will be needed later
-    if (present) |p| {
-        const swapchain: *Swapchain = @alignCast(@constCast(
-            @fieldParentPtr("public", p.swapchain),
-        ));
-
-        if (swapchain.swapchain == .null_handle) {
-            try ctx.recreateSwapchain(swapchain);
-        }
-
-        ctx.acquire_semaphore_depot.debugPrint();
-        const acquire_semaphore = ctx.acquire_semaphore_depot.pop(.{
-            .graphics = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.graphics).semaphore),
-            .compute = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.compute).semaphore),
-            .transfer = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.transfer).semaphore),
-            .present = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.present).semaphore),
-        }) orelse
-            ctx.device.createSemaphore(&.{}, null) catch return false;
-        // FIXME if we return early, this needs to be pushed
-
-        const result = ctx.device.acquireNextImageKHR(
-            swapchain.swapchain,
-            p.timeout,
-            acquire_semaphore,
-            .null_handle,
-        ) catch |e| switch (e) {
-            error.OutOfDateKHR => vk.DeviceWrapper.AcquireNextImageKHRResult{
-                .result = .error_out_of_date_khr,
-                .image_index = undefined,
-            },
-            else => return e,
-        };
-        std.debug.print("{}\n", .{result});
-        switch (result.result) {
-            .success => {
-                swapchain.public.state.acquired = true;
-                swapchain.image_index = result.image_index;
-                swapchain.acquire_semaphore = acquire_semaphore;
-            },
-            .timeout => {},
-            .not_ready => {},
-            .suboptimal_khr, .error_out_of_date_khr => {
-                try ctx.recreateSwapchain(swapchain);
-            },
-            else => unreachable,
-        }
-    }
 
     const command_pools = try arena.alloc(CommandPool, command_buffers.len);
     for (command_buffers, 0..) |command_buffer, i| {
@@ -1256,10 +1208,11 @@ fn submit(
     var image_indices: std.ArrayList(u32) = .empty;
     var swapchain_barriers: std.ArrayList(vk.ImageMemoryBarrier2) = .empty;
 
-    if (present) |p| {
+    for (presents) |present| {
         const swapchain: *Swapchain = @alignCast(@constCast(
-            @fieldParentPtr("public", p.swapchain),
+            @fieldParentPtr("public", present.swapchain),
         ));
+        std.debug.assert(swapchain.acquired);
         const image_index = swapchain.image_index.?;
 
         // FIXME acquire should actually relate to the first queue that writes to the swapchain
@@ -1297,7 +1250,7 @@ fn submit(
             },
         });
 
-        swapchain.public.state.acquired = false;
+        swapchain.acquired = false;
     }
 
     present_queue.value += 1;
@@ -1397,7 +1350,7 @@ fn recreateSwapchain(ctx: *Context, swapchain: *Swapchain) !void {
     const count = getSwapchainImageCount(capabilities);
     log.debug("- image count:  {}", .{count});
 
-    swapchain.public.state.size = .{ extent.width, extent.height, 1 };
+    swapchain.public.info.size = .{ extent.width, extent.height, 1 };
 
     const old_swapchain = swapchain.swapchain;
 
@@ -2413,11 +2366,11 @@ const TextureAllocator = struct {
                 .device_address = @intCast(default_view_slot),
                 .info = .{
                     .view_type = switch (texture_create_info.texture_type) {
-                        .type_2d => .type_2d,
-                        .type_3d => .type_3d,
-                        .type_cube => .type_cube,
-                        .type_2d_array => .type_2d_array,
-                        .type_cube_array => .type_cube_array,
+                        .texture_2d => .view_2d,
+                        .texture_3d => .view_3d,
+                        .texture_cube => .view_cube,
+                        .texture_2d_array => .view_2d_array,
+                        .texture_cube_array => .view_cube_array,
                     },
                     .format = texture_create_info.format,
                     .swizzle = .{},
