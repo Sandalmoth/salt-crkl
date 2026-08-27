@@ -837,7 +837,7 @@ pub fn createGraphicsPipeline(
         .scissor,
         .depth_bias,
         .blend_constants,
-        .depth_bounds,
+        // .depth_bounds,
         .stencil_compare_mask,
         .stencil_write_mask,
         .stencil_reference,
@@ -894,6 +894,11 @@ pub fn createGraphicsPipeline(
     const pipeline_create_info: vk.GraphicsPipelineCreateInfo = .{
         .stage_count = @intCast(shader_stages.len),
         .p_stages = @ptrCast(&shader_stages[0]),
+        .p_vertex_input_state = &.{}, // not supported
+        .p_input_assembly_state = &.{
+            .topology = .triangle_list,
+            .primitive_restart_enable = .false,
+        },
         .p_viewport_state = &.{
             .viewport_count = 1, // multiple viewports are not supported
             .scissor_count = 1, // multiple viewports are not supported
