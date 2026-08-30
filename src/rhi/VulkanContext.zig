@@ -709,7 +709,6 @@ fn acquireSwapchain(
         try ctx.recreateSwapchain(swapchain);
     }
 
-    ctx.acquire_semaphore_depot.debugPrint();
     const acquire_semaphore = ctx.acquire_semaphore_depot.pop(.{
         .graphics = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.graphics).semaphore),
         .compute = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.compute).semaphore),
@@ -731,7 +730,6 @@ fn acquireSwapchain(
         },
         else => return e,
     };
-    std.debug.print("{}\n", .{result});
     switch (result.result) {
         .success => {
             swapchain.acquired = true;
@@ -755,10 +753,6 @@ fn createTexture(
 ) rhi.Context.Error!*const rhi.Texture {
     const ctx: *Context = @ptrCast(@alignCast(ptr));
     const texture = try ctx.texture_allocator.createTexture(create_info);
-    std.debug.print("fun {*}\n", .{texture});
-    std.debug.print("fun {}\n", .{texture});
-    std.debug.print("fun {}\n", .{texture.public});
-    std.debug.print("fun {*}\n", .{&texture.public});
     return &texture.public;
 }
 
@@ -768,10 +762,8 @@ fn queueDestroyTexture(ptr: *anyopaque, rhi_texture: *const rhi.Texture) void {
         @fieldParentPtr("public", rhi_texture),
     ));
 
-    std.debug.print("destroying {}\n", .{texture.*});
-
     _ = ctx;
-    // _ = texture;
+    _ = texture;
 }
 
 fn createShader(
@@ -1377,7 +1369,6 @@ fn recreateSwapchain(ctx: *Context, swapchain: *Swapchain) !void {
         .clipped = .true,
         .old_swapchain = old_swapchain,
     };
-    // std.debug.print("{}\n", .{create_info});
     swapchain.swapchain = ctx.device.createSwapchainKHR(
         &create_info,
         null,
@@ -2262,9 +2253,6 @@ const TextureAllocator = struct {
             .image = image,
         }, &image_memreq);
 
-        std.debug.print("{}\n", .{image_memreq});
-        std.debug.print("{}\n", .{dedicated_memreq});
-
         var memory_type_index: u32 = undefined;
         var best_score: i32 = -999;
 
@@ -2395,8 +2383,6 @@ const TextureAllocator = struct {
         };
         texture.public.default_view = &default_view_2.public;
 
-        std.debug.print("default view info {}\n", .{texture.public.default_view});
-
         if (texture_create_info.group) |group| {
             _ = group;
             @panic("TODO");
@@ -2422,9 +2408,6 @@ const TextureAllocator = struct {
                 .last_read_stage_mask = .{},
             };
             texture.public.group = &group.public;
-
-            std.debug.print("{}\n", .{group.*});
-            std.debug.print("{}\n", .{texture.public.group.*});
         }
         // FIXME cleanup of group is very hard on errdefer, so don't have errors after it
 
@@ -2440,11 +2423,6 @@ const TextureAllocator = struct {
             .name = texture_create_info.name,
         };
         texture.public.views = &.{};
-
-        std.debug.print("end {}\n", .{texture.public.default_view});
-        std.debug.print("end {}\n", .{texture});
-        std.debug.print("end {*}\n", .{texture});
-        std.debug.print("end {*}\n", .{&texture.public});
 
         return texture;
     }
