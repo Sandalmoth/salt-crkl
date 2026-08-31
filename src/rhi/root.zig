@@ -624,6 +624,12 @@ pub const Context = struct {
     pub fn acquireSwapchain(ctx: Context, swapchain: *const Swapchain, timeout: u64) Error!bool {
         return ctx.vtable.acquireSwapchain(ctx.ptr, swapchain, timeout);
     }
+    pub fn createBuffer(ctx: Context, create_info: BufferCreateInfo) Error!*const Buffer {
+        return ctx.vtable.createBuffer(ctx.ptr, create_info);
+    }
+    pub fn destroyBuffer(ctx: Context, buffer: *const Buffer) void {
+        ctx.vtable.destroyBuffer(ctx.ptr, buffer);
+    }
     pub fn createTexture(ctx: Context, create_info: TextureCreateInfo) Error!*const Texture {
         return ctx.vtable.createTexture(ctx.ptr, create_info);
     }

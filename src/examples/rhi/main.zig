@@ -45,18 +45,6 @@ pub fn main() !void {
     const swapchain = try ctx.createSwapchain(.{ .window = window });
     defer ctx.destroySwapchain(swapchain);
 
-    const color_target = try ctx.createTexture(.{
-        .usage = .{
-            .attachment = true,
-            .sampled = true,
-        },
-        .texture_type = .texture_2d,
-        .mip_levels = 1,
-        .size = .{ 640, 480, 1 },
-        .format = .r8g8b8a8_srgb,
-    });
-    defer ctx.destroyTexture(color_target);
-
     const vertex_shader = try ctx.createShader(.{
         .stage = .vertex,
         .src = &shader_vertex_spv,
@@ -78,6 +66,27 @@ pub fn main() !void {
         .stencil_attachment_format = null,
     });
     defer ctx.destroyGraphicsPipeline(pipeline);
+
+    const color_target = try ctx.createTexture(.{
+        .usage = .{
+            .attachment = true,
+            .sampled = true,
+        },
+        .texture_type = .texture_2d,
+        .mip_levels = 1,
+        .size = .{ 640, 480, 1 },
+        .format = .r8g8b8a8_srgb,
+    });
+    defer ctx.destroyTexture(color_target);
+
+    const index_buffer = try ctx.createBuffer(.{
+        .usage = .{
+            .index = true,
+            .transfer_dst = true,
+        },
+        .size = @sizeOf(u32) * 6,
+    });
+    defer ctx.destroyBuffer(index_buffer);
 
     main_loop: while (true) {
         _ = arena_struct.reset(.retain_capacity);

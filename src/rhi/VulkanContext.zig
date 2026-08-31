@@ -380,8 +380,7 @@ const Group = struct {
     last_used: Fence,
 
     textures: std.AutoArrayHashMapUnmanaged(*Texture, void),
-    buffers: std.AutoArrayHashMapUnmanaged(*Buffer, void),
-    // buffers could actually be just a refcount since we don't need to do anything to them
+    buffer_count: usize,
 
     last_write_epoch: u64,
     last_write_stage_mask: std.EnumSet(Stage),
@@ -413,13 +412,13 @@ const Texture = struct {
 const Buffer = struct {
     public: rhi.Buffer,
     buffer: vk.Buffer,
-    // memory: union(enum) {
-    //     slab: struct {
-    //         allocation: Allocation,
-    //         slab: *Allocator.Slab,
-    //     },
-    //     dedicated: vk.DeviceMemory,
-    // },
+    memory: union(enum) {
+        slab: struct {
+            allocation: Allocation,
+            slab: *BufferAllocator.Slab,
+        },
+        dedicated: vk.DeviceMemory,
+    },
 };
 
 const Sampler = struct {
@@ -459,14 +458,14 @@ const vtable: rhi.Context.VTable = .{
     .createSwapchain = createSwapchain,
     .destroySwapchain = destroySwapchain,
     .acquireSwapchain = acquireSwapchain,
-    .createBuffer = undefined,
+    .createBuffer = createBuffer,
     .createTexture = createTexture,
     .createSampler = undefined,
     .createShader = createShader,
     .createGroup = undefined,
     .createGraphicsPipeline = createGraphicsPipeline,
     .createComputePipeline = undefined,
-    .destroyBuffer = undefined,
+    .destroyBuffer = queueDestroyBuffer,
     .destroyTexture = queueDestroyTexture,
     .destroySampler = undefined,
     .destroyShader = destroyShader,
@@ -518,6 +517,7 @@ acquire_semaphore_depot: Depot(vk.Semaphore),
 queues: std.EnumArray(Queue, *PhysicalQueue),
 
 texture_allocator: TextureAllocator,
+buffer_allocator: BufferAllocator,
 
 syncronization_epoch: u64,
 visibility_map: EnumMatrix(Stage, Stage, u64),
@@ -564,6 +564,8 @@ pub fn init(
     // TODO init all allocators
     ctx.texture_allocator = try .init(ctx);
     errdefer ctx.texture_allocator.deinit();
+    ctx.buffer_allocator = try .init(ctx);
+    errdefer ctx.buffer_allocator.deinit();
 
     ctx.syncronization_epoch = 0;
     ctx.visibility_map = .initFill(0);
@@ -582,6 +584,7 @@ pub fn deinit(rhi_ctx: rhi.Context) void {
     };
 
     ctx.texture_allocator.deinit();
+    ctx.buffer_allocator.deinit();
 
     ctx.view_pool.deinit(ctx.gpa);
     ctx.swapchain_pool.deinit(ctx.gpa);
@@ -764,6 +767,25 @@ fn queueDestroyTexture(ptr: *anyopaque, rhi_texture: *const rhi.Texture) void {
 
     _ = ctx;
     _ = texture;
+}
+
+fn createBuffer(
+    ptr: *anyopaque,
+    create_info: rhi.BufferCreateInfo,
+) rhi.Context.Error!*const rhi.Buffer {
+    const ctx: *Context = @ptrCast(@alignCast(ptr));
+    const buffer = try ctx.buffer_allocator.createBuffer(create_info);
+    return &buffer.public;
+}
+
+fn queueDestroyBuffer(ptr: *anyopaque, rhi_buffer: *const rhi.Buffer) void {
+    const ctx: *Context = @ptrCast(@alignCast(ptr));
+    const buffer: *Buffer = @alignCast(@constCast(
+        @fieldParentPtr("public", rhi_buffer),
+    ));
+
+    _ = ctx;
+    _ = buffer;
 }
 
 fn createShader(
@@ -2396,7 +2418,7 @@ const TextureAllocator = struct {
                 },
                 .last_used = .never,
                 .textures = .empty,
-                .buffers = .empty,
+                .buffer_count = 0,
                 .texture_state = .{
                     .owner = null,
                     .layout = .undefined,
@@ -2425,5 +2447,230 @@ const TextureAllocator = struct {
         texture.public.views = &.{};
 
         return texture;
+    }
+};
+
+const BufferAllocator = struct {
+    const Slab = struct {
+        const slab_size = 256 * 1024 * 1024;
+        const granularity = 4096;
+
+        memory_type_index: u32,
+        flags: vk.MemoryAllocateFlags,
+        allocator: OffsetAllocator,
+        memory: vk.DeviceMemory,
+    };
+
+    ctx: *Context,
+    slabs: std.ArrayList(Slab),
+
+    fn init(ctx: *Context) !BufferAllocator {
+        return .{
+            .ctx = ctx,
+            .slabs = .empty,
+        };
+    }
+
+    fn deinit(allocator: *BufferAllocator) void {
+        for (allocator.slabs.items) |*slab| {
+            allocator.ctx.device.freeMemory(slab.memory, null);
+            slab.allocator.deinit(allocator.ctx.gpa);
+        }
+        allocator.slabs.deinit(allocator.ctx.gpa);
+        allocator.* = undefined;
+    }
+
+    fn alloc(
+        allocator: *BufferAllocator,
+        memory_type_index: u32,
+        flags: vk.MemoryAllocateFlags,
+        size: u64,
+    ) !struct {
+        allocation: Allocation,
+        slab: *Slab,
+    } {
+        const granule_size: u32 = @intCast((size + Slab.granularity - 1) / Slab.granularity);
+
+        // ideally there should be some allocation policy where we try to match flags
+        // and we try to allocate into the most full slab first (i think?)
+        for (allocator.slabs.items) |*slab| {
+            if (slab.memory_type_index != memory_type_index) continue;
+            if (slab.flags.toInt() & flags.toInt() != flags.toInt()) continue;
+
+            // slab is usable
+            const allocation = slab.allocator.allocate(granule_size) catch continue;
+            return .{
+                .allocation = allocation,
+                .slab = slab,
+            };
+        }
+
+        // no allocation possible with extant slabs, make a new one
+        const alloc_flags: vk.MemoryAllocateFlagsInfo = .{
+            .flags = flags,
+            .device_mask = 0,
+        };
+        const memory = try allocator.ctx.device.allocateMemory(&.{
+            .allocation_size = Slab.slab_size,
+            .memory_type_index = memory_type_index,
+            .p_next = &alloc_flags,
+        }, null);
+        errdefer allocator.ctx.device.freeMemory(memory, null);
+
+        const slab = try allocator.slabs.addOne(allocator.ctx.gpa);
+        errdefer _ = allocator.slabs.pop();
+        slab.* = .{
+            .memory_type_index = memory_type_index,
+            .flags = flags,
+            .memory = memory,
+            .allocator = try .init(
+                allocator.ctx.gpa,
+                Slab.slab_size / Slab.granularity,
+                Slab.slab_size / Slab.granularity,
+            ),
+        };
+
+        const allocation = try slab.allocator.allocate(granule_size);
+        return .{
+            .slab = slab,
+            .allocation = allocation,
+        };
+    }
+
+    fn createBuffer(
+        allocator: *BufferAllocator,
+        buffer_create_info: rhi.BufferCreateInfo,
+    ) !*Buffer {
+        const buffer_info: vk.BufferCreateInfo = .{
+            .sharing_mode = .concurrent,
+            .size = buffer_create_info.size,
+            .usage = .{
+                .transfer_src_bit = buffer_create_info.usage.transfer_src,
+                .transfer_dst_bit = buffer_create_info.usage.transfer_dst,
+                .storage_buffer_bit = buffer_create_info.usage.storage,
+                .index_buffer_bit = buffer_create_info.usage.index,
+                .indirect_buffer_bit = buffer_create_info.usage.indirect,
+                .shader_device_address_bit = true,
+            },
+        };
+        const device_buffer = try allocator.ctx.device.createBuffer(&buffer_info, null);
+        errdefer allocator.ctx.device.destroyBuffer(device_buffer, null);
+
+        var dedicated_memreq: vk.MemoryDedicatedRequirements = .{
+            .prefers_dedicated_allocation = .false,
+            .requires_dedicated_allocation = .false,
+        };
+        var buffer_memreq: vk.MemoryRequirements2 = .{
+            .p_next = &dedicated_memreq,
+            .memory_requirements = undefined,
+        };
+        allocator.ctx.device.getBufferMemoryRequirements2(&.{
+            .buffer = device_buffer,
+        }, &buffer_memreq);
+
+        var memory_type_index: u32 = undefined;
+        var best_score: i32 = -999;
+
+        const memory_types = allocator.ctx.physical_device_memory_properties.memory_types;
+        const memory_type_count = allocator.ctx.physical_device_memory_properties.memory_type_count;
+        for (memory_types[0..memory_type_count], 0..) |memory_type, i| {
+            // hard requirements
+            if (buffer_memreq.memory_requirements.memory_type_bits &
+                (@as(u32, 1) << @intCast(i)) == 0) continue;
+            // soft requirements
+            var score: i32 = 0;
+            if (memory_type.property_flags.device_local_bit) score += 1;
+            if (score > best_score) {
+                best_score = score;
+                memory_type_index = @intCast(i);
+            }
+        }
+
+        var buffer = try allocator.ctx.buffer_pool.create(allocator.ctx.gpa);
+        errdefer allocator.ctx.buffer_pool.destroy(buffer);
+        buffer.buffer = device_buffer;
+
+        if (dedicated_memreq.requires_dedicated_allocation == .true or
+            buffer_memreq.memory_requirements.size > Slab.slab_size / 2)
+        {
+            // dedicated allocation
+            const dedicated_info: vk.MemoryDedicatedAllocateInfo = .{
+                .buffer = device_buffer,
+            };
+            const alloc_flags: vk.MemoryAllocateFlagsInfo = .{
+                .device_mask = 0,
+                .p_next = &dedicated_info,
+            };
+            const memory = try allocator.ctx.device.allocateMemory(&.{
+                .allocation_size = buffer_memreq.memory_requirements.size,
+                .memory_type_index = memory_type_index,
+                .p_next = &alloc_flags,
+            }, null);
+            errdefer allocator.ctx.device.freeMemory(memory, null);
+            try allocator.ctx.device.bindBufferMemory(device_buffer, memory, 0);
+
+            buffer.memory = .{ .dedicated = memory };
+        } else {
+            // suballocate
+            const suballoc = try allocator.alloc(
+                memory_type_index,
+                .{ .device_address_bit = true },
+                if (buffer_memreq.memory_requirements.alignment <= Slab.granularity)
+                    buffer_memreq.memory_requirements.size
+                else
+                    buffer_memreq.memory_requirements.size + buffer_memreq.memory_requirements.alignment,
+            );
+
+            try allocator.ctx.device.bindBufferMemory(
+                device_buffer,
+                suballoc.slab.memory,
+                std.mem.alignForward(
+                    u32,
+                    suballoc.allocation.offset,
+                    @intCast(buffer_memreq.memory_requirements.alignment),
+                ),
+            );
+
+            buffer.memory = .{ .slab = .{
+                .allocation = suballoc.allocation,
+                .slab = suballoc.slab,
+            } };
+        }
+
+        if (buffer_create_info.group) |group| {
+            _ = group;
+            @panic("TODO");
+        } else {
+            const group = try allocator.ctx.group_pool.create(allocator.ctx.gpa);
+            group.* = .{
+                .public = .{
+                    .info = .{
+                        .name = "",
+                    },
+                },
+                .last_used = .never,
+                .textures = .empty,
+                .buffer_count = 1,
+                .texture_state = .{
+                    .owner = null,
+                    .layout = .undefined,
+                },
+                .texture_state_overrides = .empty,
+                .last_write_epoch = 0,
+                .last_write_stage_mask = .{},
+                .last_read_epoch = 0,
+                .last_read_stage_mask = .{},
+            };
+            buffer.public.group = &group.public;
+        }
+        // FIXME cleanup of group is very hard on errdefer, so don't have errors after it
+
+        buffer.public.info = .{
+            .usage = buffer_create_info.usage,
+            .size = buffer_create_info.size,
+            .name = buffer_create_info.name,
+        };
+
+        return buffer;
     }
 };
