@@ -515,9 +515,12 @@ command_pool_depots: std.EnumArray(Queue, Depot(CommandPool)),
 acquire_semaphore_depot: Depot(vk.Semaphore),
 
 queues: std.EnumArray(Queue, *PhysicalQueue),
+queue_family_indices: []u32,
 
 texture_allocator: TextureAllocator,
 buffer_allocator: BufferAllocator,
+upload_allocator: StagingAllocator,
+download_allocator: StagingAllocator,
 
 syncronization_epoch: u64,
 visibility_map: EnumMatrix(Stage, Stage, u64),
@@ -566,6 +569,10 @@ pub fn init(
     errdefer ctx.texture_allocator.deinit();
     ctx.buffer_allocator = try .init(ctx);
     errdefer ctx.buffer_allocator.deinit();
+    ctx.upload_allocator = try .init(ctx, .upload);
+    errdefer ctx.upload_allocator.deinit();
+    ctx.download_allocator = try .init(ctx, .download);
+    errdefer ctx.download_allocator.deinit();
 
     ctx.syncronization_epoch = 0;
     ctx.visibility_map = .initFill(0);
@@ -585,6 +592,8 @@ pub fn deinit(rhi_ctx: rhi.Context) void {
 
     ctx.texture_allocator.deinit();
     ctx.buffer_allocator.deinit();
+    ctx.upload_allocator.deinit();
+    ctx.download_allocator.deinit();
 
     ctx.view_pool.deinit(ctx.gpa);
     ctx.swapchain_pool.deinit(ctx.gpa);
@@ -610,6 +619,8 @@ pub fn deinit(rhi_ctx: rhi.Context) void {
         }
         depot.deinit();
     }
+
+    ctx.gpa.free(ctx.queue_family_indices);
 
     log.debug(
         "destroying {} queue acquire semaphores",
@@ -1659,8 +1670,10 @@ fn initDevice(
     vkd.* = .load(device_handle, ctx.instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
     ctx.device = .init(device_handle, vkd);
 
+    ctx.queue_family_indices = try ctx.gpa.alloc(u32, queue_create_infos.count());
+
     // for each unique queue, create the physical queue
-    for (queue_create_infos.keys()) |queue_family_index| {
+    for (queue_create_infos.keys(), 0..) |queue_family_index, i| {
         const physical_queue = try ctx.gpa.create(PhysicalQueue);
         physical_queue.family = queue_family_index;
         physical_queue.queue = .init(
@@ -1681,12 +1694,20 @@ fn initDevice(
                 ctx.queues.set(queue, physical_queue);
             }
         }
+        ctx.queue_family_indices[i] = queue_family_index;
     }
 
     ctx.physical_device = candidate.device;
     ctx.physical_device_properties = candidate.properties;
     ctx.physical_device_descriptor_indexing_properties = candidate.descriptor_indexing_properties;
     ctx.physical_device_memory_properties = candidate.memory_properties;
+
+    for (ctx.queue_family_indices, 0..) |q0, i| {
+        for (ctx.queue_family_indices, 0..) |q1, j| {
+            if (i == j) continue;
+            std.debug.assert(q0 != q1);
+        }
+    }
 }
 
 fn deinitDevice(ctx: *Context) void {
@@ -2672,5 +2693,84 @@ const BufferAllocator = struct {
         };
 
         return buffer;
+    }
+};
+
+const StagingAllocator = struct {
+    ctx: *Context,
+    memory: vk.DeviceMemory,
+    mapped_memory: []u8,
+    buffer: vk.Buffer,
+    allocator: OffsetAllocator,
+
+    const granularity = 4096;
+
+    fn init(ctx: *Context, usage: rhi.StagingAllocatorUsage) !StagingAllocator {
+        const size = switch (usage) {
+            .upload => ctx.config.upload_staging_size,
+            .download => ctx.config.download_staging_size,
+        };
+
+        const buffer = try ctx.device.createBuffer(&.{
+            .size = size,
+            .usage = .{
+                .transfer_src_bit = usage == .upload,
+                .transfer_dst_bit = usage == .download,
+            },
+            .sharing_mode = .concurrent,
+            .p_queue_family_indices = @ptrCast(ctx.queue_family_indices),
+            .queue_family_index_count = @intCast(ctx.queue_family_indices.len),
+        }, null);
+        errdefer ctx.device.destroyBuffer(buffer, null);
+
+        const optimal_alignment = ctx.physical_device_properties.limits
+            .optimal_buffer_copy_offset_alignment;
+        var buffer_memreq = ctx.device.getBufferMemoryRequirements(buffer);
+        buffer_memreq.alignment = @max(buffer_memreq.alignment, optimal_alignment);
+
+        var memory_type_index: u32 = undefined;
+        var best_score: i32 = -999;
+
+        const memory_types = ctx.physical_device_memory_properties.memory_types;
+        const memory_type_count = ctx.physical_device_memory_properties.memory_type_count;
+        for (memory_types[0..memory_type_count], 0..) |memory_type, i| {
+            // hard requirements
+            if (buffer_memreq.memory_type_bits &
+                (@as(u32, 1) << @intCast(i)) == 0) continue;
+            if (!memory_type.property_flags.host_visible_bit) continue;
+            if (usage == .upload and !memory_type.property_flags.host_coherent_bit) continue;
+            // soft requirements
+            var score: i32 = 0;
+            if (memory_type.property_flags.device_local_bit) score -= 1;
+            if (usage == .download and memory_type.property_flags.host_coherent_bit) score += 2;
+            if (usage == .download and memory_type.property_flags.host_cached_bit) score += 4;
+            if (score > best_score) {
+                best_score = score;
+                memory_type_index = @intCast(i);
+            }
+        }
+
+        const memory = try ctx.device.allocateMemory(&.{
+            .allocation_size = size,
+            .memory_type_index = memory_type_index,
+        }, null);
+        errdefer ctx.device.freeMemory(memory, null);
+
+        try ctx.device.bindBufferMemory(buffer, memory, 0);
+        const buffer_ptr: [*]u8 = @ptrCast((try ctx.device.mapMemory(memory, 0, size, .{})).?);
+
+        return .{
+            .ctx = ctx,
+            .mapped_memory = buffer_ptr[0..size],
+            .memory = memory,
+            .buffer = buffer,
+            .allocator = undefined,
+        };
+    }
+
+    fn deinit(allocator: *StagingAllocator) void {
+        allocator.ctx.device.destroyBuffer(allocator.buffer, null);
+        allocator.ctx.device.freeMemory(allocator.memory, null);
+        allocator.* = undefined;
     }
 };
