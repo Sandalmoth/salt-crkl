@@ -648,6 +648,9 @@ pub const Context = struct {
     pub fn destroyGraphicsPipeline(ctx: Context, pipeline: *const GraphicsPipeline) void {
         ctx.vtable.destroyGraphicsPipeline(ctx.ptr, pipeline);
     }
+    pub fn stagingAllocator(ctx: Context, usage: StagingAllocatorUsage) std.mem.Allocator {
+        return ctx.vtable.stagingAllocator(ctx.ptr, usage);
+    }
 
     pub fn submit(
         ctx: Context,

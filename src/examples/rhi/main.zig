@@ -88,6 +88,10 @@ pub fn main() !void {
     });
     defer ctx.destroyBuffer(index_buffer);
 
+    const upload_allocator = ctx.stagingAllocator(.upload);
+    const indices = try upload_allocator.alloc(u32, 6);
+    defer upload_allocator.free(indices);
+
     main_loop: while (true) {
         _ = arena_struct.reset(.retain_capacity);
 

@@ -472,7 +472,7 @@ const vtable: rhi.Context.VTable = .{
     .destroyGroup = undefined,
     .destroyGraphicsPipeline = queueDestroyGraphicsPipeline,
     .destroyComputePipeline = undefined,
-    .stagingAllocator = undefined,
+    .stagingAllocator = stagingAllocator,
     .submit = submit,
     .wait = undefined,
     .setBufferGroup = undefined,
@@ -1007,6 +1007,22 @@ pub fn createGraphicsPipeline(
 pub fn queueDestroyGraphicsPipeline(ptr: *anyopaque, rhi_pipeline: *const rhi.GraphicsPipeline) void {
     _ = ptr;
     _ = rhi_pipeline;
+}
+
+fn stagingAllocator(ptr: *anyopaque, usage: rhi.StagingAllocatorUsage) std.mem.Allocator {
+    const ctx: *Context = @ptrCast(@alignCast(ptr));
+    return .{
+        .ptr = switch (usage) {
+            .upload => &ctx.upload_allocator,
+            .download => &ctx.download_allocator,
+        },
+        .vtable = &.{
+            .alloc = StagingAllocator.alloc,
+            .resize = StagingAllocator.resize,
+            .remap = StagingAllocator.remap,
+            .free = StagingAllocator.free,
+        },
+    };
 }
 
 fn submit(
@@ -2702,6 +2718,7 @@ const StagingAllocator = struct {
     mapped_memory: []u8,
     buffer: vk.Buffer,
     allocator: OffsetAllocator,
+    allocations: []Allocation,
 
     const granularity = 4096;
 
@@ -2710,6 +2727,7 @@ const StagingAllocator = struct {
             .upload => ctx.config.upload_staging_size,
             .download => ctx.config.download_staging_size,
         };
+        const granule_size: u32 = @intCast((size + granularity - 1) / granularity);
 
         const buffer = try ctx.device.createBuffer(&.{
             .size = size,
@@ -2759,18 +2777,86 @@ const StagingAllocator = struct {
         try ctx.device.bindBufferMemory(buffer, memory, 0);
         const buffer_ptr: [*]u8 = @ptrCast((try ctx.device.mapMemory(memory, 0, size, .{})).?);
 
+        const allocations = try ctx.gpa.alloc(Allocation, granule_size);
+        errdefer ctx.gpa.free(allocations);
+
         return .{
             .ctx = ctx,
             .mapped_memory = buffer_ptr[0..size],
             .memory = memory,
             .buffer = buffer,
-            .allocator = undefined,
+            .allocator = try .init(
+                ctx.gpa,
+                @intCast(size / granularity),
+                @intCast(size / granularity),
+            ),
+            .allocations = allocations,
         };
     }
 
     fn deinit(allocator: *StagingAllocator) void {
         allocator.ctx.device.destroyBuffer(allocator.buffer, null);
         allocator.ctx.device.freeMemory(allocator.memory, null);
+        allocator.allocator.deinit(allocator.ctx.gpa);
+        allocator.ctx.gpa.free(allocator.allocations);
         allocator.* = undefined;
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const allocator: *StagingAllocator = @ptrCast(@alignCast(ctx));
+        _ = ret_addr;
+
+        if (alignment.toByteUnits() > granularity) {
+            log.info("TODO: implement large alignment", .{});
+            return null;
+        }
+        const allocation = allocator.allocator.allocate(@intCast(len)) catch return null;
+        const slot = allocation.offset / granularity;
+        allocator.allocations[slot] = allocation;
+
+        return allocator.mapped_memory[allocation.offset .. allocation.offset + len].ptr;
+    }
+
+    fn resize(
+        ctx: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) bool {
+        const allocator: *StagingAllocator = @ptrCast(@alignCast(ctx));
+        _ = allocator;
+        _ = memory;
+        _ = alignment;
+        _ = new_len;
+        _ = ret_addr;
+        @panic("TODO: implement resize");
+    }
+
+    fn remap(
+        ctx: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const allocator: *StagingAllocator = @ptrCast(@alignCast(ctx));
+        _ = allocator;
+        _ = memory;
+        _ = alignment;
+        _ = new_len;
+        _ = ret_addr;
+        @panic("TODO: implement remap");
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const allocator: *StagingAllocator = @ptrCast(@alignCast(ctx));
+        const allocation = allocator.allocations[
+            (@intFromPtr(memory.ptr) - @intFromPtr(allocator.mapped_memory.ptr)) / granularity
+        ];
+        allocator.allocator.free(allocation);
+
+        _ = alignment;
+        _ = ret_addr;
     }
 };
