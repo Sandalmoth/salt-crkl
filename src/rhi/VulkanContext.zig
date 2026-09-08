@@ -1248,6 +1248,17 @@ fn submit(
                     _ = cmd;
                 },
                 .end_render_pass => {},
+                .buffer_upload => |cmd| {
+                    const src = ctx.upload_allocator.buffer;
+                    const src_offset = @intFromPtr(cmd.src.ptr) -
+                        @intFromPtr(ctx.upload_allocator.mapped_memory.ptr);
+                    const dst: *Buffer = @alignCast(@constCast(@fieldParentPtr("public", cmd.dst)));
+                    ctx.device.cmdCopyBuffer(command_pool.body, src, dst.buffer, &.{.{
+                        .src_offset = src_offset,
+                        .dst_offset = cmd.dst_offset,
+                        .size = cmd.src.len,
+                    }});
+                },
                 else => log.err("TODO: handle command {}", .{command}),
             }
         }
@@ -1317,65 +1328,67 @@ fn submit(
         swapchain.acquired = false;
     }
 
-    present_queue.value += 1;
-    try release_semaphore_infos.append(arena, .{
-        .semaphore = present_queue.semaphore,
-        .stage_mask = .{ .all_commands_bit = true },
-        .device_index = 0,
-        .value = present_queue.value,
-    });
+    if (presents.len > 0) {
+        present_queue.value += 1;
+        try release_semaphore_infos.append(arena, .{
+            .semaphore = present_queue.semaphore,
+            .stage_mask = .{ .all_commands_bit = true },
+            .device_index = 0,
+            .value = present_queue.value,
+        });
 
-    try ctx.device.beginCommandBuffer(present_command_pool.body, &.{
-        .flags = .{ .one_time_submit_bit = true },
-    });
-    ctx.device.cmdPipelineBarrier2(present_command_pool.body, &.{
-        .image_memory_barrier_count = @intCast(swapchain_barriers.items.len),
-        .p_image_memory_barriers = swapchain_barriers.items.ptr,
-    });
-    try ctx.device.endCommandBuffer(present_command_pool.body);
+        try ctx.device.beginCommandBuffer(present_command_pool.body, &.{
+            .flags = .{ .one_time_submit_bit = true },
+        });
+        ctx.device.cmdPipelineBarrier2(present_command_pool.body, &.{
+            .image_memory_barrier_count = @intCast(swapchain_barriers.items.len),
+            .p_image_memory_barriers = swapchain_barriers.items.ptr,
+        });
+        try ctx.device.endCommandBuffer(present_command_pool.body);
 
-    try present_queue.queue.submit2(&[_]vk.SubmitInfo2{.{
-        .command_buffer_info_count = 1,
-        .p_command_buffer_infos = @ptrCast(&[_]vk.CommandBufferSubmitInfo{.{
-            .command_buffer = present_command_pool.body,
-            .device_mask = 0,
-        }}),
-        // FIXME the acquire will change
-        .wait_semaphore_info_count = @intCast(acquire_semaphore_infos.items.len),
-        .p_wait_semaphore_infos = acquire_semaphore_infos.items.ptr,
-        .signal_semaphore_info_count = @intCast(release_semaphore_infos.items.len),
-        .p_signal_semaphore_infos = release_semaphore_infos.items.ptr,
-    }}, .null_handle);
+        try present_queue.queue.submit2(&[_]vk.SubmitInfo2{.{
+            .command_buffer_info_count = 1,
+            .p_command_buffer_infos = @ptrCast(&[_]vk.CommandBufferSubmitInfo{.{
+                .command_buffer = present_command_pool.body,
+                .device_mask = 0,
+            }}),
+            // FIXME the acquire will change
+            .wait_semaphore_info_count = @intCast(acquire_semaphore_infos.items.len),
+            .p_wait_semaphore_infos = acquire_semaphore_infos.items.ptr,
+            .signal_semaphore_info_count = @intCast(release_semaphore_infos.items.len),
+            .p_signal_semaphore_infos = release_semaphore_infos.items.ptr,
+        }}, .null_handle);
 
-    _ = try present_queue.queue.presentKHR(&.{
-        .wait_semaphore_count = @intCast(release_semaphores.items.len),
-        .p_wait_semaphores = release_semaphores.items.ptr,
-        .swapchain_count = @intCast(swapchains.items.len),
-        .p_swapchains = swapchains.items.ptr,
-        .p_image_indices = image_indices.items.ptr,
-    });
+        _ = try present_queue.queue.presentKHR(&.{
+            .wait_semaphore_count = @intCast(release_semaphores.items.len),
+            .p_wait_semaphores = release_semaphores.items.ptr,
+            .swapchain_count = @intCast(swapchains.items.len),
+            .p_swapchains = swapchains.items.ptr,
+            .p_image_indices = image_indices.items.ptr,
+        });
 
-    for (command_buffers, command_pools) |command_buffer, command_pool| {
-        const queue: Queue = .fromRhi(command_buffer.queue);
-        try ctx.command_pool_depots.getPtr(queue).push(
-            command_pool,
-            queue,
-            ctx.queues.get(queue).value,
-        );
-    }
-    try ctx.command_pool_depots.getPtr(.present).push(
-        present_command_pool,
-        .present,
-        present_queue.value,
-    );
-    // NOTE this is conservative but safe, when the presentation engine has the image
-    // the acquire semaphore is long-since used
-    for (acquire_semaphore_infos.items) |acquire_semaphore_info| {
-        try ctx.acquire_semaphore_depot.push(
-            acquire_semaphore_info.semaphore,
+        for (command_buffers, command_pools) |command_buffer, command_pool| {
+            const queue: Queue = .fromRhi(command_buffer.queue);
+            try ctx.command_pool_depots.getPtr(queue).push(
+                command_pool,
+                queue,
+                ctx.queues.get(queue).value,
+            );
+        }
+        try ctx.command_pool_depots.getPtr(.present).push(
+            present_command_pool,
             .present,
             present_queue.value,
         );
+        // NOTE this is conservative but safe, when the presentation engine has the image
+        // the acquire semaphore is long-since used
+        for (acquire_semaphore_infos.items) |acquire_semaphore_info| {
+            try ctx.acquire_semaphore_depot.push(
+                acquire_semaphore_info.semaphore,
+                .present,
+                present_queue.value,
+            );
+        }
     }
 
     return undefined;
@@ -2597,7 +2610,6 @@ const BufferAllocator = struct {
         buffer_create_info: rhi.BufferCreateInfo,
     ) !*Buffer {
         const buffer_info: vk.BufferCreateInfo = .{
-            .sharing_mode = .concurrent,
             .size = buffer_create_info.size,
             .usage = .{
                 .transfer_src_bit = buffer_create_info.usage.transfer_src,
@@ -2607,6 +2619,9 @@ const BufferAllocator = struct {
                 .indirect_buffer_bit = buffer_create_info.usage.indirect,
                 .shader_device_address_bit = true,
             },
+            .sharing_mode = .concurrent,
+            .p_queue_family_indices = @ptrCast(allocator.ctx.queue_family_indices),
+            .queue_family_index_count = @intCast(allocator.ctx.queue_family_indices.len),
         };
         const device_buffer = try allocator.ctx.device.createBuffer(&buffer_info, null);
         errdefer allocator.ctx.device.destroyBuffer(device_buffer, null);
