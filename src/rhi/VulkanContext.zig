@@ -767,6 +767,15 @@ fn createTexture(
 ) rhi.Context.Error!*const rhi.Texture {
     const ctx: *Context = @ptrCast(@alignCast(ptr));
     const texture = try ctx.texture_allocator.createTexture(create_info);
+
+    if (ctx.config.enable_debug and create_info.name.len > 0) {
+        try ctx.device.setDebugUtilsObjectNameEXT(&.{
+            .object_type = .image,
+            .object_handle = @intFromEnum(texture.image),
+            .p_object_name = create_info.name.ptr,
+        });
+    }
+
     return &texture.public;
 }
 
@@ -786,6 +795,15 @@ fn createBuffer(
 ) rhi.Context.Error!*const rhi.Buffer {
     const ctx: *Context = @ptrCast(@alignCast(ptr));
     const buffer = try ctx.buffer_allocator.createBuffer(create_info);
+
+    if (ctx.config.enable_debug and create_info.name.len > 0) {
+        try ctx.device.setDebugUtilsObjectNameEXT(&.{
+            .object_type = .buffer,
+            .object_handle = @intFromEnum(buffer.buffer),
+            .p_object_name = create_info.name.ptr,
+        });
+    }
+
     return &buffer.public;
 }
 
@@ -2740,6 +2758,17 @@ const StagingAllocator = struct {
             .queue_family_index_count = @intCast(ctx.queue_family_indices.len),
         }, null);
         errdefer ctx.device.destroyBuffer(buffer, null);
+
+        if (ctx.config.enable_debug) {
+            try ctx.device.setDebugUtilsObjectNameEXT(&.{
+                .object_type = .buffer,
+                .object_handle = @intFromEnum(buffer),
+                .p_object_name = switch (usage) {
+                    .upload => "UPLOAD_STAGING_BUFFER",
+                    .download => "DOWNLOAD_STAGING_BUFFER",
+                },
+            });
+        }
 
         const optimal_alignment = ctx.physical_device_properties.limits
             .optimal_buffer_copy_offset_alignment;

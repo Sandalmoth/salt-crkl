@@ -76,6 +76,7 @@ pub fn main() !void {
         .mip_levels = 1,
         .size = .{ 640, 480, 1 },
         .format = .r8g8b8a8_srgb,
+        .name = "color_target",
     });
     defer ctx.destroyTexture(color_target);
 
@@ -85,12 +86,22 @@ pub fn main() !void {
             .transfer_dst = true,
         },
         .size = @sizeOf(u32) * 6,
+        .name = "index_buffer",
     });
     defer ctx.destroyBuffer(index_buffer);
 
     const upload_allocator = ctx.stagingAllocator(.upload);
-    const indices = try upload_allocator.alloc(u32, 6);
-    defer upload_allocator.free(indices);
+
+    {
+        var command_buffer: rhi.CommandBuffer = .init(arena, .graphics);
+
+        const indices = try upload_allocator.alloc(u32, 6);
+        defer upload_allocator.free(indices);
+        indices[0..6].* = .{ 0, 2, 1, 1, 2, 3 };
+        try command_buffer.bufferUpload(indices, index_buffer, 0);
+
+        _ = try ctx.submit(io, &.{command_buffer}, &.{});
+    }
 
     main_loop: while (true) {
         _ = arena_struct.reset(.retain_capacity);

@@ -670,7 +670,11 @@ pub const CommandBuffer = struct {
     // TODO add definitions and functions
 
     const Command = union(enum) {
-        buffer_upload: struct {},
+        buffer_upload: struct {
+            src: []const u8,
+            dst: *const Buffer,
+            dst_offset: u64,
+        },
         buffer_download: struct {},
         texture_upload: struct {},
         texture_download: struct {},
@@ -728,6 +732,26 @@ pub const CommandBuffer = struct {
             .queue = queue,
             .active_pass = null,
         };
+    }
+
+    pub fn bufferUpload(
+        command_buffer: *CommandBuffer,
+        src: anytype,
+        dst: *const Buffer,
+        dst_offset: u64,
+    ) !void {
+        std.debug.assert(command_buffer.active_pass == null);
+        const command = try command_buffer.commands.addOne(command_buffer.arena);
+        const src_ptr = @typeInfo(@TypeOf(src)).pointer;
+        command.* = .{ .buffer_upload = .{
+            .src = switch (src_ptr.size) {
+                .one => std.mem.asBytes(src),
+                .slice => std.mem.sliceAsBytes(src),
+                else => unreachable,
+            },
+            .dst = dst,
+            .dst_offset = dst_offset,
+        } };
     }
 
     pub fn blit(
