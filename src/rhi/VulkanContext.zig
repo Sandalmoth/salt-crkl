@@ -1056,10 +1056,10 @@ fn submit(
     const arena = arena_impl.allocator();
 
     const sync_point: SyncPoint = .{
-        .graphics = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.graphics).semaphore),
-        .compute = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.compute).semaphore),
-        .transfer = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.transfer).semaphore),
-        .present = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.present).semaphore),
+        .graphics = ctx.queues.get(.graphics).value,
+        .compute = ctx.queues.get(.compute).value,
+        .transfer = ctx.queues.get(.transfer).value,
+        .present = ctx.queues.get(.present).value,
     };
 
     _ = io;
@@ -1262,7 +1262,68 @@ fn submit(
                 else => log.err("TODO: handle command {}", .{command}),
             }
         }
+
+        // FIXME we should correctly insert barriers only when there is a dependency
+        // this is a purely get-it-to-work implementation
+        ctx.device.cmdPipelineBarrier2(command_pool.body, &.{
+            .memory_barrier_count = 1,
+            .p_memory_barriers = &.{.{
+                .src_stage_mask = .{ .all_commands_bit = true },
+                .src_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
+                .dst_stage_mask = .{ .all_commands_bit = true },
+                .dst_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
+            }},
+        });
+
         try ctx.device.endCommandBuffer(command_pool.body);
+
+        try ctx.device.beginCommandBuffer(command_pool.prefix, &.{
+            .flags = .{ .one_time_submit_bit = true },
+        });
+        try ctx.device.endCommandBuffer(command_pool.prefix);
+
+        try ctx.device.beginCommandBuffer(command_pool.suffix, &.{
+            .flags = .{ .one_time_submit_bit = true },
+        });
+        try ctx.device.endCommandBuffer(command_pool.suffix);
+
+        // FIXME we need a second loop just for the submits
+        // since all the barrier insertion needs to happen first
+        // in the same way, we should only insert semaphores between queues that have a dependency
+        // and we should make the semaphore stage mask as narrow as possible
+        // this is purely a get-it-to-work implementation
+        const queue = ctx.queues.get(.fromRhi(command_buffer.queue));
+        try queue.queue.submit2(&[_]vk.SubmitInfo2{.{
+            .command_buffer_info_count = 1,
+            .p_command_buffer_infos = @ptrCast(&[_]vk.CommandBufferSubmitInfo{.{
+                .command_buffer = command_pool.body,
+                .device_mask = 0,
+            }}),
+            .wait_semaphore_info_count = 1,
+            .p_wait_semaphore_infos = &.{.{
+                .semaphore = queue.semaphore,
+                .value = queue.value,
+                .stage_mask = .{ .all_commands_bit = true },
+                .device_index = 0,
+            }},
+            .signal_semaphore_info_count = 1,
+            .p_signal_semaphore_infos = &.{.{
+                .semaphore = queue.semaphore,
+                .value = queue.value + 1,
+                .stage_mask = .{ .all_commands_bit = true },
+                .device_index = 0,
+            }},
+        }}, .null_handle);
+        queue.value += 1;
+    }
+
+    for (command_buffers, command_pools) |command_buffer, command_pool| {
+        const queue: Queue = .fromRhi(command_buffer.queue);
+        try ctx.command_pool_depots.getPtr(queue).push(
+            command_pool,
+            queue,
+            ctx.queues.get(queue).value,
+        );
     }
 
     // for each present
@@ -1367,14 +1428,6 @@ fn submit(
             .p_image_indices = image_indices.items.ptr,
         });
 
-        for (command_buffers, command_pools) |command_buffer, command_pool| {
-            const queue: Queue = .fromRhi(command_buffer.queue);
-            try ctx.command_pool_depots.getPtr(queue).push(
-                command_pool,
-                queue,
-                ctx.queues.get(queue).value,
-            );
-        }
         try ctx.command_pool_depots.getPtr(.present).push(
             present_command_pool,
             .present,
