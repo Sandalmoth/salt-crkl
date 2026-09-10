@@ -1259,6 +1259,21 @@ fn submit(
                         .size = cmd.src.len,
                     }});
                 },
+                .draw_indexed => |cmd| {
+                    const buffer: *Buffer = @alignCast(@constCast(
+                        @fieldParentPtr("public", cmd.index_buffer),
+                    ));
+                    // OPTIMIZE keep track of the currently bound buffer and only bind if changed
+                    ctx.device.cmdBindIndexBuffer(command_pool.body, buffer.buffer, 0, .uint32);
+                    ctx.device.cmdDrawIndexed(
+                        command_pool.body,
+                        cmd.index_count,
+                        cmd.instance_count,
+                        0,
+                        0,
+                        0,
+                    );
+                },
                 else => log.err("TODO: handle command {}", .{command}),
             }
         }

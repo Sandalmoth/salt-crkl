@@ -149,6 +149,7 @@ pub fn main() !void {
                 .height = 480,
             },
         });
+        try command_buffer.drawIndexed(index_buffer, 1, 1);
         try command_buffer.endRenderPass();
 
         // try command_buffer.bindIndexBuffer(index_buffer, 0);

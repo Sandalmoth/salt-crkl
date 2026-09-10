@@ -707,7 +707,11 @@ pub const CommandBuffer = struct {
             pipeline: *const GraphicsPipeline,
             dynamic_state: *const DynamicState,
         },
-        draw_indexed: struct {},
+        draw_indexed: struct {
+            index_buffer: *const Buffer,
+            index_count: u32,
+            instance_count: u32,
+        },
         draw_indexed_indirect: struct {},
         draw_indexed_indirect_count: struct {},
         end_render_pass: void,
@@ -821,12 +825,31 @@ pub const CommandBuffer = struct {
     }
 
     pub fn endRenderPass(command_buffer: *CommandBuffer) !void {
-        std.debug.assert(command_buffer.active_pass.? == .render);
-        const arena = command_buffer.arena;
-        const command = try command_buffer.commands.addOne(arena);
+        std.debug.assert(
+            command_buffer.active_pass != null and command_buffer.active_pass.? == .render,
+        );
+        const command = try command_buffer.commands.addOne(command_buffer.arena);
         errdefer _ = command_buffer.commands.pop();
         command.* = .{ .end_render_pass = {} };
         command_buffer.active_pass = null;
+    }
+
+    pub fn drawIndexed(
+        command_buffer: *CommandBuffer,
+        index_buffer: *const Buffer,
+        index_count: u32,
+        instance_count: u32,
+    ) !void {
+        std.debug.assert(
+            command_buffer.active_pass != null and command_buffer.active_pass.? == .render,
+        );
+        const command = try command_buffer.commands.addOne(command_buffer.arena);
+        errdefer _ = command_buffer.commands.pop();
+        command.* = .{ .draw_indexed = .{
+            .index_buffer = index_buffer,
+            .index_count = index_count,
+            .instance_count = instance_count,
+        } };
     }
 };
 
