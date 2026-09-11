@@ -366,6 +366,36 @@ fn vulkanPolygonMode(polygon_mode: rhi.PolygonMode) vk.PolygonMode {
     };
 }
 
+fn vulkanLoadOp(load_op: rhi.LoadOp) vk.AttachmentLoadOp {
+    return switch (load_op) {
+        .load => .load,
+        .clear => .clear,
+        .dont_care => .dont_care,
+    };
+}
+
+fn vulkanStoreOp(store_op: rhi.StoreOp) vk.AttachmentStoreOp {
+    return switch (store_op) {
+        .store => .store,
+        .dont_care => .dont_care,
+        .none => .none,
+    };
+}
+
+fn vulkanClearValue(clear_value: rhi.ClearValue) vk.ClearValue {
+    return switch (clear_value) {
+        .color => |color| switch (color) {
+            .float => |float| .{ .color = .{ .float_32 = float } },
+            .int => |int| .{ .color = .{ .int_32 = int } },
+            .uint => |uint| .{ .color = .{ .uint_32 = uint } },
+        },
+        .depth_stencil => |depth_stencil| .{ .depth_stencil = .{
+            .depth = depth_stencil.depth,
+            .stencil = depth_stencil.stencil,
+        } },
+    };
+}
+
 const Group = struct {
     const TextureState = struct {
         owner: ?Queue,
@@ -1075,69 +1105,140 @@ fn submit(
         try ctx.device.beginCommandBuffer(command_pool.body, &.{
             .flags = .{ .one_time_submit_bit = true },
         });
+        const queue = ctx.queues.get(.fromRhi(command_buffer.queue));
         for (command_buffer.commands.items) |command| {
             switch (command) {
                 .begin_render_pass => |cmd| {
-                    // TODO dispatch barriers
+                    // FIXME need to dispatch barriers based on the groups here
 
+                    const color_attachment_infos: []vk.RenderingAttachmentInfo =
+                        if (cmd.color_attachments.len > 0)
+                            try arena.alloc(vk.RenderingAttachmentInfo, cmd.color_attachments.len)
+                        else
+                            &.{};
+                    const depth_attachment_info: ?*vk.RenderingAttachmentInfo =
+                        if (cmd.depth_attachment != null)
+                            try arena.create(vk.RenderingAttachmentInfo)
+                        else
+                            null;
+                    const stencil_attachment_info: ?*vk.RenderingAttachmentInfo =
+                        if (cmd.stencil_attachment != null)
+                            try arena.create(vk.RenderingAttachmentInfo)
+                        else
+                            null;
+
+                    var render_area_width: ?u32 = null;
+                    var render_area_height: ?u32 = null;
+
+                    for (cmd.color_attachments, 0..) |attachment, i| {
+                        const view: *View = @alignCast(@constCast(
+                            @fieldParentPtr("public", attachment.view),
+                        ));
+                        const texture: *Texture = @alignCast(@constCast(
+                            @fieldParentPtr("public", view.public.texture),
+                        ));
+                        const group = texture.group();
+                        const state =
+                            group.texture_state_overrides.get(texture) orelse group.texture_state;
+                        std.debug.print("{}\n", .{state});
+                        if (state.owner) |owner| {
+                            std.debug.assert(owner == Queue.fromRhi(command_buffer.queue));
+                        }
+
+                        // also checks that all attachments are the same size
+                        if (render_area_width == null) {
+                            render_area_width = texture.public.info.size[0];
+                        } else {
+                            std.debug.assert(render_area_width == texture.public.info.size[0]);
+                        }
+                        if (render_area_height == null) {
+                            render_area_height = texture.public.info.size[1];
+                        } else {
+                            std.debug.assert(render_area_height == texture.public.info.size[1]);
+                        }
+
+                        // OPTIMIZE batch all the layout transitions
+                        // FIXME insert minimal barrier and record this usage
+                        // though note that queue family ownership transfers are handled elsewhere
+                        if (state.layout != .attachment_optimal) {
+                            try group.texture_state_overrides.ensureUnusedCapacity(ctx.gpa, 1);
+                            const image_memory_barrier: vk.ImageMemoryBarrier2 = .{
+                                .src_stage_mask = .{ .all_commands_bit = true },
+                                .src_access_mask = .{
+                                    .memory_read_bit = true,
+                                    .memory_write_bit = true,
+                                },
+                                .dst_stage_mask = .{ .color_attachment_output_bit = true },
+                                .dst_access_mask = .{ .color_attachment_write_bit = true },
+                                .old_layout = state.layout,
+                                .new_layout = .attachment_optimal,
+                                .src_queue_family_index = queue.family,
+                                .dst_queue_family_index = queue.family,
+                                .image = texture.image,
+                                .subresource_range = .{
+                                    .aspect_mask = .{ .color_bit = true },
+                                    .base_mip_level = 0,
+                                    .level_count = texture.public.info.mip_levels,
+                                    .base_array_layer = 0,
+                                    .layer_count = texture.public.info.size[2],
+                                },
+                            };
+                            ctx.device.cmdPipelineBarrier2(
+                                command_pool.body,
+                                &.{
+                                    .image_memory_barrier_count = 1,
+                                    .p_image_memory_barriers = @ptrCast(&image_memory_barrier),
+                                },
+                            );
+                            group.texture_state_overrides.putAssumeCapacity(texture, .{
+                                .owner = .fromRhi(command_buffer.queue),
+                                .layout = .attachment_optimal,
+                            });
+                        }
+
+                        color_attachment_infos[i] = .{
+                            .image_view = view.view,
+                            .image_layout = group.texture_state_overrides.get(texture) orelse
+                                group.texture_state.layout,
+                            .resolve_mode = .{},
+                            .resolve_image_layout = .undefined,
+                            .load_op = vulkanLoadOp(attachment.load_op),
+                            .store_op = vulkanStoreOp(attachment.store_op),
+                            .clear_value = if (attachment.clear_value) |clear_value|
+                                vulkanClearValue(clear_value)
+                            else
+                                undefined,
+                        };
+                    }
+                    if (cmd.depth_attachment) |attachment| {
+                        // TODO
+                        _ = attachment;
+                    }
+                    if (cmd.stencil_attachment) |attachment| {
+                        // TODO
+                        _ = attachment;
+                    }
+
+                    std.debug.print("{any}\n", .{color_attachment_infos});
+
+                    ctx.device.cmdBeginRendering(command_pool.body, &.{
+                        .color_attachment_count = @intCast(color_attachment_infos.len),
+                        .p_color_attachments = color_attachment_infos.ptr,
+                        .p_depth_attachment = depth_attachment_info,
+                        .p_stencil_attachment = stencil_attachment_info,
+                        .layer_count = 1,
+                        .view_mask = 0,
+                        .render_area = .{
+                            .offset = .{ .x = 0, .y = 0 },
+                            .extent = .{
+                                .width = render_area_width.?,
+                                .height = render_area_height.?,
+                            },
+                        },
+                    });
+                },
+                .bind_graphics_pipeline => |cmd| {
                     _ = cmd;
-
-                    //     const color_attachment_infos: []vk.RenderingAttachmentInfo =
-                    //         if (cmd.color_attachments.len > 0)
-                    //             try arena.alloc(vk.RenderingAttachmentInfo, cmd.color_attachments.len)
-                    //         else
-                    //             &.{};
-                    //     const depth_attachment_info: ?*vk.RenderingAttachmentInfo =
-                    //         if (cmd.depth_attachment != null)
-                    //             try arena.create(vk.RenderingAttachmentInfo)
-                    //         else
-                    //             null;
-                    //     const stencil_attachment_info: ?*vk.RenderingAttachmentInfo =
-                    //         if (cmd.stencil_attachment != null)
-                    //             try arena.create(vk.RenderingAttachmentInfo)
-                    //         else
-                    //             null;
-
-                    //     for (cmd.color_attachments, 0..) |attachment, i| {
-                    //         const texture: *Texture = @alignCast(@constCast(
-                    //             @fieldParentPtr("public", attachment.texture),
-                    //         ));
-                    //         const view: *View = @alignCast(@constCast(
-                    //             @fieldParentPtr("public", if (attachment.view) |view|
-                    //                 view
-                    //             else
-                    //                 attachment.texture.default_view),
-                    //         ));
-
-                    //         color_attachment_infos[i] = .{
-                    //             .image_view = view.view,
-                    //             .image_layout = texture.group,
-                    //             .resolve_mode = .{},
-                    //             .resolve_image_layout = .undefined,
-                    //             .load_op = attachment.load_op.vulkan(),
-                    //             .store_op = attachment.store_op.vulkan(),
-                    //             .clear_value = attachment.clear_value.vulkan(),
-                    //         };
-                    //     }
-                    //     if (cmd.depth_attachment) |attachment| {
-                    //         _ = attachment;
-                    //     }
-                    //     if (cmd.stencil_attachment) |attachment| {
-                    //         _ = attachment;
-                    //     }
-
-                    //     ctx.device.cmdBeginRendering(cmdbuf, &.{
-                    //         .color_attachment_count = @intCast(color_attachment_infos.len),
-                    //         .p_color_attachments = color_attachment_infos.ptr,
-                    //         .p_depth_attachment = depth_attachment_info,
-                    //         .p_stencil_attachment = stencil_attachment_info,
-                    //         .layer_count = 1,
-                    //         .view_mask = 0,
-                    //         .render_area = .{
-                    //             .offset = .{ .x = 0, .y = 0 },
-                    //             .extent = cmd.render_area_extent,
-                    //         },
-                    //     });
                     //     // set all the dynamic state
                     //     // TODO we should probably store the state in the command buffer and
                     //     // only update the diff
@@ -1244,10 +1345,9 @@ fn submit(
                     //         ctx.device.cmdSetStencilTestEnable(cmdbuf, .false);
                     //     }
                 },
-                .bind_graphics_pipeline => |cmd| {
-                    _ = cmd;
+                .end_render_pass => {
+                    ctx.device.cmdEndRendering(command_pool.body);
                 },
-                .end_render_pass => {},
                 .buffer_upload => |cmd| {
                     const src = ctx.upload_allocator.buffer;
                     const src_offset = @intFromPtr(cmd.src.ptr) -
@@ -1307,7 +1407,6 @@ fn submit(
         // in the same way, we should only insert semaphores between queues that have a dependency
         // and we should make the semaphore stage mask as narrow as possible
         // this is purely a get-it-to-work implementation
-        const queue = ctx.queues.get(.fromRhi(command_buffer.queue));
         try queue.queue.submit2(&[_]vk.SubmitInfo2{.{
             .command_buffer_info_count = 1,
             .p_command_buffer_infos = @ptrCast(&[_]vk.CommandBufferSubmitInfo{.{
@@ -2515,6 +2614,7 @@ const TextureAllocator = struct {
         default_view_2.* = .{
             .public = .{
                 .device_address = @intCast(default_view_slot),
+                .texture = &texture.public,
                 .info = .{
                     .view_type = switch (texture_create_info.texture_type) {
                         .texture_2d => .view_2d,

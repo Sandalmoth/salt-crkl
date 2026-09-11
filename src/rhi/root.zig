@@ -317,8 +317,7 @@ pub const ClearValue = union(enum) {
 };
 
 pub const RenderingAttachment = struct {
-    texture: *const Texture,
-    view: ?*const View = null, // defaults to default_view
+    view: *const View,
     load_op: LoadOp,
     store_op: StoreOp,
     clear_value: ?ClearValue = null,
@@ -426,6 +425,7 @@ pub const ViewCreateInfo = struct {
 
 pub const View = struct {
     device_address: u20,
+    texture: *const Texture,
 
     info: struct {
         view_type: ViewType,
@@ -783,6 +783,7 @@ pub const CommandBuffer = struct {
         fragment_read_groups: []const Group,
         fragment_write_groups: []const Group,
     ) !void {
+        // TODO validate that we have at least one attachment
         std.debug.assert(command_buffer.active_pass == null);
         const arena = command_buffer.arena;
         const command = try command_buffer.commands.addOne(arena);

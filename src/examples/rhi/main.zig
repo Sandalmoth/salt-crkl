@@ -122,7 +122,7 @@ pub fn main() !void {
         var command_buffer: rhi.CommandBuffer = .init(arena, .graphics);
         try command_buffer.beginRenderPass(
             &.{.{
-                .texture = color_target,
+                .view = color_target.default_view,
                 .load_op = .clear,
                 .store_op = .store,
                 .clear_value = .float(.{ 0, 1.0, 0, 1.0 }),
