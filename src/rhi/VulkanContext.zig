@@ -249,6 +249,87 @@ const Stage = enum {
     tranfer,
 };
 
+fn vulkanStencilOp(stencil_op: rhi.StencilOp) vk.StencilOp {
+    return switch (stencil_op) {
+        .keep => .keep,
+        .zero => .zero,
+        .replace => .replace,
+        .increment_and_clamp => .increment_and_clamp,
+        .decrement_and_clamp => .decrement_and_clamp,
+        .invert => .invert,
+        .increment_and_wrap => .increment_and_wrap,
+        .decrement_and_wrap => .decrement_and_wrap,
+    };
+}
+
+fn vulkanCompareOp(compare_op: rhi.CompareOp) vk.CompareOp {
+    return switch (compare_op) {
+        .never => .never,
+        .less => .less,
+        .equal => .equal,
+        .less_or_equal => .less_or_equal,
+        .greater => .greater,
+        .not_equal => .not_equal,
+        .greater_or_equal => .greater_or_equal,
+        .always => .always,
+    };
+}
+
+fn vulkanStencilOpState(stencil_op_state: rhi.StencilOpState) vk.StencilOpState {
+    return .{
+        .fail_op = vulkanStencilOp(stencil_op_state.fail_op),
+        .pass_op = vulkanStencilOp(stencil_op_state.pass_op),
+        .depth_fail_op = vulkanStencilOp(stencil_op_state.depth_fail_op),
+        .compare_op = vulkanCompareOp(stencil_op_state.compare_op),
+        .compare_mask = stencil_op_state.compare_mask,
+        .write_mask = stencil_op_state.write_mask,
+        .reference = stencil_op_state.reference,
+    };
+}
+
+fn vulkanFrontFace(front_face: rhi.FrontFace) vk.FrontFace {
+    return switch (front_face) {
+        .clockwise => .clockwise,
+        .counter_clockwise => .counter_clockwise,
+    };
+}
+
+fn vulkanCullMode(cull_mode: rhi.CullMode) vk.CullModeFlags {
+    return .{
+        .front_bit = cull_mode.front,
+        .back_bit = cull_mode.back,
+    };
+}
+
+fn vulkanPrimitiveTopology(primitive_topology: rhi.PrimitiveTopology) vk.PrimitiveTopology {
+    return switch (primitive_topology) {
+        .point_list => .point_list,
+        .line_list => .line_list,
+        .line_strip => .line_strip,
+        .triangle_list => .triangle_list,
+        .triangle_strip => .triangle_strip,
+        .triangle_fan => .triangle_fan,
+    };
+}
+
+fn vulkanViewport(viewport: rhi.Viewport) vk.Viewport {
+    return .{
+        .x = viewport.x,
+        .y = viewport.y,
+        .width = viewport.width,
+        .height = viewport.height,
+        .min_depth = viewport.min_depth,
+        .max_depth = viewport.max_depth,
+    };
+}
+
+fn vulkanScissor(scissor: rhi.Scissor) vk.Rect2D {
+    return .{
+        .offset = .{ .x = scissor.x, .y = scissor.y },
+        .extent = .{ .width = scissor.width, .height = scissor.height },
+    };
+}
+
 fn vulkanImageType(texture_type: rhi.TextureType) vk.ImageType {
     return switch (texture_type) {
         .texture_2d => .@"2d",
@@ -1198,8 +1279,8 @@ fn submit(
 
                         color_attachment_infos[i] = .{
                             .image_view = view.view,
-                            .image_layout = group.texture_state_overrides.get(texture) orelse
-                                group.texture_state.layout,
+                            .image_layout = (group.texture_state_overrides.get(texture) orelse
+                                group.texture_state).layout,
                             .resolve_mode = .{},
                             .resolve_image_layout = .undefined,
                             .load_op = vulkanLoadOp(attachment.load_op),
@@ -1238,112 +1319,107 @@ fn submit(
                     });
                 },
                 .bind_graphics_pipeline => |cmd| {
-                    _ = cmd;
-                    //     // set all the dynamic state
-                    //     // TODO we should probably store the state in the command buffer and
-                    //     // only update the diff
-                    //     const dynamic_state = cmd.pipeline.dynamic_state;
-                    //     ctx.device.cmdBindPipeline(cmdbuf, .graphics, cmd.pipeline.pipeline);
-                    //     ctx.device.cmdSetViewport(cmdbuf, 0, 1, @ptrCast(
-                    //         &dynamic_state.viewport.vulkan(),
-                    //     ));
-                    //     ctx.device.cmdSetScissor(cmdbuf, 0, 1, @ptrCast(
-                    //         &dynamic_state.scissor.vulkan(),
-                    //     ));
-                    //     ctx.device.cmdSetPrimitiveTopology(
-                    //         cmdbuf,
-                    //         dynamic_state.input_assembly.primitive_topology.vulkan(),
-                    //     );
-                    //     ctx.device.cmdSetPrimitiveRestartEnable(
-                    //         cmdbuf,
-                    //         if (dynamic_state.input_assembly.enable_primitive_restart) .true else .false,
-                    //     );
-                    //     ctx.device.cmdSetRasterizerDiscardEnable(
-                    //         cmdbuf,
-                    //         if (dynamic_state.rasterization.enable_rasterizer_discard) .true else .false,
-                    //     );
-                    //     ctx.device.cmdSetCullMode(
-                    //         cmdbuf,
-                    //         dynamic_state.rasterization.cull_mode.vulkan(),
-                    //     );
-                    //     ctx.device.cmdSetFrontFace(
-                    //         cmdbuf,
-                    //         dynamic_state.rasterization.front_face.vulkan(),
-                    //     );
-                    //     if (dynamic_state.rasterization.depth_bias) |depth_bias| {
-                    //         ctx.device.cmdSetDepthBiasEnable(cmdbuf, .true);
-                    //         ctx.device.cmdSetDepthBias(
-                    //             cmdbuf,
-                    //             depth_bias.constant_factor,
-                    //             depth_bias.clamp,
-                    //             depth_bias.slope_factor,
-                    //         );
-                    //     } else {
-                    //         ctx.device.cmdSetDepthBiasEnable(cmdbuf, .false);
-                    //     }
-                    //     if (dynamic_state.depth_stencil.depth_test) |compare_op| {
-                    //         ctx.device.cmdSetDepthTestEnable(cmdbuf, .true);
-                    //         ctx.device.cmdSetDepthCompareOp(cmdbuf, compare_op.vulkan());
-                    //     } else {
-                    //         ctx.device.cmdSetDepthTestEnable(cmdbuf, .false);
-                    //     }
-                    //     ctx.device.cmdSetDepthWriteEnable(
-                    //         cmdbuf,
-                    //         if (dynamic_state.depth_stencil.enable_depth_write) .true else .false,
-                    //     );
-                    //     if (dynamic_state.depth_stencil.stencil_test) |stencil_test| {
-                    //         ctx.device.cmdSetStencilTestEnable(cmdbuf, .true);
-                    //         const front_op_state = stencil_test.front.vulkan();
-                    //         const back_op_state = stencil_test.back.vulkan();
-                    //         ctx.device.cmdSetStencilOp(
-                    //             cmdbuf,
-                    //             .{ .front_bit = true },
-                    //             front_op_state.fail_op,
-                    //             front_op_state.pass_op,
-                    //             front_op_state.depth_fail_op,
-                    //             front_op_state.compare_op,
-                    //         );
-                    //         ctx.device.cmdSetStencilCompareMask(
-                    //             cmdbuf,
-                    //             .{ .front_bit = true },
-                    //             front_op_state.compare_mask,
-                    //         );
-                    //         ctx.device.cmdSetStencilWriteMask(
-                    //             cmdbuf,
-                    //             .{ .front_bit = true },
-                    //             front_op_state.write_mask,
-                    //         );
-                    //         ctx.device.cmdSetStencilReference(
-                    //             cmdbuf,
-                    //             .{ .front_bit = true },
-                    //             front_op_state.reference,
-                    //         );
-                    //         ctx.device.cmdSetStencilOp(
-                    //             cmdbuf,
-                    //             .{ .back_bit = true },
-                    //             back_op_state.fail_op,
-                    //             back_op_state.pass_op,
-                    //             back_op_state.depth_fail_op,
-                    //             back_op_state.compare_op,
-                    //         );
-                    //         ctx.device.cmdSetStencilCompareMask(
-                    //             cmdbuf,
-                    //             .{ .back_bit = true },
-                    //             back_op_state.compare_mask,
-                    //         );
-                    //         ctx.device.cmdSetStencilWriteMask(
-                    //             cmdbuf,
-                    //             .{ .back_bit = true },
-                    //             back_op_state.write_mask,
-                    //         );
-                    //         ctx.device.cmdSetStencilReference(
-                    //             cmdbuf,
-                    //             .{ .back_bit = true },
-                    //             back_op_state.reference,
-                    //         );
-                    //     } else {
-                    //         ctx.device.cmdSetStencilTestEnable(cmdbuf, .false);
-                    //     }
+                    // set all the dynamic state
+                    // TODO we should probably store the state in the command buffer and
+                    // only update the diff
+                    const dynamic_state = cmd.dynamic_state;
+                    ctx.device.cmdSetViewport(command_pool.body, 0, &.{vulkanViewport(dynamic_state.viewport)});
+                    ctx.device.cmdSetScissor(command_pool.body, 0, &.{vulkanScissor(dynamic_state.scissor)});
+                    ctx.device.cmdSetPrimitiveTopology(
+                        command_pool.body,
+                        vulkanPrimitiveTopology(dynamic_state.input_assembly.primitive_topology),
+                    );
+                    ctx.device.cmdSetPrimitiveRestartEnable(
+                        command_pool.body,
+                        if (dynamic_state.input_assembly.enable_primitive_restart) .true else .false,
+                    );
+                    ctx.device.cmdSetCullMode(
+                        command_pool.body,
+                        vulkanCullMode(dynamic_state.rasterization.cull_mode),
+                    );
+                    ctx.device.cmdSetFrontFace(
+                        command_pool.body,
+                        vulkanFrontFace(dynamic_state.rasterization.front_face),
+                    );
+                    if (dynamic_state.rasterization.depth_bias) |depth_bias| {
+                        ctx.device.cmdSetDepthBiasEnable(command_pool.body, .true);
+                        ctx.device.cmdSetDepthBias(
+                            command_pool.body,
+                            depth_bias.constant_factor,
+                            depth_bias.clamp,
+                            depth_bias.slope_factor,
+                        );
+                    } else {
+                        ctx.device.cmdSetDepthBiasEnable(command_pool.body, .false);
+                    }
+                    if (dynamic_state.depth_stencil.depth_test) |compare_op| {
+                        ctx.device.cmdSetDepthTestEnable(command_pool.body, .true);
+                        ctx.device.cmdSetDepthCompareOp(command_pool.body, vulkanCompareOp(compare_op));
+                    } else {
+                        ctx.device.cmdSetDepthTestEnable(command_pool.body, .false);
+                    }
+                    ctx.device.cmdSetDepthWriteEnable(
+                        command_pool.body,
+                        if (dynamic_state.depth_stencil.enable_depth_write) .true else .false,
+                    );
+                    if (dynamic_state.depth_stencil.stencil_test) |stencil_test| {
+                        ctx.device.cmdSetStencilTestEnable(command_pool.body, .true);
+                        const front_op_state = vulkanStencilOpState(stencil_test.front);
+                        const back_op_state = vulkanStencilOpState(stencil_test.back);
+                        ctx.device.cmdSetStencilOp(
+                            command_pool.body,
+                            .{ .front_bit = true },
+                            front_op_state.fail_op,
+                            front_op_state.pass_op,
+                            front_op_state.depth_fail_op,
+                            front_op_state.compare_op,
+                        );
+                        ctx.device.cmdSetStencilCompareMask(
+                            command_pool.body,
+                            .{ .front_bit = true },
+                            front_op_state.compare_mask,
+                        );
+                        ctx.device.cmdSetStencilWriteMask(
+                            command_pool.body,
+                            .{ .front_bit = true },
+                            front_op_state.write_mask,
+                        );
+                        ctx.device.cmdSetStencilReference(
+                            command_pool.body,
+                            .{ .front_bit = true },
+                            front_op_state.reference,
+                        );
+                        ctx.device.cmdSetStencilOp(
+                            command_pool.body,
+                            .{ .back_bit = true },
+                            back_op_state.fail_op,
+                            back_op_state.pass_op,
+                            back_op_state.depth_fail_op,
+                            back_op_state.compare_op,
+                        );
+                        ctx.device.cmdSetStencilCompareMask(
+                            command_pool.body,
+                            .{ .back_bit = true },
+                            back_op_state.compare_mask,
+                        );
+                        ctx.device.cmdSetStencilWriteMask(
+                            command_pool.body,
+                            .{ .back_bit = true },
+                            back_op_state.write_mask,
+                        );
+                        ctx.device.cmdSetStencilReference(
+                            command_pool.body,
+                            .{ .back_bit = true },
+                            back_op_state.reference,
+                        );
+                    } else {
+                        ctx.device.cmdSetStencilTestEnable(command_pool.body, .false);
+                    }
+
+                    const pipeline: *GraphicsPipeline = @alignCast(@constCast(
+                        @fieldParentPtr("public", cmd.pipeline),
+                    ));
+                    ctx.device.cmdBindPipeline(command_pool.body, .graphics, pipeline.pipeline);
                 },
                 .end_render_pass => {
                     ctx.device.cmdEndRendering(command_pool.body);
