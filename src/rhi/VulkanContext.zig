@@ -182,6 +182,7 @@ const device_features_1_1 = vk.PhysicalDeviceVulkan11Features{
 const device_features_1_2 = vk.PhysicalDeviceVulkan12Features{
     .p_next = @ptrCast(@constCast(&device_features_1_3)),
     .buffer_device_address = .true,
+    .buffer_device_address_capture_replay = .true, // FIXME somehow make this depend on the config
     .descriptor_binding_partially_bound = .true,
     .descriptor_binding_sampled_image_update_after_bind = .true,
     .descriptor_binding_storage_image_update_after_bind = .true,
@@ -1221,7 +1222,6 @@ fn submit(
                         const group = texture.group();
                         const state =
                             group.texture_state_overrides.get(texture) orelse group.texture_state;
-                        std.debug.print("{}\n", .{state});
                         if (state.owner) |owner| {
                             std.debug.assert(owner == Queue.fromRhi(command_buffer.queue));
                         }
@@ -1299,8 +1299,6 @@ fn submit(
                         // TODO
                         _ = attachment;
                     }
-
-                    std.debug.print("{any}\n", .{color_attachment_infos});
 
                     ctx.device.cmdBeginRendering(command_pool.body, &.{
                         .color_attachment_count = @intCast(color_attachment_infos.len),
@@ -1448,6 +1446,19 @@ fn submit(
                         0,
                         0,
                         0,
+                    );
+                },
+                .push_constant => |cmd| {
+                    // FIXME on certain commands like draw_indexed
+                    // if we haven't called pushConstant they fail validation
+                    // so, we need to insert a dummy pushConstant somewhere
+                    ctx.device.cmdPushConstants(
+                        command_pool.body,
+                        ctx.pipeline_layout,
+                        .{ .vertex_bit = true, .fragment_bit = true, .compute_bit = true },
+                        0,
+                        @intCast(cmd.len),
+                        cmd.ptr,
                     );
                 },
                 else => log.err("TODO: handle command {}", .{command}),
@@ -2854,7 +2865,8 @@ const BufferAllocator = struct {
         buffer_create_info: rhi.BufferCreateInfo,
     ) !*Buffer {
         const buffer_info: vk.BufferCreateInfo = .{
-            .size = buffer_create_info.size,
+            .size = buffer_create_info.size + 16, // extra padding for wide reads near the end
+            .flags = .{ .device_address_capture_replay_bit = allocator.ctx.config.enable_debug },
             .usage = .{
                 .transfer_src_bit = buffer_create_info.usage.transfer_src,
                 .transfer_dst_bit = buffer_create_info.usage.transfer_dst,
@@ -2940,7 +2952,7 @@ const BufferAllocator = struct {
                 suballoc.slab.memory,
                 std.mem.alignForward(
                     u32,
-                    suballoc.allocation.offset,
+                    suballoc.allocation.offset * Slab.granularity,
                     @intCast(buffer_memreq.memory_requirements.alignment),
                 ),
             );
@@ -2984,6 +2996,10 @@ const BufferAllocator = struct {
             .size = buffer_create_info.size,
             .name = buffer_create_info.name,
         };
+
+        buffer.public.device_address = allocator.ctx.device.getBufferDeviceAddress(&.{
+            .buffer = device_buffer,
+        });
 
         return buffer;
     }
@@ -3094,15 +3110,17 @@ const StagingAllocator = struct {
         const allocator: *StagingAllocator = @ptrCast(@alignCast(ctx));
         _ = ret_addr;
 
+        const granule_size: u32 = @intCast((len + granularity - 1) / granularity);
+
         if (alignment.toByteUnits() > granularity) {
             log.info("TODO: implement large alignment", .{});
             return null;
         }
-        const allocation = allocator.allocator.allocate(@intCast(len)) catch return null;
-        const slot = allocation.offset / granularity;
+        const allocation = allocator.allocator.allocate(granule_size) catch return null;
+        const slot = allocation.offset;
         allocator.allocations[slot] = allocation;
 
-        return allocator.mapped_memory[allocation.offset .. allocation.offset + len].ptr;
+        return allocator.mapped_memory[allocation.offset * granularity .. allocation.offset * granularity + len].ptr;
     }
 
     fn resize(

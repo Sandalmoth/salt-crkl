@@ -852,6 +852,15 @@ pub const CommandBuffer = struct {
             .instance_count = instance_count,
         } };
     }
+
+    pub fn pushConstant(command_buffer: *CommandBuffer, data: anytype) !void {
+        const T = @TypeOf(data);
+        std.debug.assert(@sizeOf(T) <= 128);
+        const arena = command_buffer.arena;
+        const command = try command_buffer.commands.addOne(arena);
+        errdefer _ = command_buffer.commands.pop();
+        command.* = .{ .push_constant = try arena.dupe(u8, std.mem.asBytes(&data)) };
+    }
 };
 
 // pub const CommandBuffer = struct {

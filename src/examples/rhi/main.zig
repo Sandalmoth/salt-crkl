@@ -90,17 +90,42 @@ pub fn main() !void {
     });
     defer ctx.destroyBuffer(index_buffer);
 
+    const vertex_buffer = try ctx.createBuffer(.{
+        .usage = .{
+            .storage = true,
+            .transfer_dst = true,
+        },
+        .size = @sizeOf([3]f32) * 4,
+        .name = "vertex_buffer",
+    });
+    defer ctx.destroyBuffer(vertex_buffer);
+
     const upload_allocator = ctx.stagingAllocator(.upload);
 
     {
         var command_buffer: rhi.CommandBuffer = .init(arena, .graphics);
+
+        // FIXME i think the defers here are dangerous
+        // FIXME the bufferUpload copy doesn't to happen
+        // FIXME until after the submit fence
 
         const indices = try upload_allocator.alloc(u32, 6);
         defer upload_allocator.free(indices);
         indices[0..6].* = .{ 0, 2, 1, 1, 2, 3 };
         try command_buffer.bufferUpload(indices, index_buffer, 0);
 
-        _ = try ctx.submit(io, &.{command_buffer}, &.{});
+        const vertices = try upload_allocator.alloc([3]f32, 4);
+        defer upload_allocator.free(vertices);
+        vertices[0..4].* = .{
+            .{ 1.0, 1.0, 0.5 },
+            .{ 1.0, -1.0, 0.5 },
+            .{ -1.0, 1.0, 0.5 },
+            .{ -1.0, -1.0, 0.5 },
+        };
+        try command_buffer.bufferUpload(vertices, vertex_buffer, 0);
+
+        const fence = try ctx.submit(io, &.{command_buffer}, &.{});
+        _ = fence;
     }
 
     main_loop: while (true) {
@@ -148,8 +173,10 @@ pub fn main() !void {
                 .width = 640,
                 .height = 480,
             },
+            .rasterization = .{ .cull_mode = .{ .back = false, .front = false } },
         });
-        try command_buffer.drawIndexed(index_buffer, 1, 1);
+        try command_buffer.pushConstant(vertex_buffer.device_address);
+        try command_buffer.drawIndexed(index_buffer, 6, 1);
         try command_buffer.endRenderPass();
 
         // try command_buffer.bindIndexBuffer(index_buffer, 0);
