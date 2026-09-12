@@ -166,13 +166,14 @@ fn addSlangShader(
     stage: []const u8,
     exe: *std.Build.Step.Compile,
 ) void {
-    const cmd = b.addSystemCommand(&.{ "slangc", source_path });
+    const cmd = b.addSystemCommand(&.{"slangc"});
+    cmd.addFileArg(b.path(source_path));
     const stem = std.fs.path.stem(source_path);
     cmd.addArgs(&.{
         "-target", "spirv",
         "-entry",  b.fmt("{s}Main", .{stage}),
         "-stage",  stage,
-        "-O3",     "-fvk-use-c-layout",
+        "-O3",     "-fvk-use-scalar-layout",
     });
     cmd.addArg("-o");
     const spv_name = b.fmt("slang_{s}_{s}.spv", .{ stem, stage });

@@ -1,5 +1,5 @@
 struct Vertex {
-    float3 position;
+    float4 position;
 };
 
 struct PushConstants {
@@ -16,7 +16,7 @@ struct VertexOutput {
 [shader("vertex")]
 VertexOutput vertexMain(uint vertex_id: SV_VertexID) {
     VertexOutput out;
-    out.position = float4(push_constants.vertex_buffer[vertex_id].position, 1.0);
+    out.position = float4(push_constants.vertex_buffer[vertex_id].position.xyz, 1.0);
     out.color = float3(1.0, 0.0, 1.0);
     return out;
 }

@@ -111,21 +111,21 @@ pub fn main() !void {
 
         const indices = try upload_allocator.alloc(u32, 6);
         defer upload_allocator.free(indices);
-        indices[0..6].* = .{ 0, 2, 1, 1, 2, 3 };
+        indices[0..6].* = .{ 0, 1, 2, 1, 3, 2 };
         try command_buffer.bufferUpload(indices, index_buffer, 0);
 
-        const vertices = try upload_allocator.alloc([3]f32, 4);
+        const vertices = try upload_allocator.alloc([4]f32, 4);
         defer upload_allocator.free(vertices);
         vertices[0..4].* = .{
-            .{ 1.0, 1.0, 0.5 },
-            .{ 1.0, -1.0, 0.5 },
-            .{ -1.0, 1.0, 0.5 },
-            .{ -1.0, -1.0, 0.5 },
+            .{ 1.0, 1.0, 0.5, 0.0 },
+            .{ 1.0, -1.0, 0.5, 0.0 },
+            .{ -1.0, 1.0, 0.5, 0.0 },
+            .{ -1.0, -1.0, 0.5, 0.0 },
         };
         try command_buffer.bufferUpload(vertices, vertex_buffer, 0);
 
         const fence = try ctx.submit(io, &.{command_buffer}, &.{});
-        _ = fence;
+        _ = fence; // FIXME just waiting on this would fix it for example
     }
 
     main_loop: while (true) {
@@ -173,7 +173,6 @@ pub fn main() !void {
                 .width = 640,
                 .height = 480,
             },
-            .rasterization = .{ .cull_mode = .{ .back = false, .front = false } },
         });
         try command_buffer.pushConstant(vertex_buffer.device_address);
         try command_buffer.drawIndexed(index_buffer, 6, 1);
