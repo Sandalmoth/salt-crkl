@@ -8,6 +8,9 @@ const MemoryPool = std.heap.MemoryPool;
 const OffsetAllocator = @import("OffsetAllocator.zig").Allocator;
 const Allocation = @import("OffsetAllocator.zig").Allocation;
 
+const present_shader_vertex_spv align(@alignOf(u32)) = @embedFile("present_shader_vertex.spv").*;
+const present_shader_fragment_spv align(@alignOf(u32)) = @embedFile("present_shader_fragment.spv").*;
+
 const SyncPoint = struct {
     graphics: u64,
     compute: u64,
@@ -142,9 +145,7 @@ pub const Config = struct {
     preferred_physical_device: ?[]const u8 = null,
     upload_staging_size: usize = 512 * 1024 * 1024,
     download_staging_size: usize = 128 * 1024 * 1024,
-    enable_debug: bool =
-        @import("builtin").mode == .Debug or
-        @import("builtin").mode == .ReleaseSafe,
+    enable_debug: bool = @import("builtin").mode == .Debug,
     enable_validation: bool = @import("builtin").mode == .Debug,
 };
 
@@ -378,6 +379,28 @@ fn vulkanFormat(format: rhi.Format) vk.Format {
         .d24_unorm_s8_uint => .d24_unorm_s8_uint,
         .d32_sfloat => .d32_sfloat,
         .d32_sfloat_s8_uint => .d32_sfloat_s8_uint,
+    };
+}
+
+// needed to create the pipeline for presenting to the swapchain
+fn rhiFormat(format: vk.Format) rhi.Format {
+    return switch (format) {
+        .r8g8b8a8_unorm => .r8g8b8a8_unorm,
+        .r8g8b8a8_srgb => .r8g8b8a8_srgb,
+        .b8g8r8a8_unorm => .b8g8r8a8_unorm,
+        .b8g8r8a8_srgb => .b8g8r8a8_srgb,
+        .r16g16b16a16_sfloat => .r16g16b16a16_sfloat,
+        .r32_uint => .r32_uint,
+        .s8_uint => .s8_uint,
+        .d16_unorm => .d16_unorm,
+        .d16_unorm_s8_uint => .d16_unorm_s8_uint,
+        .d24_unorm_s8_uint => .d24_unorm_s8_uint,
+        .d32_sfloat => .d32_sfloat,
+        .d32_sfloat_s8_uint => .d32_sfloat_s8_uint,
+        else => {
+            log.err("unsupported vulkan format {s}", .{@tagName(format)});
+            @panic("");
+        },
     };
 }
 
@@ -637,6 +660,8 @@ download_allocator: StagingAllocator,
 syncronization_epoch: u64,
 visibility_map: EnumMatrix(Stage, Stage, u64),
 
+present_pipeline: *const rhi.GraphicsPipeline, // used for final blit to swapchain
+
 pub fn init(
     gpa: std.mem.Allocator,
     platform: Platform,
@@ -701,6 +726,8 @@ pub fn deinit(rhi_ctx: rhi.Context) void {
     ctx.device.deviceWaitIdle() catch |e| {
         log.warn("Failed deviceWaitIdle in deinit: {}", .{e});
     };
+
+    queueDestroyGraphicsPipeline(ctx, ctx.present_pipeline);
 
     ctx.texture_allocator.deinit();
     ctx.buffer_allocator.deinit();
@@ -1535,6 +1562,9 @@ fn submit(
     // transfer the swapchain image to the present queue
     // perform present
 
+    const graphics_queue = ctx.queues.get(.graphics);
+    const graphics_command_pool = try ctx.getCommandPool(.graphics, sync_point);
+
     const present_queue = ctx.queues.get(.present);
     const present_command_pool = try ctx.getCommandPool(.present, sync_point);
 
@@ -1544,6 +1574,151 @@ fn submit(
     var swapchains: std.ArrayList(vk.SwapchainKHR) = .empty;
     var image_indices: std.ArrayList(u32) = .empty;
     var swapchain_barriers: std.ArrayList(vk.ImageMemoryBarrier2) = .empty;
+
+    // transition present_src and swapchain for present_pipeline
+    // NOTE unlike other textures, the swapchain is created as concurrent
+    for (presents) |present| {
+        const swapchain: *Swapchain = @alignCast(@constCast(
+            @fieldParentPtr("public", present.swapchain),
+        ));
+        std.debug.assert(swapchain.acquired);
+        const image_index = swapchain.image_index.?;
+        const texture: *Texture = @alignCast(@constCast(
+            @fieldParentPtr("public", present.texture),
+        ));
+        const texture_group = texture.group();
+        const texture_state = texture_group.texture_state_overrides.get(texture) orelse texture_group.texture_state;
+
+        try texture_group.texture_state_overrides.ensureUnusedCapacity(ctx.gpa, 1);
+
+        try swapchain_barriers.append(arena, .{
+            .src_stage_mask = .{ .all_commands_bit = true },
+            .src_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
+            .dst_stage_mask = .{ .all_commands_bit = true },
+            .dst_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
+            .image = texture.image,
+            .old_layout = texture_state.layout,
+            .new_layout = .read_only_optimal,
+            .src_queue_family_index = present_queue.family,
+            .dst_queue_family_index = present_queue.family,
+            .subresource_range = .{
+                .aspect_mask = .{ .color_bit = true },
+                .base_array_layer = 0,
+                .base_mip_level = 0,
+                .layer_count = 1,
+                .level_count = 1,
+            },
+        });
+        texture_group.texture_state_overrides.putAssumeCapacity(texture, .{
+            .layout = .read_only_optimal,
+            .owner = .graphics,
+        });
+
+        try swapchain_barriers.append(arena, .{
+            .src_stage_mask = .{ .all_commands_bit = true },
+            .src_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
+            .dst_stage_mask = .{ .all_commands_bit = true },
+            .dst_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
+            .image = swapchain.images[image_index],
+            .old_layout = .undefined,
+            .new_layout = .attachment_optimal,
+            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .subresource_range = .{
+                .aspect_mask = .{ .color_bit = true },
+                .base_array_layer = 0,
+                .base_mip_level = 0,
+                .layer_count = 1,
+                .level_count = 1,
+            },
+        });
+    }
+    try ctx.device.beginCommandBuffer(graphics_command_pool.body, &.{
+        .flags = .{ .one_time_submit_bit = true },
+    });
+    ctx.device.cmdPipelineBarrier2(graphics_command_pool.body, &.{
+        .image_memory_barrier_count = @intCast(swapchain_barriers.items.len),
+        .p_image_memory_barriers = swapchain_barriers.items.ptr,
+    });
+    swapchain_barriers.clearRetainingCapacity();
+    for (presents) |present| {
+        const swapchain: *Swapchain = @alignCast(@constCast(
+            @fieldParentPtr("public", present.swapchain),
+        ));
+        std.debug.assert(swapchain.acquired);
+        const image_index = swapchain.image_index.?;
+        // const texture: *Texture = @alignCast(@constCast(
+        // @fieldParentPtr("public", present.texture),
+        // ));
+        const color_attachment_info: vk.RenderingAttachmentInfo = .{
+            .image_view = swapchain.views[image_index],
+            .image_layout = .attachment_optimal,
+            .resolve_mode = .{},
+            .resolve_image_layout = .undefined,
+            .load_op = .dont_care,
+            .store_op = .store,
+            .clear_value = undefined,
+        };
+        ctx.device.cmdBeginRendering(graphics_command_pool.body, &.{
+            .color_attachment_count = 1,
+            .p_color_attachments = @ptrCast(&color_attachment_info),
+            .p_depth_attachment = null,
+            .p_stencil_attachment = null,
+            .layer_count = 1,
+            .view_mask = 0,
+            .render_area = .{
+                .offset = .{ .x = 0, .y = 0 },
+                .extent = .{
+                    .width = swapchain.public.info.size[0],
+                    .height = swapchain.public.info.size[1],
+                },
+            },
+        });
+        ctx.device.cmdSetViewport(graphics_command_pool.body, 0, &.{.{
+            .x = 0,
+            .y = 0,
+            .width = @floatFromInt(swapchain.public.info.size[0]),
+            .height = @floatFromInt(swapchain.public.info.size[1]),
+            .min_depth = 0.0,
+            .max_depth = 1.0,
+        }});
+        ctx.device.cmdSetScissor(graphics_command_pool.body, 0, &.{.{
+            .offset = .{ .x = 0, .y = 0 },
+            .extent = .{
+                .width = swapchain.public.info.size[0],
+                .height = swapchain.public.info.size[1],
+            },
+        }});
+        ctx.device.cmdSetPrimitiveTopology(graphics_command_pool.body, .triangle_list);
+        ctx.device.cmdSetPrimitiveRestartEnable(graphics_command_pool.body, .false);
+        ctx.device.cmdSetCullMode(graphics_command_pool.body, .{});
+        ctx.device.cmdSetFrontFace(graphics_command_pool.body, .counter_clockwise);
+        ctx.device.cmdSetDepthBiasEnable(graphics_command_pool.body, .false);
+        ctx.device.cmdSetDepthTestEnable(graphics_command_pool.body, .false);
+        ctx.device.cmdSetDepthWriteEnable(graphics_command_pool.body, .false);
+        ctx.device.cmdSetStencilTestEnable(graphics_command_pool.body, .false);
+        const pipeline: *GraphicsPipeline = @alignCast(@constCast(
+            @fieldParentPtr("public", ctx.present_pipeline),
+        ));
+        ctx.device.cmdBindPipeline(graphics_command_pool.body, .graphics, pipeline.pipeline);
+        ctx.device.cmdDraw(graphics_command_pool.body, 3, 1, 0, 0);
+        ctx.device.cmdEndRendering(graphics_command_pool.body);
+    }
+    try ctx.device.endCommandBuffer(graphics_command_pool.body);
+    try present_queue.queue.submit2(&[_]vk.SubmitInfo2{.{
+        .command_buffer_info_count = 1,
+        .p_command_buffer_infos = @ptrCast(&[_]vk.CommandBufferSubmitInfo{.{
+            .command_buffer = graphics_command_pool.body,
+            .device_mask = 0,
+        }}),
+    }}, .null_handle);
+    try ctx.command_pool_depots.getPtr(.graphics).push(
+        graphics_command_pool,
+        .graphics,
+        graphics_queue.value,
+    );
+
+    // FIXME if graphics != present, we need to wait on the semaphore after this sumbit
 
     for (presents) |present| {
         const swapchain: *Swapchain = @alignCast(@constCast(
@@ -1570,14 +1745,14 @@ fn submit(
         try image_indices.append(arena, image_index);
         try swapchain_barriers.append(arena, .{
             .src_stage_mask = .{ .all_commands_bit = true },
-            .src_access_mask = .{ .memory_write_bit = true },
+            .src_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
             .dst_stage_mask = .{ .all_commands_bit = true },
-            .dst_access_mask = .{ .memory_read_bit = true },
+            .dst_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
             .image = swapchain.images[image_index],
-            .old_layout = .undefined,
+            .old_layout = .attachment_optimal,
             .new_layout = .present_src_khr,
-            .src_queue_family_index = present_queue.family,
-            .dst_queue_family_index = present_queue.family,
+            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
             .subresource_range = .{
                 .aspect_mask = .{ .color_bit = true },
                 .base_array_layer = 0,
@@ -1696,7 +1871,9 @@ fn recreateSwapchain(ctx: *Context, swapchain: *Swapchain) !void {
             .color_attachment_bit = true,
             .transfer_dst_bit = capabilities.supported_usage_flags.transfer_dst_bit,
         },
-        .image_sharing_mode = .exclusive,
+        .image_sharing_mode = .concurrent,
+        .p_queue_family_indices = @ptrCast(ctx.queue_family_indices),
+        .queue_family_index_count = @intCast(ctx.queue_family_indices.len),
         .pre_transform = capabilities.current_transform,
         .composite_alpha = .{ .opaque_bit_khr = true },
         .present_mode = present_mode,
@@ -1759,6 +1936,44 @@ fn recreateSwapchain(ctx: *Context, swapchain: *Swapchain) !void {
             while (j > 0) : (j -= 1) ctx.device.destroySemaphore(swapchain.release_semaphores[j - 1], null);
             return error.Unknown;
         };
+    }
+
+    // the present pipeline needs to knnow the swapchain format
+    // so recreate it when the swapchain is recreated just in case
+    // OPTIMIZE only recreate if needed
+    // FIXME this needs to live inside the swapchain, since there could be multiple
+    // swapchains with different formats
+    queueDestroyGraphicsPipeline(ctx, ctx.present_pipeline);
+    const vertex_shader = try createShader(ctx, .{
+        .stage = .vertex,
+        .src = &present_shader_vertex_spv,
+    });
+    defer destroyShader(ctx, vertex_shader);
+    const fragment_shader = try createShader(ctx, .{
+        .stage = .fragment,
+        .src = &present_shader_fragment_spv,
+    });
+    defer destroyShader(ctx, fragment_shader);
+    ctx.present_pipeline = try createGraphicsPipeline(ctx, .{
+        .vertex_shader = vertex_shader,
+        .fragment_shader = fragment_shader,
+        .color_attachments = &.{.{
+            .format = rhiFormat(format.format),
+        }},
+        .depth_attachment_format = null,
+        .stencil_attachment_format = null,
+    });
+    errdefer queueDestroyGraphicsPipeline(ctx, ctx.present_pipeline);
+
+    if (ctx.config.enable_debug) {
+        const pipeline: *GraphicsPipeline = @alignCast(@constCast(
+            @fieldParentPtr("public", ctx.present_pipeline),
+        ));
+        try ctx.device.setDebugUtilsObjectNameEXT(&.{
+            .object_type = .pipeline,
+            .object_handle = @intFromEnum(pipeline.pipeline),
+            .p_object_name = "PRESENT_PIPELINE",
+        });
     }
 
     // FIXME FIXME if we fail at any point here we'll get a very hard to recover state
