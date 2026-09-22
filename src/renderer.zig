@@ -71,14 +71,38 @@ const Texture = struct {
 
 const Mesh = struct {
     // buffer: sdl.GPUBuffer,
+    lod_thresholds: [8]f32,
+    lod_count: u32,
 };
 
 const Instance = struct {
     position: lin.V3d,
     orientation: lin.Qf,
     scale: lin.V3f,
-    lod: f32,
+    lod_states: [4]struct {
+        current: f32,
+        target: f32,
+        fade: f32,
+        epoch: u64,
+    },
 };
+
+const GpuTransform = extern struct {
+    position: [3][2]f32 align(16),
+    orientation: [4]f32 align(16),
+    scale: [3]f32 align(16),
+};
+comptime {
+    std.debug.assert(@sizeOf(GpuTransform) == 48);
+}
+
+// const GPUTransform = extern struct {
+//     transform: [4][4]f32,
+// };
+// const GPUBounds = extern struct {
+//     position: [3]f32,
+//     radius: f32,
+// };
 
 const Page = struct {
     const capacity = (defines.block_size - @sizeOf(Header)) / @sizeOf(Instance) - 1;

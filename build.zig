@@ -5,9 +5,9 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // dependencies
-    const vulkan = b.dependency("vulkan", .{
-        .registry = b.dependency("vulkan_headers", .{}).path("registry/vk.xml"),
-    }).module("vulkan-zig");
+    // const vulkan = b.dependency("vulkan", .{
+    //     .registry = b.dependency("vulkan_headers", .{}).path("registry/vk.xml"),
+    // }).module("vulkan-zig");
 
     const sdl_dep = b.dependency("sdl", .{
         .target = target,
@@ -24,12 +24,12 @@ pub fn build(b: *std.Build) void {
     });
     // _ = arenautils;
 
-    // const spiral = b.addModule("spiral", .{
-    //     .root_source_file = b.path("src/spiral/root.zig"),
-    //     .target = target,
-    //     .optimize = optimize,
-    //     .imports = &.{},
-    // });
+    const spiral = b.addModule("spiral", .{
+        .root_source_file = b.path("src/spiral/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{},
+    });
 
     const keygen = b.addModule("keygen", .{
         .root_source_file = b.path("src/keygen/root.zig"),
@@ -60,12 +60,12 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // const math = b.addModule("math", .{
-    //     .root_source_file = b.path("src/math/root.zig"),
-    //     .target = target,
-    //     .optimize = optimize,
-    //     .imports = &.{},
-    // });
+    const math = b.addModule("math", .{
+        .root_source_file = b.path("src/math/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{},
+    });
 
     const profiler = b.addModule("profiler", .{
         .root_source_file = b.path("src/profiler/root.zig"),
@@ -75,88 +75,88 @@ pub fn build(b: *std.Build) void {
     });
     _ = profiler;
 
-    const rhi = b.addModule("rhi", .{
-        .root_source_file = b.path("src/rhi/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "vulkan", .module = vulkan },
-        },
-    });
-
-    // const mem = b.addModule("mem", .{
-    //     .root_source_file = b.path("src/mem/root.zig"),
-    //     .target = target,
-    //     .optimize = optimize,
-    //     .imports = &.{},
-    // });
-
-    // const framework_translate_c = b.addTranslateC(.{
-    //     .root_source_file = b.path("src/c.h"),
-    //     .target = target,
-    //     .optimize = optimize,
-    // });
-    // framework_translate_c.addIncludePath(sdl_dep.path("include"));
-    // const framework = b.addModule("framework", .{
-    //     .root_source_file = b.path("src/root.zig"),
+    // const rhi = b.addModule("rhi", .{
+    //     .root_source_file = b.path("src/rhi/root.zig"),
     //     .target = target,
     //     .optimize = optimize,
     //     .imports = &.{
-    //         .{ .name = "c", .module = framework_translate_c.createModule() },
-    //         .{ .name = "mem", .module = mem },
-    //         .{ .name = "math", .module = math },
-    //         .{ .name = "spiral", .module = spiral },
-    //         .{ .name = "ecs", .module = ecs },
-    //         .{ .name = "keygen", .module = keygen },
+    //         .{ .name = "vulkan", .module = vulkan },
     //     },
     // });
 
-    // examples
-    const example_rhi_translate_c = b.addTranslateC(.{
-        .root_source_file = b.path("src/examples/rhi/c.h"),
+    const mem = b.addModule("mem", .{
+        .root_source_file = b.path("src/mem/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{},
+    });
+
+    const framework_translate_c = b.addTranslateC(.{
+        .root_source_file = b.path("src/c.h"),
         .target = target,
         .optimize = optimize,
     });
-    example_rhi_translate_c.addIncludePath(sdl_dep.path("include"));
-    const example_rhi_exe = b.addExecutable(.{
-        .name = "example_rhi",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/examples/rhi/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "rhi", .module = rhi },
-                .{ .name = "c", .module = example_rhi_translate_c.createModule() },
-            },
-        }),
+    framework_translate_c.addIncludePath(sdl_dep.path("include"));
+    const framework = b.addModule("framework", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "c", .module = framework_translate_c.createModule() },
+            .{ .name = "mem", .module = mem },
+            .{ .name = "math", .module = math },
+            .{ .name = "spiral", .module = spiral },
+            .{ .name = "ecs", .module = ecs },
+            .{ .name = "keygen", .module = keygen },
+        },
     });
-    addSlangShader(b, "src/examples/rhi/shader.slang", "vertex", example_rhi_exe);
-    addSlangShader(b, "src/examples/rhi/shader.slang", "fragment", example_rhi_exe);
-    example_rhi_exe.root_module.linkLibrary(sdl_lib);
-    b.installArtifact(example_rhi_exe);
 
-    // const example_framework_exe = b.addExecutable(.{
-    //     .name = "example_framework",
+    // examples
+    // const example_rhi_translate_c = b.addTranslateC(.{
+    //     .root_source_file = b.path("src/examples/rhi/c.h"),
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
+    // example_rhi_translate_c.addIncludePath(sdl_dep.path("include"));
+    // const example_rhi_exe = b.addExecutable(.{
+    //     .name = "example_rhi",
     //     .root_module = b.createModule(.{
-    //         .root_source_file = b.path("src/examples/framework/main.zig"),
+    //         .root_source_file = b.path("src/examples/rhi/main.zig"),
     //         .target = target,
     //         .optimize = optimize,
     //         .imports = &.{
-    //             .{ .name = "framework", .module = framework },
+    //             .{ .name = "rhi", .module = rhi },
+    //             .{ .name = "c", .module = example_rhi_translate_c.createModule() },
     //         },
     //     }),
     // });
-    // example_framework_exe.root_module.linkLibrary(sdl_lib);
-    // b.installArtifact(example_framework_exe);
+    // addSlangShader(b, "src/examples/rhi/shader.slang", "vertex", example_rhi_exe);
+    // addSlangShader(b, "src/examples/rhi/shader.slang", "fragment", example_rhi_exe);
+    // example_rhi_exe.root_module.linkLibrary(sdl_lib);
+    // b.installArtifact(example_rhi_exe);
+
+    const example_framework_exe = b.addExecutable(.{
+        .name = "example_framework",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/examples/framework/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "framework", .module = framework },
+            },
+        }),
+    });
+    example_framework_exe.root_module.linkLibrary(sdl_lib);
+    b.installArtifact(example_framework_exe);
 
     // tests
-    const rhi_tests = b.addTest(.{ .root_module = rhi });
-    rhi_tests.root_module.addImport("vulkan", vulkan);
+    // const rhi_tests = b.addTest(.{ .root_module = rhi });
+    // rhi_tests.root_module.addImport("vulkan", vulkan);
 
     const ecs_tests = b.addTest(.{ .root_module = ecs });
 
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&b.addRunArtifact(rhi_tests).step);
+    // test_step.dependOn(&b.addRunArtifact(rhi_tests).step);
     test_step.dependOn(&b.addRunArtifact(ecs_tests).step);
 }
 
