@@ -7,6 +7,9 @@ const profiler = @import("profiler");
 pub const defines = @import("defines.zig");
 pub const sdl = @import("sdl.zig");
 
+const gpu_page_size = 128;
+const gpu_page_count = 8 * 1024;
+
 const Self = @This();
 
 pub const VertexGeometry = extern struct {
@@ -87,41 +90,53 @@ const Instance = struct {
     },
 };
 
-const GpuTransform = extern struct {
-    position: [3][2]f32 align(16),
+// persistent on the gpu
+// updated via diffs from cpu
+const GpuData = extern struct {
+    position: [3][2]f32 align(16), // global high low dual
     orientation: [4]f32 align(16),
     scale: [3]f32 align(16),
 };
 comptime {
-    std.debug.assert(@sizeOf(GpuTransform) == 48);
+    std.debug.assert(@sizeOf(GpuData) == 48);
 }
+const GPULodState = extern struct {
+    lod: [4]f32 align(16),
+};
 
-// const GPUTransform = extern struct {
-//     transform: [4][4]f32,
-// };
-// const GPUBounds = extern struct {
-//     position: [3]f32,
-//     radius: f32,
-// };
+// temporary on gpu
+// regenerated from the GpuData with a compute shader each frame
+const GpuTransformData = extern struct {
+    model: [4][4]f32 align(16), // relative to renderer origin
+};
+const GPUCullingData = extern struct {
+    position: [3]f32 align(16), // relative to renderer origin
+    radius: f32,
+};
+
+const GpuMeshData = extern struct {
+    vertex_offset: u32,
+    vertex_count: u32,
+    lod_thresholds: [8]f32,
+    lod_count: u32,
+};
 
 const Page = struct {
-    const capacity = (defines.block_size - @sizeOf(Header)) / @sizeOf(Instance) - 1;
+    // instances are organized in pages on the gpu
 
-    const Header = struct {
-        // a page should hold just one mesh (but can hold any of its lods)
-        // it has a pipeline
-        // and a material (textures & shader parameters)
+    // a page has
+    // - one mesh (but can hold any of its lods)
+    // - a pipeline
+    // - a material (textures & shader parameters)
 
-        // for each individual mesh instances we need
-        // - a transform
-        mesh: *Mesh,
-        material: *Material,
-        instances: [*]Instance,
-        instance_count: usize,
-    };
+    // the transform and lod state live on the gpu
 
-    header: Header,
-    bytes: [defines.block_size - @sizeOf(Header)]u8,
+    // for each individual mesh instances we need
+    // - a transform
+    mesh: *Mesh,
+    material: *Material,
+
+    instance_count: usize,
 };
 
 gpa: std.mem.Allocator,
