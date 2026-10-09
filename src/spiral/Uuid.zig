@@ -4,9 +4,14 @@ const Uuid = @This();
 
 bits: u128,
 
-pub fn random(io: std.Io, rand: std.Random) Uuid {
+pub const Flags = packed struct(u16) {
+    runtime: bool,
+    _pad: u15 = 0,
+};
+
+pub fn random(io: std.Io, rand: std.Random, flags: Flags) Uuid {
     var l: u64 = @bitCast(std.Io.Timestamp.now(io, .real).toMicroseconds());
-    var r: u64 = rand.int(u64);
+    var r: u64 = (rand.int(u64) << 16) | @as(u16, @bitCast(flags));
     for ([_]u64{ 0xb1bcf22d4692ed5d, 0xb101cd5c53b10de1, 0xe391b47692f9a411 }) |k| {
         const x = l ^ std.hash.XxHash64.hash(k, std.mem.asBytes(&r));
         l = r;

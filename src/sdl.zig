@@ -593,3 +593,7 @@ pub fn uploadToGPUTexture(
 pub fn queryGPUFence(device: *GPUDevice, fence: *GPUFence) bool {
     return c.SDL_QueryGPUFence(device, fence);
 }
+
+pub fn pollEvent(event: *Event) bool {
+    return c.SDL_PollEvent(event);
+}
