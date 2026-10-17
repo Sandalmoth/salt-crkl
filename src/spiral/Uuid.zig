@@ -4,8 +4,10 @@ const Uuid = @This();
 
 bits: u128,
 
+pub const nil: Uuid = .{ .bits = 0 };
+
 pub const Flags = packed struct(u16) {
-    runtime: bool,
+    runtime: bool = false,
     _pad: u15 = 0,
 };
 
@@ -17,8 +19,10 @@ pub fn random(io: std.Io, rand: std.Random, flags: Flags) Uuid {
         l = r;
         r = x;
     }
-    const bits: u128 = (@as(u128, @intCast(l)) << 64) | @as(u128, @intCast(r));
-    return .{ .bits = bits *% 0x9e3779b97f4a7c15f39cc0605cedc823 };
+    var bits: u128 = (@as(u128, @intCast(l)) << 64) | @as(u128, @intCast(r));
+    bits = bits *% 0x9e3779b97f4a7c15f39cc0605cedc823;
+    std.debug.assert(bits != 0); // true in practice
+    return .{ .bits = bits };
 }
 
 pub fn child(parent: Uuid, name: []const u8) Uuid {
@@ -26,7 +30,9 @@ pub fn child(parent: Uuid, name: []const u8) Uuid {
     bits <<= 64;
     bits |= std.hash.XxHash64.hash(0x8f0d96c55ba5160d, name);
     bits *%= 0x9e3779b97f4a7c15f39cc0605cedc823;
-    return .{ .bits = parent.bits ^ bits };
+    bits = parent.bits ^ bits;
+    std.debug.assert(bits != 0); // true in practice
+    return .{ .bits = bits };
 }
 
 pub fn parse(str: []const u8) !Uuid {
@@ -68,6 +74,7 @@ pub fn parse(str: []const u8) !Uuid {
             'Z', 'z' => 31,
             else => return error.Invalid,
         };
+        if (i == 0 and x > 7) return error.Invalid;
         bits |= (x << @intCast(125 - 5 * i));
     }
     return .{ .bits = bits };

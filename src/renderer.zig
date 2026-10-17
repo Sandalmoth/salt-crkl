@@ -14,7 +14,7 @@ const Self = @This();
 
 pub const VertexGeometry = extern struct {
     position: [3]f32,
-    texcoord: [2]f16,
+    texcoord: [2]f16, // texcoords are here for depth only alpha-cutout passes
 };
 
 pub const VertexMaterial = extern struct {
@@ -40,25 +40,43 @@ pub const Config = struct {
     // sample_count: sdl.c.SDL_GPUSampleCount,
 };
 
-pub const Key = enum(u64) {
-    nil = 0,
-    _,
-
-    const HashContext = struct {
-        pub fn hash(ctx: HashContext, key: Key) u64 {
-            _ = ctx;
-            return @intFromEnum(key); // it's already random
-        }
-
-        pub fn eql(ctx: HashContext, a: Key, b: Key) bool {
-            _ = ctx;
-            return a == b;
-        }
-    };
-};
-
 pub const CommandList = struct {
+    const Command = union(enum) {
+        create_instance: struct {
+            uuid: spiral.Uuid,
+            position: lin.V3d,
+            orientation: lin.Qf,
+            scale: lin.V3f,
+        },
+    };
+
     renderer: *Self,
+    arena: std.mem.Allocator,
+    list: std.ArrayList(Command), // TODO: switch to something that doesn't reallocate
+
+    fn createInstance(
+        list: *CommandList,
+        uuid: spiral.Uuid,
+        position: lin.V3d,
+        orientation: lin.Qf,
+        scale: lin.V3f,
+    ) !*Instance {
+        const model = list.renderer.model_map.get(uuid) orelse try list.renderer.loadModel(uuid);
+        _ = model;
+        try list.list.ensureUnusedCapacity(list.arena, 1);
+        list.renderer.mutex.lockUncancelable(list.renderer.io);
+        defer list.renderer.mutex.unlock(list.renderer.io);
+        for (0..list.renderer.pages.items) |page| {
+            _ = page;
+        }
+        const command = list.list.addOneAssumeCapacity(list.arena);
+        command.* = .{
+            .uuid = uuid,
+            .position = position,
+            .orientation = orientation,
+            .scale = scale,
+        };
+    }
 
     // createInstance(transform, model_uuid) -> handle
     // setTransform(handle, position: lin.V3d, )
@@ -66,6 +84,107 @@ pub const CommandList = struct {
     // setMesh(handle, mesh_uuid)
     // setMaterial(handle, material_uuid)
     // destroyDrawable(handle)
+};
+
+const UploadAllocator = struct {
+    const capacity = 64 * 1024 * 1024;
+
+    const Command = struct {
+        src: sdl.GPUTransferBufferLocation,
+        dst: union(enum) {
+            buffer: sdl.GPUBufferRegion,
+            texture: sdl.GPUTextureRegion,
+        },
+        cycle: bool,
+    };
+
+    gpa: std.mem.Allocator,
+    device: *sdl.GPUDevice,
+    buffer: *sdl.GPUTransferBuffer,
+    cursor: usize = 0,
+    bytes: ?[*]u8 = null,
+    commands: std.ArrayList(Command) = .empty,
+
+    pub fn init(renderer: *Self) !UploadAllocator {
+        const buffer = try sdl.createGPUTransferBuffer(renderer.device, &.{
+            .usage = sdl.c.SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+            .size = capacity,
+        });
+        errdefer sdl.releaseGPUTransferBuffer(renderer.device, buffer);
+        return .{
+            .gpa = renderer.gpa,
+            .device = renderer.device,
+            .buffer = buffer,
+        };
+    }
+
+    pub fn deinit(alloc: *UploadAllocator) void {
+        sdl.releaseGPUTransferBuffer(alloc.device, alloc.buffer);
+        alloc.commands.deinit(alloc.gpa);
+    }
+
+    pub fn bind(alloc: *UploadAllocator) !void {
+        alloc.cursor = 0;
+        alloc.bytes = @ptrCast(
+            try sdl.mapGPUTransferBuffer(alloc.device, alloc.buffer, true),
+        );
+    }
+
+    pub fn bufferUpload(
+        alloc: *UploadAllocator,
+        src: []const u8,
+        dst: *sdl.GPUBuffer,
+        offset: u32,
+        cycle: bool,
+    ) !void {
+        if (capacity < alloc.cursor + src.len) return error.OutOfMemory;
+        const command = try alloc.commands.addOne(alloc.gpa);
+        command.* = .{
+            .src = .{ .transfer_buffer = alloc.buffer, .offset = @intCast(alloc.cursor) },
+            .dst = .{ .buffer = .{ .buffer = dst, .offset = offset, .size = @intCast(src.len) } },
+            .cycle = cycle,
+        };
+        @memcpy(alloc.bytes.?[alloc.cursor..], src);
+        alloc.cursor += src.len;
+    }
+
+    pub fn submit(alloc: *UploadAllocator, command_buffer: *sdl.GPUCommandBuffer) !void {
+        sdl.unmapGPUTransferBuffer(alloc.device, alloc.buffer);
+        const pass = try sdl.beginGPUCopyPass(command_buffer);
+        for (alloc.commands.items) |command| {
+            switch (command.dst) {
+                .buffer => |dst| sdl.uploadToGPUBuffer(pass, &command.src, &dst, command.cycle),
+                .texture => |dst| {
+                    _ = dst;
+                    @panic("TODO");
+                },
+            }
+        }
+        sdl.endGPUCopyPass(pass);
+    }
+};
+
+const Page = struct {
+    const capacity = (defines.block_size - @sizeOf(Header)) / @sizeOf(Instance) - 1;
+
+    const Header = struct {
+        pipeline: *Pipeline,
+        material: *Material,
+        mesh: *Mesh,
+        instances: [*]Instance,
+    };
+
+    header: Header,
+    bytes: [defines.block_size - @sizeOf(Header)]u8,
+};
+comptime {
+    std.debug.assert(@sizeOf(Page) <= defines.block_size);
+}
+
+const Instance = struct {
+    position: lin.V3d,
+    orientation: lin.Qf,
+    scale: lin.V3f,
 };
 
 const Material = struct {
@@ -108,14 +227,6 @@ const Model = struct {
     instance_count: usize,
 };
 
-const GpuDiff = extern struct {
-    instance_id: u32, // position in paged buffers
-    position: [3][2]f32, // global high low dual
-    orientation: [4]f32,
-    scale: [3]f32,
-};
-// persistent on the gpu
-// updated via diffs from cpu
 const GpuData = extern struct {
     position: [3][2]f32, // global high low dual
     orientation: [4]f32,
@@ -146,34 +257,37 @@ const GpuMeshData = extern struct {
 
 gpa: std.mem.Allocator,
 blka: std.mem.Allocator,
+io: std.Io,
 config: Config,
+
+mutex: std.Io.Mutex,
 
 window: *sdl.Window,
 
-upload_buffer: *sdl.GPUTransferBuffer,
+storage: *spiral.Storage,
+
+pages: std.ArrayList(*Page),
+
+upload_allocator: UploadAllocator,
 download_buffer: *sdl.GPUTransferBuffer,
 
 hdr_backbuffer: *sdl.GPUTexture,
 sdr_backbuffer: *sdl.GPUTexture,
 
-instance_allocator: mem.SlotAllocator,
-instance_map: std.HashMapUnmanaged(Key, struct { slot: u32, refcount: u32 }, Key.HashContext, 80),
+// instance_allocator: mem.SlotAllocator,
+// instance_map: std.HashMapUnmanaged(Key, struct { slot: u32, refcount: u32 }, Key.HashContext, 80),
 
-models: []Model,
-model_allocator: mem.SlotAllocator,
-model_map: std.AutoHashMapUnmanaged(spiral.Uuid, struct { slot: u32, refcount: u32 }),
+model_map: std.AutoHashMapUnmanaged(spiral.Uuid, *Model),
 
-mesh_allocator: mem.MemoryPool(Mesh),
-mesh_map: std.AutoHashMapUnmanaged(spiral.Uuid, struct { ptr: *Mesh, refcount: u32 }),
+// mesh_allocator: mem.MemoryPool(Mesh),
+// mesh_map: std.AutoHashMapUnmanaged(spiral.Uuid, struct { ptr: *Mesh, refcount: u32 }),
 
-material_allocator: mem.MemoryPool(Material),
-material_map: std.AutoHashMapUnmanaged(spiral.Uuid, struct { ptr: *Material, refcount: u32 }),
+// material_map: std.AutoHashMapUnmanaged(spiral.Uuid, struct { ptr: *Material, refcount: u32 }),
 
-pipeline_allocator: mem.MemoryPool(Pipeline),
-pipeline_map: std.AutoHashMapUnmanaged(spiral.Uuid, struct { ptr: *Pipeline, refcount: u32 }),
+// pipeline_map: std.AutoHashMapUnmanaged(spiral.Uuid, struct { ptr: *Pipeline, refcount: u32 }),
 
-texture_allocator: mem.MemoryPool(Texture),
-texture_map: std.AutoHashMapUnmanaged(spiral.Uuid, struct { ptr: *Texture, refcount: u32 }),
+// texture_allocator: mem.MemoryPool(Texture),
+// texture_map: std.AutoHashMapUnmanaged(spiral.Uuid, struct { ptr: *Texture, refcount: u32 }),
 
 // suballocated
 index_buffer: *sdl.GPUBuffer,
@@ -202,11 +316,14 @@ device: *sdl.GPUDevice,
 // origin: lin.V3d,
 
 pub fn init(
+    renderer: *Self,
     _gpa: std.mem.Allocator,
     _blka: std.mem.Allocator,
+    _io: std.Io,
     window: *sdl.Window,
     config: Config,
-) !Self {
+    storage: *spiral.Storage,
+) !void {
     const device = try sdl.createGPUDevice(
         sdl.c.SDL_GPU_SHADERFORMAT_SPIRV,
         true,
@@ -215,11 +332,6 @@ pub fn init(
     errdefer sdl.destroyGPUDevice(device);
     try sdl.claimWindowForGPUDevice(device, window);
 
-    const upload_buffer = try sdl.createGPUTransferBuffer(device, &.{
-        .usage = sdl.c.SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
-        .size = 64 * 1024 * 1024,
-    });
-    errdefer sdl.releaseGPUTransferBuffer(device, upload_buffer);
     const download_buffer = try sdl.createGPUTransferBuffer(device, &.{
         .usage = sdl.c.SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD,
         .size = 64 * 1024 * 1024,
@@ -325,13 +437,18 @@ pub fn init(
     });
     errdefer sdl.releaseGPUBuffer(device, scratch_paged_culling_buffer);
 
-    return .{
+    renderer.* = .{
         .gpa = _gpa,
         .blka = _blka,
+        .io = _io,
         .config = config,
+        .mutex = .init,
+        .storage = storage,
         .window = window,
-        .upload_buffer = upload_buffer,
+        .upload_allocator = undefined,
         .download_buffer = download_buffer,
+        .pages = .empty,
+        .model_map = .empty,
         .hdr_backbuffer = hdr_backbuffer,
         .sdr_backbuffer = sdr_backbuffer,
         .index_buffer = index_buffer,
@@ -348,10 +465,15 @@ pub fn init(
         .scratch_paged_culling_buffer = scratch_paged_culling_buffer,
         .device = device,
     };
+
+    renderer.upload_allocator = try .init(renderer);
+    try renderer.upload_allocator.bind();
+
+    try renderer._testSetup();
 }
 
 pub fn deinit(renderer: *Self) void {
-    sdl.releaseGPUTransferBuffer(renderer.device, renderer.upload_buffer);
+    renderer.upload_allocator.deinit();
     sdl.releaseGPUTransferBuffer(renderer.device, renderer.download_buffer);
 
     sdl.releaseGPUTexture(renderer.device, renderer.hdr_backbuffer);
@@ -390,25 +512,10 @@ pub fn draw(renderer: *Self, arena: std.mem.Allocator, command_lists: []CommandL
     _ = arena;
     _ = command_lists;
 
-    const upload_bytes: [*]u8 = @ptrCast(
-        try sdl.mapGPUTransferBuffer(renderer.device, renderer.upload_buffer, true),
-    );
-    var upload_commands: std.ArrayList(struct {
-        src: sdl.GPUTransferBufferLocation,
-        dst: union(enum) {
-            buffer: sdl.GPUBufferRegion,
-            texture: sdl.GPUTextureRegion,
-        },
-        cycle: bool,
-    }) = .empty;
-    _ = upload_bytes;
-    upload_commands = upload_commands;
-    sdl.unmapGPUTransferBuffer(renderer.device, renderer.upload_buffer);
-    for (upload_commands.items) |command| {
-        _ = command;
-    }
-
     const command_buffer = try sdl.acquireGPUCommandBuffer(renderer.device);
+
+    // uploads everything for the frame
+    try renderer.upload_allocator.submit(command_buffer);
 
     const swapchain, const swapchain_width, const swapchain_height = blk: {
         var swapchain: ?*sdl.GPUTexture = null;
@@ -427,4 +534,36 @@ pub fn draw(renderer: *Self, arena: std.mem.Allocator, command_lists: []CommandL
     std.debug.print("{*} {}x{}\n", .{ swapchain, swapchain_width, swapchain_height });
 
     try sdl.submitGPUCommandBuffer(command_buffer);
+
+    // rebinds the transfer buffer so we can upload more during next frame
+    try renderer.upload_allocator.bind();
+}
+
+fn loadModel(renderer: *Self, uuid: spiral.Uuid) !*Model {
+    _ = renderer;
+    _ = uuid;
+    return undefined;
+}
+
+fn _testSetup(renderer: *Self) !void {
+    std.debug.print("yo\n", .{});
+
+    var arena_impl: std.heap.ArenaAllocator = .init(renderer.gpa);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+    _ = arena;
+
+    const cube_vertices: [8]VertexGeometry = .{
+        .{ .position = .{ -0.5, -0.5, -0.5 }, .texcoord = .{ 0, 0 } },
+        .{ .position = .{ -0.5, -0.5, 0.5 }, .texcoord = .{ 0, 0 } },
+        .{ .position = .{ -0.5, 0.5, -0.5 }, .texcoord = .{ 0, 0 } },
+        .{ .position = .{ -0.5, 0.5, 0.5 }, .texcoord = .{ 0, 0 } },
+        .{ .position = .{ 0.5, -0.5, -0.5 }, .texcoord = .{ 0, 0 } },
+        .{ .position = .{ 0.5, -0.5, 0.5 }, .texcoord = .{ 0, 0 } },
+        .{ .position = .{ 0.5, 0.5, -0.5 }, .texcoord = .{ 0, 0 } },
+        .{ .position = .{ 0.5, 0.5, 0.5 }, .texcoord = .{ 0, 0 } },
+    };
+    try renderer.upload_allocator.bufferUpload(std.mem.asBytes(
+        &cube_vertices,
+    ), renderer.vertex_geometry_buffer, 0, false);
 }

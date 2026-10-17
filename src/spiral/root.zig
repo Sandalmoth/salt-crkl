@@ -235,12 +235,12 @@ pub const Storage = struct {
         storage.gpa.destroy(storage);
     }
 
-    pub fn loadMany(
+    pub fn load(
         storage: *Storage,
         comptime T: type,
         gpa: std.mem.Allocator,
         uuid: Uuid,
-    ) !Future([]T) {
+    ) !Future(T) {
         const src = storage.index.get(uuid) orelse {
             log.err("uuid {s} is not in index", .{&uuid.stringify()});
             return error.Uuid;

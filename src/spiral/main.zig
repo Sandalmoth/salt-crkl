@@ -70,7 +70,7 @@ fn addFile(arena: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     const input_dir: std.Io.Dir = try .openDir(std.Io.Dir.cwd(), io, dirname, .{});
     const manifest_path = try std.fmt.allocPrint(arena, "{s}.manifest.zon", .{basename});
 
-    const uuid: Uuid = .random(io, rand);
+    const uuid: Uuid = .random(io, rand, .{});
     const manifest: Manifest = .{
         .uuid = &uuid.stringify(),
         .assets = &.{},
@@ -288,4 +288,20 @@ fn processTxt(
     try std.Io.Dir.copyFile(input_dir, filename, output_dir, &content_hash_str, io, .{});
 
     return new_manifest;
+}
+
+fn processGltf(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    input_dir: std.Io.Dir,
+    output_dir: std.Io.Dir,
+    old_manifest: Manifest,
+    filename: []const u8,
+) !Manifest {
+    _ = arena;
+    _ = io;
+    _ = input_dir;
+    _ = output_dir;
+    _ = old_manifest;
+    _ = filename;
 }
