@@ -14,6 +14,9 @@ const AssetInfo = struct {
 };
 
 var permanent_arena: std.mem.Allocator = undefined;
+var input_dir: std.Io.Dir = undefined;
+var tmp_dir: std.Io.Dir = undefined;
+var output_dir: std.Io.Dir = undefined;
 var assets: arenautils.AutoMap(Uuid, AssetInfo) = .init();
 // var content_hashes: arenautils.AutoMap(u128, struct {}) = .init();
 
@@ -33,9 +36,13 @@ var assets: arenautils.AutoMap(Uuid, AssetInfo) = .init();
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
-    permanent_arena = init.arena.allocator();
 
-    // TODO either use or make a argparse librariy or wait for stdlib to have one
+    permanent_arena = init.arena.allocator();
+    input_dir = try .openDir(.cwd(), io, "raw", .{ .iterate = true });
+    tmp_dir = try .openDir(.cwd(), io, "tmp", .{});
+    output_dir = try .openDir(.cwd(), io, "data", .{});
+
+    // TODO either use or make a argparse library or wait for stdlib to have one
     var it = try init.minimal.args.iterateAllocator(permanent_arena);
     _ = it.skip();
     while (it.next()) |arg| {
@@ -67,7 +74,7 @@ fn addFile(arena: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     };
     const basename = std.fs.path.basename(path);
 
-    const input_dir: std.Io.Dir = try .openDir(std.Io.Dir.cwd(), io, dirname, .{});
+    const cwd_dir: std.Io.Dir = try .openDir(std.Io.Dir.cwd(), io, dirname, .{});
     const manifest_path = try std.fmt.allocPrint(arena, "{s}.manifest.zon", .{basename});
 
     const uuid: Uuid = .random(io, rand, .{});
@@ -75,7 +82,7 @@ fn addFile(arena: std.mem.Allocator, io: std.Io, path: []const u8) !void {
         .uuid = &uuid.stringify(),
         .assets = &.{},
     };
-    const output_file = try input_dir.createFile(io, manifest_path, .{ .exclusive = true });
+    const output_file = try cwd_dir.createFile(io, manifest_path, .{ .exclusive = true });
     defer output_file.close(io);
     var buffer: [1024]u8 = undefined;
     var writer = output_file.writer(io, &buffer);
@@ -87,18 +94,12 @@ fn addFile(arena: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     try writer.flush();
 
     log.info("created {s}", .{manifest_path});
-
-    const output_dir: std.Io.Dir = try .openDir(std.Io.Dir.cwd(), io, "raw", .{});
-    try processManifest(arena, io, input_dir, output_dir, manifest_path);
 }
 
 fn packAll(gpa: std.mem.Allocator, io: std.Io) !void {
     var arena_impl: std.heap.ArenaAllocator = .init(gpa);
     defer arena_impl.deinit();
     const arena = arena_impl.allocator();
-
-    const input_dir: std.Io.Dir = try .openDir(std.Io.Dir.cwd(), io, "raw", .{ .iterate = true });
-    const output_dir: std.Io.Dir = try .openDir(.cwd(), io, "data", .{});
 
     var it = try input_dir.walk(gpa);
     defer it.deinit();
@@ -108,26 +109,25 @@ fn packAll(gpa: std.mem.Allocator, io: std.Io) !void {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".manifest.zon")) continue;
 
-        try processManifest(arena, io, entry.dir, output_dir, entry.basename);
+        try processManifest(arena, io, entry.path);
     }
 
     _ = arena_impl.reset(.retain_capacity);
-
     var buffer: [1024]u8 = undefined;
+
+    // write the index
     const file = try output_dir.createFile(io, "index", .{});
     defer file.close(io);
     var writer = file.writer(io, &buffer);
-
     var asset_count: u32 = 0;
     var it_assets = try assets.iterator(arena);
     while (try it_assets.next()) |_| asset_count += 1;
     try writer.interface.writeInt(u32, asset_count, .little);
-
     it_assets = try assets.iterator(arena);
     while (try it_assets.next()) |kv| {
         const uuid = kv.key;
         const asset_info = kv.value_ptr.*;
-        log.debug("{s} -> {x}", .{ &uuid.stringify(), asset_info.content_hash });
+        // log.debug("{s} -> {x}", .{ &uuid.stringify(), asset_info.content_hash });
         try writer.interface.writeInt(u128, uuid.bits, .little);
         // TODO support other locations
         try (spiral.Location{
@@ -137,17 +137,15 @@ fn packAll(gpa: std.mem.Allocator, io: std.Io) !void {
     }
     try writer.interface.flush();
 
-    const preload_file = try output_dir.createFile(io, "preload", .{});
     // write preload files in order of their hash i guess? we want the layout to be stable
+    const preload_file = try output_dir.createFile(io, "preload", .{});
     defer preload_file.close(io);
 }
 
 fn processManifest(
     arena: std.mem.Allocator,
     io: std.Io,
-    input_dir: std.Io.Dir,
-    output_dir: std.Io.Dir,
-    path: []const u8,
+    path: [:0]const u8,
 ) !void {
     std.debug.assert(std.mem.endsWith(u8, path, ".manifest.zon"));
 
@@ -164,14 +162,14 @@ fn processManifest(
             return e;
         };
 
-    const raw_path = path[0 .. path.len - 13];
+    const raw_path = path[0 .. path.len - 13]; // remove .manifest.zon
     const extension = std.fs.path.extension(raw_path);
 
     const f = dispatch_table.get(extension) orelse {
         log.err("cannot parse {s}, unknown extension {s}", .{ raw_path, extension });
         return;
     };
-    const new_manifest = try f(arena, io, input_dir, output_dir, old_manifest, raw_path);
+    const new_manifest = try f(arena, io, path, old_manifest);
 
     const output_file = try input_dir.createFile(io, path, .{});
     defer output_file.close(io);
@@ -187,6 +185,7 @@ fn processManifest(
 
 const Config = union(enum) {
     txt,
+    slang,
 };
 
 const Asset = struct {
@@ -205,25 +204,33 @@ const Manifest = struct {
 const dispatch_table: std.StaticStringMap(*const fn (
     std.mem.Allocator,
     std.Io,
-    std.Io.Dir,
-    std.Io.Dir,
+    [:0]const u8,
     Manifest,
-    []const u8,
 ) anyerror!Manifest) = .initComptime(&.{
     .{ ".txt", processTxt },
+    .{ ".slang", processSlang },
 });
 
 // so, the manifest should be able to work from just the root uuid and nothing more
 // and then we let the process function identify subassets and complete/update the list
 // when we run add, we just always try to process the file also to build the manifest
 
+fn contentHash(bytes: []const u8) u128 {
+    var content_hasher_a = std.hash.XxHash3.init(0xc22cc9d473e8e35b);
+    var content_hasher_b = std.hash.Wyhash.init(0xa4e5461484c572b1);
+    content_hasher_a.update(bytes);
+    content_hasher_b.update(bytes);
+    const hash_a: u128 = content_hasher_a.final();
+    const hash_b: u128 = content_hasher_b.final();
+    const content_hash: u128 = hash_a << 64 | hash_b;
+    return content_hash;
+}
+
 fn processTxt(
     arena: std.mem.Allocator,
     io: std.Io,
-    input_dir: std.Io.Dir,
-    output_dir: std.Io.Dir,
+    path: [:0]const u8,
     old_manifest: Manifest,
-    filename: []const u8,
 ) !Manifest {
     std.debug.assert(old_manifest.assets.len <= 1);
 
@@ -252,40 +259,118 @@ fn processTxt(
         std.debug.assert(std.mem.eql(u8, old_manifest.assets[0].uuid, new_manifest.assets[0].uuid));
     }
 
-    var buffer: [16 * 1024]u8 = undefined;
-
     // read file and produce content hash
-    const input_file = try input_dir.openFile(io, filename, .{});
-    var reader = input_file.reader(io, &buffer);
-    var content_hasher_a = std.hash.XxHash3.init(0xc22cc9d473e8e35b);
-    var content_hasher_b = std.hash.XxHash3.init(0xa4e5461484c572b1);
-    var size: u64 = 0;
-    while (true) {
-        reader.interface.fillMore() catch |e| {
-            if (e == error.EndOfStream) break;
-            return e;
-        };
-        const buffered = reader.interface.buffered();
-        size += buffered.len;
-        content_hasher_a.update(buffered);
-        content_hasher_b.update(buffered);
-        reader.interface.tossBuffered();
-    }
-    const hash_a: u128 = content_hasher_a.final();
-    const hash_b: u128 = content_hasher_b.final();
-    const content_hash: u128 = hash_a << 64 | hash_b;
+    const bytes = try input_dir.readFileAlloc(io, path, arena, .unlimited);
+    const content_hash = contentHash(bytes);
     var content_hash_str: [32]u8 = undefined;
-    _ = std.fmt.bufPrint(&content_hash_str, "{x}", .{content_hash}) catch unreachable;
+    _ = std.fmt.bufPrint(&content_hash_str, "{x:0>32}", .{content_hash}) catch unreachable;
 
     _ = try assets.put(permanent_arena, child_uuid, .{
         .content_hash = content_hash,
         .destination = if (new_manifest.assets[0].preload) .preload else .bucket,
-        .size = size,
+        .size = bytes.len,
     });
-
     // for simple files with no processing, i think we might as well always copy
     // but in principle, if a file with the hash is already present then we should do nothing
-    try std.Io.Dir.copyFile(input_dir, filename, output_dir, &content_hash_str, io, .{});
+    try std.Io.Dir.copyFile(input_dir, path, output_dir, &content_hash_str, io, .{});
+
+    return new_manifest;
+}
+
+fn processSlang(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    path: [:0]const u8,
+    old_manifest: Manifest,
+) !Manifest {
+    std.debug.print("old_manifest {}\n", .{old_manifest});
+    // _ = arena;
+    // _ = io;
+    // _ = old_manifest;
+    // _ = filename;
+
+    const uuid: Uuid = try .parse(old_manifest.uuid);
+
+    const bytes = try input_dir.readFileAlloc(io, path, arena, .unlimited);
+    const content_hash = contentHash(bytes);
+    var content_hash_str: [32]u8 = undefined;
+    _ = std.fmt.bufPrint(&content_hash_str, "{x:0>32}", .{content_hash}) catch unreachable;
+
+    _ = try std.process.run(arena, io, .{
+        .argv = &.{
+            "slangc",
+            "-target",
+            "spirv",
+            try std.fmt.allocPrint(arena, "raw/{s}", .{path[0 .. path.len - 13]}),
+            "-reflection-json",
+            try std.fmt.allocPrint(arena, "tmp/{s}", .{content_hash_str}),
+        },
+    });
+    const json_bytes = try tmp_dir.readFileAlloc(io, &content_hash_str, arena, .unlimited);
+    const reflection = try std.json.parseFromSlice(struct {
+        entryPoints: []struct { name: []const u8, stage: []const u8 },
+    }, arena, json_bytes, .{
+        .ignore_unknown_fields = true,
+    });
+
+    const new_manifest: Manifest = .{
+        .uuid = old_manifest.uuid,
+        .assets = try arena.alloc(Asset, reflection.value.entryPoints.len),
+    };
+
+    for (reflection.value.entryPoints, 0..) |entry_point, i| {
+        const child_uuid = uuid.child(entry_point.name);
+        std.debug.print("{s} {s}\n", .{ entry_point.name, entry_point.stage });
+        _ = try std.process.run(arena, io, .{
+            .argv = &.{
+                "slangc",
+                "-target",
+                "spirv",
+                "-entry",
+                entry_point.name,
+                "-stage",
+                entry_point.stage,
+                try std.fmt.allocPrint(arena, "raw/{s}", .{path[0 .. path.len - 13]}),
+                "-o",
+                try std.fmt.allocPrint(arena, "tmp/{s}", .{content_hash_str}),
+            },
+        });
+        const spv_bytes = try tmp_dir.readFileAlloc(io, &content_hash_str, arena, .unlimited);
+        const child_content_hash = contentHash(spv_bytes);
+        var child_content_hash_str: [32]u8 = undefined;
+        _ = std.fmt.bufPrint(
+            &child_content_hash_str,
+            "{x:0>32}",
+            .{child_content_hash},
+        ) catch unreachable;
+
+        // copy the old config into place if present
+        for (old_manifest.assets) |asset| {
+            if (!std.mem.eql(u8, asset.subresource_name, entry_point.name)) continue;
+            new_manifest.assets[i] = asset;
+            break;
+        } else {
+            new_manifest.assets[i] = .{
+                .uuid = try arena.dupe(u8, &child_uuid.stringify()),
+                .config = .{ .slang = {} },
+                .subresource_name = entry_point.name,
+            };
+        }
+
+        _ = try assets.put(permanent_arena, child_uuid, .{
+            .content_hash = content_hash,
+            .destination = if (new_manifest.assets[i].preload) .preload else .bucket,
+            .size = spv_bytes.len,
+        });
+        try std.Io.Dir.copyFile(
+            tmp_dir,
+            &content_hash_str,
+            output_dir,
+            &child_content_hash_str,
+            io,
+            .{},
+        );
+    }
 
     return new_manifest;
 }
@@ -293,15 +378,13 @@ fn processTxt(
 fn processGltf(
     arena: std.mem.Allocator,
     io: std.Io,
-    input_dir: std.Io.Dir,
-    output_dir: std.Io.Dir,
+    dir: std.Io.Dir,
+    filename: [:0]const u8,
     old_manifest: Manifest,
-    filename: []const u8,
 ) !Manifest {
     _ = arena;
     _ = io;
-    _ = input_dir;
-    _ = output_dir;
+    _ = dir;
     _ = old_manifest;
     _ = filename;
 }

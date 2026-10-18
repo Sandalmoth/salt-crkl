@@ -17,7 +17,7 @@ const Event = union(enum) {
 };
 
 pub const Location = struct {
-    size: u64, // size of the (decompressed) asset
+    size: u64, // of the (decompressed) asset
     location: union(enum) {
         bucket: struct {
             index: u32,
@@ -123,8 +123,10 @@ pub fn Future(comptime T: type) type {
                 self.remote = null;
             }
 
+            // NOTE aligncastis safe because we have @alignOf(T) alignment during alloc
             const info = @typeInfo(T);
-            const result = try self.result;
+            const result: []align(@alignOf(info.pointer.child)) u8 =
+                @alignCast(try self.result);
             if (info == .void) return;
             std.debug.assert(info == .pointer);
             if (info.pointer.size == .one)
@@ -150,6 +152,7 @@ pub const Storage = struct {
         remote: *Remote,
         location: Location,
         gpa: std.mem.Allocator,
+        alignment: usize,
     };
 
     gpa: std.mem.Allocator,
@@ -259,6 +262,7 @@ pub const Storage = struct {
                 .remote = remote,
                 .location = src,
                 .gpa = gpa,
+                .alignment = @alignOf(T),
             });
             return .{ .remote = remote, .storage = storage, .result = undefined };
         }
@@ -333,12 +337,12 @@ pub const Storage = struct {
                     "{x}",
                     .{req.location.location.file},
                 ) catch unreachable;
-                const dst = storage.dir.readFileAlloc(
-                    storage.io,
-                    &content_hash_str,
-                    req.gpa,
-                    .limited(req.location.size + 1), // i don't understand why we need the +1
-                ) catch |e| {
+                const dst = req.gpa.alignedAlloc(
+                    u8,
+                    .fromByteUnits(req.location.alignment),
+                    req.alignment.size,
+                );
+                storage.dir.readFile(storage.io, &content_hash_str, dst) catch |e| {
                     log.err(
                         "failed to load from file {s} with error {}",
                         .{ &content_hash_str, e },
@@ -346,14 +350,6 @@ pub const Storage = struct {
                     req.remote.result = error.Content;
                     continue;
                 };
-                if (dst.len != req.location.size) {
-                    log.err(
-                        "file {s} is size {} but expected {}",
-                        .{ &content_hash_str, dst.len, req.location.size },
-                    );
-                    req.remote.result = error.Content;
-                    continue;
-                }
 
                 req.remote.result = dst;
             }

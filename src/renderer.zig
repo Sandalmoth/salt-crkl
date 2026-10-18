@@ -546,12 +546,11 @@ fn loadModel(renderer: *Self, uuid: spiral.Uuid) !*Model {
 }
 
 fn _testSetup(renderer: *Self) !void {
-    std.debug.print("yo\n", .{});
+    std.debug.print("--- start testSetup ---\n", .{});
 
     var arena_impl: std.heap.ArenaAllocator = .init(renderer.gpa);
     defer arena_impl.deinit();
     const arena = arena_impl.allocator();
-    _ = arena;
 
     const cube_vertices: [8]VertexGeometry = .{
         .{ .position = .{ -0.5, -0.5, -0.5 }, .texcoord = .{ 0, 0 } },
@@ -566,4 +565,37 @@ fn _testSetup(renderer: *Self) !void {
     try renderer.upload_allocator.bufferUpload(std.mem.asBytes(
         &cube_vertices,
     ), renderer.vertex_geometry_buffer, 0, false);
+
+    const cube_indices: [12][3]u32 = .{
+        .{ 1, 3, 0 },
+        .{ 3, 2, 0 },
+        .{ 4, 6, 5 },
+        .{ 6, 7, 5 },
+        .{ 0, 4, 1 },
+        .{ 4, 5, 1 },
+        .{ 3, 7, 2 },
+        .{ 7, 6, 2 },
+        .{ 0, 2, 4 },
+        .{ 2, 6, 4 },
+        .{ 5, 7, 1 },
+        .{ 7, 3, 1 },
+    };
+    try renderer.upload_allocator.bufferUpload(std.mem.asBytes(
+        &cube_indices,
+    ), renderer.index_buffer, 0, false);
+
+    var fragment_spv = try renderer.storage.load(
+        []u32,
+        arena,
+        try .parse("34HFP8KF5S227JF792V5WZFM3W"),
+    );
+    var vertex_spv = try renderer.storage.load(
+        []u32,
+        arena,
+        try .parse("4J08V27W21FMP2N92F5J2VG48B"),
+    );
+    _ = try fragment_spv.await();
+    _ = try vertex_spv.await();
+
+    std.debug.print("--- end testSetup ---\n", .{});
 }
