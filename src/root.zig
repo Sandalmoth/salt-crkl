@@ -36,7 +36,7 @@ pub const Context = struct {
     io_impl: std.Io.Threaded,
     io: std.Io,
 
-    storage: spiral.Storage,
+    storage: *spiral.Storage,
 
     window: *sdl.Window,
     renderer: Renderer,
@@ -68,10 +68,12 @@ pub const Context = struct {
         );
         errdefer sdl.destroyWindow(ctx.window);
 
+        ctx.storage = try .init(gpa, ctx.io, .{});
+
         try ctx.renderer.init(gpa, ctx.blka, ctx.io, ctx.window, .{
             .width = config.window.width,
             .height = config.window.height,
-        }, &ctx.storage);
+        }, ctx.storage);
         errdefer ctx.renderer.deinit();
 
         var seed: u32 = undefined;

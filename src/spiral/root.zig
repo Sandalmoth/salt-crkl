@@ -174,13 +174,12 @@ pub const Storage = struct {
     pub fn init(
         gpa: std.mem.Allocator,
         io: std.Io,
-        path: []const u8,
         config: StorageConfig,
     ) !*Storage {
         const storage = try gpa.create(Storage);
         errdefer gpa.destroy(storage);
 
-        const dir: std.Io.Dir = try .openDir(.cwd(), io, path, .{});
+        const dir: std.Io.Dir = try .openDir(.cwd(), io, "data", .{});
         errdefer dir.close(io);
 
         const queue_buffer = try gpa.alloc(LoadRequest, config.capacity);
@@ -337,12 +336,15 @@ pub const Storage = struct {
                     "{x}",
                     .{req.location.location.file},
                 ) catch unreachable;
-                const dst = req.gpa.alignedAlloc(
-                    u8,
-                    .fromByteUnits(req.location.alignment),
-                    req.alignment.size,
-                );
-                storage.dir.readFile(storage.io, &content_hash_str, dst) catch |e| {
+                const dst = (req.gpa.rawAlloc(
+                    req.location.size,
+                    .fromByteUnits(req.alignment),
+                    @returnAddress(),
+                ) orelse {
+                    req.remote.result = error.OutOfMemory;
+                    continue;
+                })[0..req.location.size];
+                _ = storage.dir.readFile(storage.io, &content_hash_str, dst) catch |e| {
                     log.err(
                         "failed to load from file {s} with error {}",
                         .{ &content_hash_str, e },
