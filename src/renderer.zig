@@ -586,19 +586,19 @@ fn _testSetup(renderer: *Self) !void {
 
     var vertex_future = try renderer.storage.load(
         arena,
-        try .parse("4J08V27W21FMP2N92F5J2VG48B"),
+        try .parse("3649X98QWPGM8GPAXNAW6PJW1R"),
     );
     const vertex_bytes = try vertex_future.await();
     var fragment_future = try renderer.storage.load(
         arena,
-        try .parse("34HFP8KF5S227JF792V5WZFM3W"),
+        try .parse("7VFRQ770Y7EPQGF2VZZWP7Q97H"),
     );
     const fragment_bytes = try fragment_future.await();
 
     const vertex_shader = try sdl.createGPUShader(renderer.device, &.{
         .code_size = vertex_bytes.len,
         .code = vertex_bytes.ptr,
-        .entrypoint = "vertexMain",
+        .entrypoint = "main",
         .format = sdl.c.SDL_GPU_SHADERFORMAT_SPIRV,
         .stage = sdl.c.SDL_GPU_SHADERSTAGE_VERTEX,
         // CONSIDER: we could parse these out and store in the asset together with the spv
@@ -611,7 +611,7 @@ fn _testSetup(renderer: *Self) !void {
     const fragment_shader = try sdl.createGPUShader(renderer.device, &.{
         .code_size = fragment_bytes.len,
         .code = fragment_bytes.ptr,
-        .entrypoint = "fragmentMain",
+        .entrypoint = "main",
         .format = sdl.c.SDL_GPU_SHADERFORMAT_SPIRV,
         .stage = sdl.c.SDL_GPU_SHADERSTAGE_FRAGMENT,
         // CONSIDER: we could parse these out and store in the asset together with the spv
