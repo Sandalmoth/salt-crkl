@@ -358,7 +358,7 @@ fn processSlang(
         }
 
         _ = try assets.put(permanent_arena, child_uuid, .{
-            .content_hash = content_hash,
+            .content_hash = child_content_hash,
             .destination = if (new_manifest.assets[i].preload) .preload else .bucket,
             .size = spv_bytes.len,
         });

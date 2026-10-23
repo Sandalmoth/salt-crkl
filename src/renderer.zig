@@ -584,18 +584,65 @@ fn _testSetup(renderer: *Self) !void {
         &cube_indices,
     ), renderer.index_buffer, 0, false);
 
-    var fragment_spv = try renderer.storage.load(
-        []u32,
-        arena,
-        try .parse("34HFP8KF5S227JF792V5WZFM3W"),
-    );
-    var vertex_spv = try renderer.storage.load(
-        []u32,
+    var vertex_future = try renderer.storage.load(
         arena,
         try .parse("4J08V27W21FMP2N92F5J2VG48B"),
     );
-    _ = try fragment_spv.await();
-    _ = try vertex_spv.await();
+    const vertex_bytes = try vertex_future.await();
+    var fragment_future = try renderer.storage.load(
+        arena,
+        try .parse("34HFP8KF5S227JF792V5WZFM3W"),
+    );
+    const fragment_bytes = try fragment_future.await();
+
+    const vertex_shader = try sdl.createGPUShader(renderer.device, &.{
+        .code_size = vertex_bytes.len,
+        .code = vertex_bytes.ptr,
+        .entrypoint = "vertexMain",
+        .format = sdl.c.SDL_GPU_SHADERFORMAT_SPIRV,
+        .stage = sdl.c.SDL_GPU_SHADERSTAGE_VERTEX,
+        // CONSIDER: we could parse these out and store in the asset together with the spv
+        .num_samplers = 0,
+        .num_storage_textures = 0,
+        .num_storage_buffers = 1,
+        .num_uniform_buffers = 1,
+    });
+    defer sdl.releaseGPUShader(renderer.device, vertex_shader);
+    const fragment_shader = try sdl.createGPUShader(renderer.device, &.{
+        .code_size = fragment_bytes.len,
+        .code = fragment_bytes.ptr,
+        .entrypoint = "fragmentMain",
+        .format = sdl.c.SDL_GPU_SHADERFORMAT_SPIRV,
+        .stage = sdl.c.SDL_GPU_SHADERSTAGE_FRAGMENT,
+        // CONSIDER: we could parse these out and store in the asset together with the spv
+        .num_samplers = 0,
+        .num_storage_textures = 0,
+        .num_storage_buffers = 0,
+        .num_uniform_buffers = 0,
+    });
+    defer sdl.releaseGPUShader(renderer.device, fragment_shader);
+
+    const pipeline = try sdl.createGPUGraphicsPipeline(renderer.device, &.{
+        .vertex_shader = vertex_shader,
+        .fragment_shader = fragment_shader,
+        .primitive_type = sdl.c.SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+        .rasterizer_state = .{
+            .front_face = sdl.c.SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE,
+            .cull_mode = sdl.c.SDL_GPU_CULLMODE_BACK,
+        },
+        .depth_stencil_state = .{
+            .compare_op = sdl.c.SDL_GPU_COMPAREOP_GREATER,
+            .enable_depth_test = true,
+            .enable_depth_write = true,
+        },
+        // .target_info = .{
+        //     .color_target_descriptions = null,
+        //     .num_color_targets = 0,
+        //     .depth_stencil_format = @intCast(depth_stencil_format),
+        //     .has_depth_stencil_target = true,
+        // },
+    });
+    errdefer sdl.releaseGPUGraphicsPipeline(renderer.device, pipeline);
 
     std.debug.print("--- end testSetup ---\n", .{});
 }

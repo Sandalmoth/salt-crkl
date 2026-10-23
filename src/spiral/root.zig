@@ -4,6 +4,8 @@ pub const Uuid = @import("Uuid.zig");
 
 const log = std.log.scoped(.spiral);
 
+pub const asset_alignment = 16; // everything loads with this minimum alignment
+
 pub const Error = error{
     Content,
     OutOfMemory,
@@ -101,46 +103,33 @@ const Remote = struct {
     result: Error![]u8,
 };
 
-pub fn Future(comptime T: type) type {
-    return struct {
-        remote: ?*Remote,
-        storage: *Storage,
-        result: Error![]u8,
+const Future = struct {
+    remote: ?*Remote,
+    storage: *Storage,
+    result: Error![]u8,
 
-        pub fn poll(self: @This()) bool {
-            if (self.remote) |remote| return remote.event.isSet();
-            return true;
+    pub fn poll(self: @This()) bool {
+        if (self.remote) |remote| return remote.event.isSet();
+        return true;
+    }
+
+    pub fn await(self: *@This()) ![]u8 {
+        if (self.remote) |remote| {
+            try remote.event.wait(self.storage.io);
+            self.result = remote.result;
+
+            try self.storage.mutex.lock(self.storage.io);
+            self.storage.events.destroy(remote);
+            self.storage.mutex.unlock(self.storage.io);
+            self.remote = null;
         }
+        return self.result;
+    }
 
-        pub fn await(self: *@This()) !T {
-            if (self.remote) |remote| {
-                try remote.event.wait(self.storage.io);
-                self.result = remote.result;
-
-                try self.storage.mutex.lock(self.storage.io);
-                self.storage.events.destroy(remote);
-                self.storage.mutex.unlock(self.storage.io);
-                self.remote = null;
-            }
-
-            // NOTE aligncastis safe because we have @alignOf(T) alignment during alloc
-            const info = @typeInfo(T);
-            const result: []align(@alignOf(info.pointer.child)) u8 =
-                @alignCast(try self.result);
-            if (info == .void) return;
-            std.debug.assert(info == .pointer);
-            if (info.pointer.size == .one)
-                return std.mem.bytesAsValue(info.pointer.child, result);
-            if (info.pointer.size == .slice)
-                return std.mem.bytesAsSlice(info.pointer.child, result);
-            unreachable;
-        }
-
-        pub fn cancel(self: *@This()) !T {
-            return self.await(); // TODO request cancellation by setting a flag in the remote?
-        }
-    };
-}
+    pub fn cancel(self: *@This()) ![]u8 {
+        return self.await(); // TODO request cancellation by setting a flag in the remote
+    }
+};
 
 pub const StorageConfig = struct {
     capacity: u32 = 1024,
@@ -152,7 +141,6 @@ pub const Storage = struct {
         remote: *Remote,
         location: Location,
         gpa: std.mem.Allocator,
-        alignment: usize,
     };
 
     gpa: std.mem.Allocator,
@@ -239,10 +227,9 @@ pub const Storage = struct {
 
     pub fn load(
         storage: *Storage,
-        comptime T: type,
         gpa: std.mem.Allocator,
         uuid: Uuid,
-    ) !Future(T) {
+    ) !Future {
         const src = storage.index.get(uuid) orelse {
             log.err("uuid {s} is not in index", .{&uuid.stringify()});
             return error.Uuid;
@@ -261,67 +248,10 @@ pub const Storage = struct {
                 .remote = remote,
                 .location = src,
                 .gpa = gpa,
-                .alignment = @alignOf(T),
             });
             return .{ .remote = remote, .storage = storage, .result = undefined };
         }
     }
-
-    // pub fn alloc(storage: *Storage, comptime T: type, gpa: std.mem.Allocator, uuid: Uuid) ![]T {
-    //     try storage.mutex.lock(storage.io);
-    //     defer storage.mutex.unlock(storage.io);
-
-    //     const src = storage.index.get(uuid) orelse {
-    //         log.err("uuid {s} is not in index", .{&uuid.stringify()});
-    //         return error.Invalid;
-    //     };
-    //     return try gpa.alloc(T, @divExact(src.size, @sizeOf(T)));
-    // }
-
-    // pub fn create(storage: *Storage, comptime T: type, gpa: std.mem.Allocator, uuid: Uuid) !*T {
-    //     try storage.mutex.lock(storage.io);
-    //     defer storage.mutex.unlock(storage.io);
-
-    //     const src = storage.index.get(uuid) orelse {
-    //         log.err("uuid {s} is not in index", .{&uuid.stringify()});
-    //         return error.Invalid;
-    //     };
-    //     std.debug.assert(@sizeOf(T) == src.size);
-    //     return try gpa.create(T);
-    // }
-
-    // pub fn load(
-    //     storage: *Storage,
-    //     uuid: Uuid,
-    //     dst: []u8,
-    // ) !Future {
-    //     try storage.mutex.lock(storage.io);
-    //     defer storage.mutex.unlock(storage.io);
-
-    //     const src = storage.index.get(uuid) orelse {
-    //         log.err("uuid {s} is not in index", .{&uuid.stringify()});
-    //         return error.Invalid;
-    //     };
-    //     std.debug.assert(src.size == dst.len);
-
-    //     if (src.location == .preload) {
-    //         @memcpy(dst, storage.preload[src.location.preload .. src.location.preload + src.size]);
-    //         return .{ .remote = null, .storage = storage };
-    //     } else {
-    //         const remote = try storage.events.create();
-    //         errdefer storage.events.destroy(remote);
-    //         remote.event.reset();
-    //         remote.result = {};
-    //         try storage.queue.putOne(storage.io, .{
-    //             .location = src,
-    //             .dst = dst,
-    //             .remote = remote,
-    //         });
-    //         return .{ .remote = remote, .storage = storage };
-    //     }
-
-    //     unreachable;
-    // }
 
     fn worker(storage: *Storage) !void {
         while (true) {
@@ -329,26 +259,26 @@ pub const Storage = struct {
             std.debug.assert(req.location.location != .preload);
 
             if (req.location.location == .file) {
-                // const file = req.location.location.file;
                 var content_hash_str: [32]u8 = undefined;
                 _ = std.fmt.bufPrint(
                     &content_hash_str,
                     "{x}",
                     .{req.location.location.file},
                 ) catch unreachable;
-                const dst = (req.gpa.rawAlloc(
+                const dst = req.gpa.alignedAlloc(
+                    u8,
+                    .fromByteUnits(asset_alignment),
                     req.location.size,
-                    .fromByteUnits(req.alignment),
-                    @returnAddress(),
-                ) orelse {
+                ) catch {
                     req.remote.result = error.OutOfMemory;
                     continue;
-                })[0..req.location.size];
+                };
                 _ = storage.dir.readFile(storage.io, &content_hash_str, dst) catch |e| {
                     log.err(
                         "failed to load from file {s} with error {}",
                         .{ &content_hash_str, e },
                     );
+                    req.gpa.free(dst);
                     req.remote.result = error.Content;
                     continue;
                 };

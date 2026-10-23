@@ -69,6 +69,7 @@ pub const Context = struct {
         errdefer sdl.destroyWindow(ctx.window);
 
         ctx.storage = try .init(gpa, ctx.io, .{});
+        errdefer ctx.storage.deinit();
 
         try ctx.renderer.init(gpa, ctx.blka, ctx.io, ctx.window, .{
             .width = config.window.width,
