@@ -157,7 +157,7 @@ fn processManifest(
             log.err("failed to parse manifest {s}", .{path});
             var it = diagnostics.iterateErrors();
             while (it.next()) |diag| {
-                std.debug.print("  {}\n", .{diag});
+                log.warn("  {}", .{diag});
             }
             return e;
         };
@@ -289,7 +289,6 @@ fn processGlsl(
     const child_uuid = uuid.child("");
     const spv_path = try std.fmt.allocPrint(arena, "tmp/{s}", .{old_manifest.uuid});
 
-    std.debug.print("{s}\n", .{try std.fmt.allocPrint(arena, "raw/{s}", .{path[0 .. path.len - 13]})});
     const result = try std.process.run(arena, io, .{
         .argv = &.{
             "glslc",
@@ -300,11 +299,10 @@ fn processGlsl(
         },
     });
     if (result.term.exited != 0) {
-        std.debug.print("{s}\n", .{result.stderr});
-        std.debug.print("{s}\n", .{result.stderr});
+        log.warn("{s}", .{result.stdout});
+        log.warn("{s}", .{result.stderr});
+        return error.Invalid; // TODO we should handle this by skipping and keeping what already exists
     }
-    std.debug.print("{s}\n", .{result.stdout});
-    std.debug.print("{s}\n", .{result.stderr});
     const bytes = try tmp_dir.readFileAlloc(io, old_manifest.uuid, arena, .unlimited);
     const content_hash = contentHash(bytes);
     var content_hash_str: [32]u8 = undefined;

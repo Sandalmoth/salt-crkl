@@ -10,6 +10,9 @@ pub const sdl = @import("sdl.zig");
 pub const max_instances = 1024 * 1024;
 pub const max_models = 64 * 1024;
 
+const hdr_format = sdl.c.SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+const sdr_format = sdl.c.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB;
+
 const Self = @This();
 
 pub const VertexGeometry = extern struct {
@@ -269,10 +272,11 @@ storage: *spiral.Storage,
 pages: std.ArrayList(*Page),
 
 upload_allocator: UploadAllocator,
-download_buffer: *sdl.GPUTransferBuffer,
 
+depth_stencil_format: sdl.c.SDL_GPUTextureFormat,
 hdr_backbuffer: *sdl.GPUTexture,
 sdr_backbuffer: *sdl.GPUTexture,
+depth_backbuffer: *sdl.GPUTexture,
 
 // instance_allocator: mem.SlotAllocator,
 // instance_map: std.HashMapUnmanaged(Key, struct { slot: u32, refcount: u32 }, Key.HashContext, 80),
@@ -332,11 +336,12 @@ pub fn init(
     errdefer sdl.destroyGPUDevice(device);
     try sdl.claimWindowForGPUDevice(device, window);
 
-    const download_buffer = try sdl.createGPUTransferBuffer(device, &.{
-        .usage = sdl.c.SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD,
-        .size = 64 * 1024 * 1024,
-    });
-    errdefer sdl.releaseGPUTransferBuffer(device, download_buffer);
+    const depth_stencil_format = if (sdl.c.SDL_GPUTextureSupportsFormat(
+        device,
+        sdl.c.SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+        sdl.c.SDL_GPU_TEXTURETYPE_2D,
+        sdl.c.SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET,
+    )) sdl.c.SDL_GPU_TEXTUREFORMAT_D32_FLOAT else sdl.c.SDL_GPU_TEXTUREFORMAT_D24_UNORM;
 
     const hdr_backbuffer = try sdl.createGPUTexture(device, &.{
         .type = sdl.c.SDL_GPU_TEXTURETYPE_2D,
@@ -361,6 +366,17 @@ pub fn init(
         .sample_count = sdl.c.SDL_GPU_SAMPLECOUNT_1,
     });
     errdefer sdl.releaseGPUTexture(device, sdr_backbuffer);
+    const depth_backbuffer = try sdl.createGPUTexture(device, &.{
+        .type = sdl.c.SDL_GPU_TEXTURETYPE_2D,
+        .format = depth_stencil_format,
+        .usage = sdl.c.SDL_GPU_TEXTUREUSAGE_COLOR_TARGET,
+        .width = config.width,
+        .height = config.height,
+        .layer_count_or_depth = 1,
+        .num_levels = 1,
+        .sample_count = sdl.c.SDL_GPU_SAMPLECOUNT_1,
+    });
+    errdefer sdl.releaseGPUTexture(device, depth_backbuffer);
 
     // TODO think about how to size these, probably just add to config with usage logs?
     const index_buffer = try sdl.createGPUBuffer(device, &.{
@@ -635,12 +651,12 @@ fn _testSetup(renderer: *Self) !void {
             .enable_depth_test = true,
             .enable_depth_write = true,
         },
-        // .target_info = .{
-        //     .color_target_descriptions = null,
-        //     .num_color_targets = 0,
-        //     .depth_stencil_format = @intCast(depth_stencil_format),
-        //     .has_depth_stencil_target = true,
-        // },
+        .target_info = .{
+            .color_target_descriptions = &.{ .format = hdr_format },
+            .num_color_targets = 0,
+            .depth_stencil_format = @intCast(renderer.depth_stencil_format),
+            .has_depth_stencil_target = true,
+        },
     });
     errdefer sdl.releaseGPUGraphicsPipeline(renderer.device, pipeline);
 
