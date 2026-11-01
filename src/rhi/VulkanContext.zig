@@ -1606,6 +1606,7 @@ fn submit(
         // in the same way, we should only insert semaphores between queues that have a dependency
         // and we should make the semaphore stage mask as narrow as possible
         // this is purely a get-it-to-work implementation
+        std.debug.print("submit translated pool\n", .{});
         try queue.queue.submit2(&[_]vk.SubmitInfo2{.{
             .command_buffer_info_count = 1,
             .p_command_buffer_infos = @ptrCast(&[_]vk.CommandBufferSubmitInfo{.{
@@ -1797,6 +1798,7 @@ fn submit(
         ctx.device.cmdEndRendering(graphics_command_pool.body);
     }
     try ctx.device.endCommandBuffer(graphics_command_pool.body);
+    std.debug.print("submit blit\n", .{});
     try graphics_queue.queue.submit2(&[_]vk.SubmitInfo2{.{
         .command_buffer_info_count = 1,
         .p_command_buffer_infos = @ptrCast(&[_]vk.CommandBufferSubmitInfo{.{
@@ -1865,21 +1867,14 @@ fn submit(
         swapchain.acquired = false;
     }
 
-    try release_semaphore_infos.append(arena, .{
-        .semaphore = present_queue.semaphore,
-        .value = present_queue.value + 1,
-        .stage_mask = .{ .all_commands = true },
-        .device_index = 0,
-    });
-    present_queue.value += 1;
-
     if (presents.len > 0) {
         try release_semaphore_infos.append(arena, .{
             .semaphore = present_queue.semaphore,
             .stage_mask = .{ .all_commands = true },
             .device_index = 0,
-            .value = present_queue.value,
+            .value = present_queue.value + 1,
         });
+        present_queue.value += 1;
 
         try ctx.device.beginCommandBuffer(present_command_pool.body, &.{
             .flags = .{ .one_time_submit = true },
@@ -1898,6 +1893,7 @@ fn submit(
         });
         try ctx.device.endCommandBuffer(present_command_pool.body);
 
+        std.debug.print("submit present\n", .{});
         try present_queue.queue.submit2(&[_]vk.SubmitInfo2{.{
             .command_buffer_info_count = 1,
             .p_command_buffer_infos = @ptrCast(&[_]vk.CommandBufferSubmitInfo{.{

@@ -129,6 +129,7 @@ pub fn main() !void {
     }
 
     main_loop: while (true) {
+        std.debug.print("yo\n", .{});
         _ = arena_struct.reset(.retain_capacity);
 
         var event: sdl.Event = undefined;
