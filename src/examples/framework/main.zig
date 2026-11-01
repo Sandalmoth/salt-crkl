@@ -16,9 +16,9 @@ pub fn main(init: std.process.Init) !void {
     });
     defer ctx.deinit();
 
-    const W = sc.ecs.World(struct { x: u32 });
-    var w: W = .init(gpa, ctx.blka, &ctx.keygen);
-    defer w.deinit();
+    // const W = sc.ecs.World(struct { x: u32 });
+    // var w: W = .init(gpa, ctx.blka, &ctx.keygen);
+    // defer w.deinit();
 
     main_loop: while (true) {
         _ = arena_impl.reset(.retain_capacity);

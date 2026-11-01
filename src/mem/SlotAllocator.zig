@@ -451,7 +451,7 @@ test "fuzz: random acquire/release against a model" {
     var alloc = try SlotAllocator.init(testing.allocator, capacity);
     defer alloc.deinit(testing.allocator);
 
-    var occupied = [_]bool{false} ** capacity;
+    var occupied: [capacity]bool = @splat(false);
     var held: [capacity]u32 = undefined;
     var held_len: usize = 0;
 

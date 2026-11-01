@@ -151,12 +151,16 @@ fn processManifest(
 
     const bytes =
         try raw_dir.readFileAllocOptions(io, path, arena, .limited(1024 * 1024), .@"1", 0);
-    var diagnostics: std.zon.parse.Diagnostics = .{};
+    var diagnostics: std.zon.parse.Diagnostics = .{ .errors = &.{} };
     const old_manifest =
-        std.zon.parse.fromSliceAlloc(Manifest, arena, bytes, &diagnostics, .{}) catch |e| {
+        std.zon.parse.fromSlice(Manifest, .{
+            .gpa = arena,
+            .arena = arena,
+            .source = bytes,
+            .diagnostics = &diagnostics,
+        }) catch |e| {
             log.err("failed to parse manifest {s}", .{path});
-            var it = diagnostics.iterateErrors();
-            while (it.next()) |diag| {
+            for (diagnostics.errors) |diag| {
                 log.warn("  {}", .{diag});
             }
             return e;

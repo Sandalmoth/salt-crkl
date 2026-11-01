@@ -110,12 +110,12 @@ pub fn main() !void {
         // FIXME until after the submit fence
 
         const indices = try upload_allocator.alloc(u32, 6);
-        defer upload_allocator.free(indices);
+        // defer upload_allocator.free(indices);
         indices[0..6].* = .{ 0, 1, 2, 1, 3, 2 };
         try command_buffer.bufferUpload(indices, index_buffer, 0);
 
         const vertices = try upload_allocator.alloc([4]f32, 4);
-        defer upload_allocator.free(vertices);
+        // defer upload_allocator.free(vertices);
         vertices[0..4].* = .{
             .{ 1.0, 1.0, 0.5, 0.0 },
             .{ 1.0, -1.0, 0.5, 0.0 },
@@ -393,14 +393,14 @@ pub fn main() !void {
 }
 
 fn getInstanceProcAddress(
-    instance: rhi.Vulkan.vk.Instance,
+    instance: ?*anyopaque,
     procname: [*:0]const u8,
 ) rhi.Vulkan.vk.PfnVoidFunction {
     const raw = sdl.c.SDL_Vulkan_GetVkGetInstanceProcAddr() orelse {
         std.log.err("SDL_Vulkan_GetVkGetInstanceProcAddr: {s}", .{sdl.getError()});
         @panic("unrecoverable");
     };
-    return @as(rhi.Vulkan.vk.PfnGetInstanceProcAddr, @ptrCast(raw))(instance, procname);
+    return @as(rhi.Vulkan.vk.PfnGetInstanceProcAddr, @ptrCast(raw))(@ptrCast(instance), procname);
 }
 
 fn getRequiredInstanceExtensions() ![]const [*:0]const u8 {
@@ -415,13 +415,13 @@ fn getRequiredInstanceExtensions() ![]const [*:0]const u8 {
 }
 
 fn createWindowSurface(instance: rhi.Vulkan.vk.Instance, window: *anyopaque) !rhi.Vulkan.vk.SurfaceKHR {
-    const instance_ptr: ?*sdl.c.struct_VkInstance_T = @ptrFromInt(@intFromEnum(instance));
+    const instance_ptr: ?*sdl.c.struct_VkInstance_T = @ptrCast(instance);
     var surface_ptr: ?*sdl.c.struct_VkSurfaceKHR_T = null;
     if (!sdl.c.SDL_Vulkan_CreateSurface(@ptrCast(window), instance_ptr, null, &surface_ptr)) {
         std.log.err("SDL_Vulkan_CreateSurface: {s}", .{sdl.getError()});
         return error.Platform;
     }
-    return @enumFromInt(@intFromPtr(surface_ptr));
+    return @fromBackingInt(@intCast(@intFromPtr(surface_ptr)));
 }
 
 fn getFramebufferSize(window: *anyopaque) !rhi.Vulkan.vk.Extent2D {

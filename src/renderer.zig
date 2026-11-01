@@ -336,12 +336,15 @@ pub fn init(
     errdefer sdl.destroyGPUDevice(device);
     try sdl.claimWindowForGPUDevice(device, window);
 
-    const depth_stencil_format = if (sdl.c.SDL_GPUTextureSupportsFormat(
-        device,
-        sdl.c.SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
-        sdl.c.SDL_GPU_TEXTURETYPE_2D,
-        sdl.c.SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET,
-    )) sdl.c.SDL_GPU_TEXTUREFORMAT_D32_FLOAT else sdl.c.SDL_GPU_TEXTUREFORMAT_D24_UNORM;
+    // what the fuck is up with this intcast?
+    const depth_stencil_format: sdl.c.SDL_GPUTextureFormat = @intCast(
+        if (sdl.c.SDL_GPUTextureSupportsFormat(
+            device,
+            sdl.c.SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+            sdl.c.SDL_GPU_TEXTURETYPE_2D,
+            sdl.c.SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET,
+        )) sdl.c.SDL_GPU_TEXTUREFORMAT_D32_FLOAT else sdl.c.SDL_GPU_TEXTUREFORMAT_D24_UNORM,
+    );
 
     const hdr_backbuffer = try sdl.createGPUTexture(device, &.{
         .type = sdl.c.SDL_GPU_TEXTURETYPE_2D,
@@ -458,15 +461,16 @@ pub fn init(
         .blka = _blka,
         .io = _io,
         .config = config,
+        .depth_stencil_format = depth_stencil_format,
         .mutex = .init,
         .storage = storage,
         .window = window,
         .upload_allocator = undefined,
-        .download_buffer = download_buffer,
         .pages = .empty,
         .model_map = .empty,
         .hdr_backbuffer = hdr_backbuffer,
         .sdr_backbuffer = sdr_backbuffer,
+        .depth_backbuffer = depth_backbuffer,
         .index_buffer = index_buffer,
         .vertex_geometry_buffer = vertex_geometry_buffer,
         .vertex_material_buffer = vertex_material_buffer,
@@ -490,7 +494,6 @@ pub fn init(
 
 pub fn deinit(renderer: *Self) void {
     renderer.upload_allocator.deinit();
-    sdl.releaseGPUTransferBuffer(renderer.device, renderer.download_buffer);
 
     sdl.releaseGPUTexture(renderer.device, renderer.hdr_backbuffer);
     sdl.releaseGPUTexture(renderer.device, renderer.sdr_backbuffer);

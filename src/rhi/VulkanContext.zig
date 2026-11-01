@@ -11,20 +11,101 @@ const Allocation = @import("OffsetAllocator.zig").Allocation;
 const present_shader_vertex_spv align(@alignOf(u32)) = @embedFile("present_shader_vertex.spv").*;
 const present_shader_fragment_spv align(@alignOf(u32)) = @embedFile("present_shader_fragment.spv").*;
 
-const SyncPoint = struct {
-    graphics: u64,
-    compute: u64,
-    transfer: u64,
-    present: u64,
+/// when the queue semaphores reach these values the fence is cleared
+const Fence = struct {
+    graphics: u64 = 0,
+    compute: u64 = 0,
+    transfer: u64 = 0,
+    present: u64 = 0,
+
+    fn get(fence: Fence, queue: Queue) u64 {
+        return switch (queue) {
+            .graphics => fence.graphics,
+            .compute => fence.compute,
+            .transfer => fence.transfer,
+            .present => fence.present,
+        };
+    }
 };
 
+/// storage for popping all the items whose fence is passed at once
+fn ReclamationQueue(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        gpa: std.mem.Allocator,
+        data: std.MultiArrayList(struct {
+            value: T,
+            fence: Fence,
+        }),
+
+        fn init(gpa: std.mem.Allocator) Self {
+            return .{
+                .gpa = gpa,
+                .data = .empty,
+            };
+        }
+
+        fn deinit(queue: *Self) void {
+            queue.data.deinit(queue.gpa);
+        }
+
+        fn push(queue: *Self, fence: Fence, value: T) !void {
+            try queue.data.append(queue.gpa, .{ .fence = fence, .value = value });
+        }
+
+        const Iterator = struct {
+            queue: *Self,
+            cursor: usize,
+            fence: Fence,
+
+            pub fn pop(it: *Iterator) ?T {
+                // if (it.cursor == 0) return null;
+                // const i = it.cursor - 1;
+                const fences = it.queue.data.items(.fence);
+                while (it.cursor > 0) {
+                    const i = it.cursor - 1;
+                    if (it.fence.graphics >= fences[i].graphics and
+                        it.fence.compute >= fences[i].compute and
+                        it.fence.transfer >= fences[i].transfer and
+                        it.fence.present >= fences[i].present)
+                    {
+                        const value = it.queue.data.items(.value)[i];
+                        it.queue.data.swapRemove(i);
+                        return value;
+                    } else {
+                        it.cursor -= 1;
+                    }
+                }
+                return null;
+            }
+        };
+
+        fn iterator(queue: *Self) !void {
+            return .{
+                .queue = queue,
+                .cursor = queue.data.len,
+            };
+        }
+
+        fn debugPrint(depot: *Self) void {
+            std.debug.print("ReleaseQueue <{s}> [ ", .{@typeName(T)});
+
+            for (depot.data.items) |item| {
+                std.debug.print("{} ", .{item});
+            }
+            std.debug.print("]\n", .{});
+        }
+    };
+}
+
+/// similar to reclamation queue but works only on one (implicit) queue
 fn Depot(comptime T: type) type {
     return struct {
         const Self = @This();
 
         const Node = struct {
             data: T,
-            queue: Queue,
             semaphore_value: u64,
         };
 
@@ -43,22 +124,16 @@ fn Depot(comptime T: type) type {
             depot.* = undefined;
         }
 
-        fn push(depot: *Self, data: T, queue: Queue, semaphore_value: u64) !void {
+        fn push(depot: *Self, data: T, semaphore_value: u64) !void {
             try depot.data.append(depot.gpa, .{
                 .data = data,
-                .queue = queue,
                 .semaphore_value = semaphore_value,
             });
         }
 
-        fn pop(depot: *Self, sync_point: SyncPoint) ?T {
+        fn pop(depot: *Self, semaphore_value: u64) ?T {
             for (depot.data.items, 0..) |data, i| {
-                switch (data.queue) {
-                    .graphics => if (data.semaphore_value > sync_point.graphics) continue,
-                    .compute => if (data.semaphore_value > sync_point.compute) continue,
-                    .transfer => if (data.semaphore_value > sync_point.transfer) continue,
-                    .present => if (data.semaphore_value > sync_point.present) continue,
-                }
+                if (data.semaphore_value > semaphore_value) continue;
                 return depot.data.swapRemove(i).data;
             }
             return null;
@@ -134,7 +209,7 @@ fn EnumMatrix(comptime A: type, comptime B: type, comptime T: type) type {
 pub const PlatformError = error{Platform};
 pub const Platform = struct {
     // TODO not sure what the best function signatures are here
-    getInstanceProcAddress: *const fn (vk.Instance, [*:0]const u8) vk.PfnVoidFunction,
+    getInstanceProcAddress: *const fn (?*anyopaque, [*:0]const u8) vk.PfnVoidFunction,
     getRequiredInstanceExtensions: *const fn () PlatformError![]const [*:0]const u8,
     createWindowSurface: *const fn (vk.Instance, window: *anyopaque) PlatformError!vk.SurfaceKHR,
     getFramebufferSize: *const fn (window: *anyopaque) PlatformError!vk.Extent2D,
@@ -145,8 +220,8 @@ pub const Config = struct {
     preferred_physical_device: ?[]const u8 = null,
     upload_staging_size: usize = 512 * 1024 * 1024,
     download_staging_size: usize = 128 * 1024 * 1024,
-    enable_debug: bool = @import("builtin").mode == .Debug,
-    enable_validation: bool = @import("builtin").mode == .Debug,
+    enable_debug: bool = @import("builtin").mode == .debug,
+    enable_validation: bool = @import("builtin").mode == .debug,
 };
 
 const api_version: u32 = @bitCast(vk.API_VERSION_1_3);
@@ -223,20 +298,6 @@ const PhysicalQueue = struct {
     value: u64,
 };
 
-const Fence = struct {
-    graphics: ?u64,
-    compute: ?u64,
-    transfer: ?u64,
-    present: ?u64,
-
-    const never = Fence{
-        .graphics = null,
-        .compute = null,
-        .transfer = null,
-        .present = null,
-    };
-};
-
 const CommandPool = struct {
     pool: vk.CommandPool,
     prefix: vk.CommandBuffer,
@@ -298,8 +359,8 @@ fn vulkanFrontFace(front_face: rhi.FrontFace) vk.FrontFace {
 
 fn vulkanCullMode(cull_mode: rhi.CullMode) vk.CullModeFlags {
     return .{
-        .front_bit = cull_mode.front,
-        .back_bit = cull_mode.back,
+        .front = cull_mode.front,
+        .back = cull_mode.back,
     };
 }
 
@@ -406,30 +467,30 @@ fn rhiFormat(format: vk.Format) rhi.Format {
 
 fn vulkanSampleCount(sample_count: rhi.SampleCount) vk.SampleCountFlags {
     return .{
-        .@"1_bit" = sample_count == .count_1,
-        .@"2_bit" = sample_count == .count_2,
-        .@"4_bit" = sample_count == .count_4,
-        .@"8_bit" = sample_count == .count_8,
-        .@"16_bit" = sample_count == .count_16,
-        .@"32_bit" = sample_count == .count_32,
-        .@"64_bit" = sample_count == .count_64,
+        .@"1" = sample_count == .count_1,
+        .@"2" = sample_count == .count_2,
+        .@"4" = sample_count == .count_4,
+        .@"8" = sample_count == .count_8,
+        .@"16" = sample_count == .count_16,
+        .@"32" = sample_count == .count_32,
+        .@"64" = sample_count == .count_64,
     };
 }
 
 fn vulkanStage(stage: rhi.Stage) vk.ShaderStageFlags {
     return switch (stage) {
-        .vertex => .{ .vertex_bit = true },
-        .fragment => .{ .fragment_bit = true },
-        .compute => .{ .compute_bit = true },
+        .vertex => .{ .vertex = true },
+        .fragment => .{ .fragment = true },
+        .compute => .{ .compute = true },
     };
 }
 
 fn vulkanColorWriteMask(mask: rhi.ColorWriteMask) vk.ColorComponentFlags {
     return .{
-        .r_bit = mask.r,
-        .g_bit = mask.g,
-        .b_bit = mask.b,
-        .a_bit = mask.a,
+        .r = mask.r,
+        .g = mask.g,
+        .b = mask.b,
+        .a = mask.a,
     };
 }
 
@@ -610,8 +671,10 @@ const vtable: rhi.Context.VTable = .{
     .stagingAllocator = stagingAllocator,
     .submit = submit,
     .wait = undefined,
-    .setBufferGroup = undefined,
-    .setTextureGroup = undefined,
+    // .setBufferGroup = undefined,
+    // .setTextureGroup = undefined,
+    .claimBuffers = undefined,
+    .claimTextures = undefined,
 };
 
 gpa: std.mem.Allocator,
@@ -770,7 +833,7 @@ pub fn deinit(rhi_ctx: rhi.Context) void {
     }
     ctx.acquire_semaphore_depot.deinit();
 
-    var physical_queues: [4]?*PhysicalQueue = .{null} ** 4;
+    var physical_queues: [4]?*PhysicalQueue = @splat(null);
     outer: for ([_]Queue{ .graphics, .compute, .transfer, .present }, 0..) |queue, j| {
         for (0..4) |i| if (physical_queues[i] == ctx.queues.get(queue)) continue :outer;
         physical_queues[j] = ctx.queues.get(queue);
@@ -808,12 +871,12 @@ fn createSwapchain(
         .acquired = false,
         .surface = surface,
         .window = create_info.window,
-        .swapchain = .null_handle,
+        .swapchain = .null,
         .images = &.{},
         .views = &.{},
         .release_semaphores = &.{},
         .image_index = null,
-        .acquire_semaphore = .null_handle,
+        .acquire_semaphore = .null,
     };
 
     return &swapchain.public;
@@ -830,7 +893,7 @@ fn destroySwapchain(ptr: *anyopaque, rhi_swapchain: *const rhi.Swapchain) void {
         log.warn("Failed deviceWaitIdle in destroySwapchain: {}", .{e});
     };
 
-    if (swapchain.swapchain != .null_handle) {
+    if (swapchain.swapchain != .null) {
         for (0..swapchain.images.len) |i| {
             ctx.device.destroySemaphore(swapchain.release_semaphores[i], null);
             ctx.device.destroyImageView(swapchain.views[i], null);
@@ -858,16 +921,13 @@ fn acquireSwapchain(
 
     std.debug.assert(!swapchain.acquired);
 
-    if (swapchain.swapchain == .null_handle) {
+    if (swapchain.swapchain == .null) {
         try ctx.recreateSwapchain(swapchain);
     }
 
-    const acquire_semaphore = ctx.acquire_semaphore_depot.pop(.{
-        .graphics = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.graphics).semaphore),
-        .compute = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.compute).semaphore),
-        .transfer = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.transfer).semaphore),
-        .present = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.present).semaphore),
-    }) orelse
+    const acquire_semaphore = ctx.acquire_semaphore_depot.pop(
+        try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.present).semaphore),
+    ) orelse
         ctx.device.createSemaphore(&.{}, null) catch return false;
     // FIXME if we return early, this needs to be pushed
 
@@ -875,7 +935,7 @@ fn acquireSwapchain(
         swapchain.swapchain,
         timeout,
         acquire_semaphore,
-        .null_handle,
+        .null,
     ) catch |e| switch (e) {
         error.OutOfDateKHR => vk.DeviceWrapper.AcquireNextImageKHRResult{
             .result = .error_out_of_date_khr,
@@ -910,7 +970,7 @@ fn createTexture(
     if (ctx.config.enable_debug and create_info.name.len > 0) {
         try ctx.device.setDebugUtilsObjectNameEXT(&.{
             .object_type = .image,
-            .object_handle = @intFromEnum(texture.image),
+            .object_handle = @backingInt(texture.image),
             .p_object_name = create_info.name.ptr,
         });
     }
@@ -938,7 +998,7 @@ fn createBuffer(
     if (ctx.config.enable_debug and create_info.name.len > 0) {
         try ctx.device.setDebugUtilsObjectNameEXT(&.{
             .object_type = .buffer,
-            .object_handle = @intFromEnum(buffer.buffer),
+            .object_handle = @backingInt(buffer.buffer),
             .p_object_name = create_info.name.ptr,
         });
     }
@@ -1090,7 +1150,7 @@ pub fn createGraphicsPipeline(
             .rasterizer_discard_enable = .false,
             .polygon_mode = vulkanPolygonMode(create_info.polygon_mode),
             .line_width = 1.0,
-            .cull_mode = .{ .back_bit = true },
+            .cull_mode = .{ .back = true },
             .front_face = .counter_clockwise,
             .depth_bias_enable = .false,
             .depth_bias_constant_factor = 0.0,
@@ -1128,16 +1188,16 @@ pub fn createGraphicsPipeline(
             .p_dynamic_states = &dynamic_states,
         },
         .layout = ctx.pipeline_layout,
-        .render_pass = .null_handle, // dynamic rendering
+        .render_pass = .null, // dynamic rendering
         .subpass = 0,
-        .base_pipeline_handle = .null_handle,
+        .base_pipeline_handle = .null,
         .base_pipeline_index = -1,
         .p_next = &dynamic_rendering,
     };
 
     var pipelines: [1]vk.Pipeline = undefined;
     _ = try ctx.device.createGraphicsPipelines(
-        .null_handle,
+        .null,
         &.{pipeline_create_info},
         null,
         &pipelines,
@@ -1194,26 +1254,35 @@ fn submit(
     defer arena_impl.deinit();
     const arena = arena_impl.allocator();
 
-    const sync_point: SyncPoint = .{
-        .graphics = ctx.queues.get(.graphics).value,
-        .compute = ctx.queues.get(.compute).value,
-        .transfer = ctx.queues.get(.transfer).value,
-        .present = ctx.queues.get(.present).value,
+    // where we are right now on the timeline
+    const fence: Fence = .{
+        .graphics = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.graphics).semaphore),
+        .compute = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.compute).semaphore),
+        .transfer = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.transfer).semaphore),
+        .present = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.present).semaphore),
     };
 
     _ = io;
 
     const command_pools = try arena.alloc(CommandPool, command_buffers.len);
     for (command_buffers, 0..) |command_buffer, i| {
-        command_pools[i] = try ctx.getCommandPool(.fromRhi(command_buffer.queue), sync_point);
+        command_pools[i] = try ctx.getCommandPool(.fromRhi(command_buffer.queue), fence);
         // FIXME cleanup if we error
     }
 
     // TODO this can be done in parallel using the io
     for (command_buffers, command_pools) |command_buffer, command_pool| {
         try ctx.device.beginCommandBuffer(command_pool.body, &.{
-            .flags = .{ .one_time_submit_bit = true },
+            .flags = .{ .one_time_submit = true },
         });
+        ctx.device.cmdBindDescriptorSets(
+            command_pool.body,
+            .graphics,
+            ctx.pipeline_layout,
+            0,
+            &.{ctx.descriptor_set},
+            null,
+        );
         const queue = ctx.queues.get(.fromRhi(command_buffer.queue));
         for (command_buffer.commands.items) |command| {
             switch (command) {
@@ -1271,20 +1340,20 @@ fn submit(
                         if (state.layout != .attachment_optimal) {
                             try group.texture_state_overrides.ensureUnusedCapacity(ctx.gpa, 1);
                             const image_memory_barrier: vk.ImageMemoryBarrier2 = .{
-                                .src_stage_mask = .{ .all_commands_bit = true },
+                                .src_stage_mask = .{ .all_commands = true },
                                 .src_access_mask = .{
-                                    .memory_read_bit = true,
-                                    .memory_write_bit = true,
+                                    .memory_read = true,
+                                    .memory_write = true,
                                 },
-                                .dst_stage_mask = .{ .color_attachment_output_bit = true },
-                                .dst_access_mask = .{ .color_attachment_write_bit = true },
+                                .dst_stage_mask = .{ .color_attachment_output = true },
+                                .dst_access_mask = .{ .color_attachment_write = true },
                                 .old_layout = state.layout,
                                 .new_layout = .attachment_optimal,
                                 .src_queue_family_index = queue.family,
                                 .dst_queue_family_index = queue.family,
                                 .image = texture.image,
                                 .subresource_range = .{
-                                    .aspect_mask = .{ .color_bit = true },
+                                    .aspect_mask = .{ .color = true },
                                     .base_mip_level = 0,
                                     .level_count = texture.public.info.mip_levels,
                                     .base_array_layer = 0,
@@ -1393,7 +1462,7 @@ fn submit(
                         const back_op_state = vulkanStencilOpState(stencil_test.back);
                         ctx.device.cmdSetStencilOp(
                             command_pool.body,
-                            .{ .front_bit = true },
+                            .{ .front = true },
                             front_op_state.fail_op,
                             front_op_state.pass_op,
                             front_op_state.depth_fail_op,
@@ -1401,22 +1470,22 @@ fn submit(
                         );
                         ctx.device.cmdSetStencilCompareMask(
                             command_pool.body,
-                            .{ .front_bit = true },
+                            .{ .front = true },
                             front_op_state.compare_mask,
                         );
                         ctx.device.cmdSetStencilWriteMask(
                             command_pool.body,
-                            .{ .front_bit = true },
+                            .{ .front = true },
                             front_op_state.write_mask,
                         );
                         ctx.device.cmdSetStencilReference(
                             command_pool.body,
-                            .{ .front_bit = true },
+                            .{ .front = true },
                             front_op_state.reference,
                         );
                         ctx.device.cmdSetStencilOp(
                             command_pool.body,
-                            .{ .back_bit = true },
+                            .{ .back = true },
                             back_op_state.fail_op,
                             back_op_state.pass_op,
                             back_op_state.depth_fail_op,
@@ -1424,17 +1493,17 @@ fn submit(
                         );
                         ctx.device.cmdSetStencilCompareMask(
                             command_pool.body,
-                            .{ .back_bit = true },
+                            .{ .back = true },
                             back_op_state.compare_mask,
                         );
                         ctx.device.cmdSetStencilWriteMask(
                             command_pool.body,
-                            .{ .back_bit = true },
+                            .{ .back = true },
                             back_op_state.write_mask,
                         );
                         ctx.device.cmdSetStencilReference(
                             command_pool.body,
-                            .{ .back_bit = true },
+                            .{ .back = true },
                             back_op_state.reference,
                         );
                     } else {
@@ -1482,7 +1551,7 @@ fn submit(
                     ctx.device.cmdPushConstants(
                         command_pool.body,
                         ctx.pipeline_layout,
-                        .{ .vertex_bit = true, .fragment_bit = true, .compute_bit = true },
+                        .{ .vertex = true, .fragment = true, .compute = true },
                         0,
                         @intCast(cmd.len),
                         cmd.ptr,
@@ -1497,23 +1566,39 @@ fn submit(
         ctx.device.cmdPipelineBarrier2(command_pool.body, &.{
             .memory_barrier_count = 1,
             .p_memory_barriers = &.{.{
-                .src_stage_mask = .{ .all_commands_bit = true },
-                .src_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
-                .dst_stage_mask = .{ .all_commands_bit = true },
-                .dst_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
+                .src_stage_mask = .{ .all_commands = true },
+                .src_access_mask = .{ .memory_read = true, .memory_write = true },
+                .dst_stage_mask = .{ .all_commands = true },
+                .dst_access_mask = .{ .memory_read = true, .memory_write = true },
             }},
         });
 
         try ctx.device.endCommandBuffer(command_pool.body);
 
         try ctx.device.beginCommandBuffer(command_pool.prefix, &.{
-            .flags = .{ .one_time_submit_bit = true },
+            .flags = .{ .one_time_submit = true },
         });
+        ctx.device.cmdBindDescriptorSets(
+            command_pool.prefix,
+            .graphics,
+            ctx.pipeline_layout,
+            0,
+            &.{ctx.descriptor_set},
+            null,
+        );
         try ctx.device.endCommandBuffer(command_pool.prefix);
 
         try ctx.device.beginCommandBuffer(command_pool.suffix, &.{
-            .flags = .{ .one_time_submit_bit = true },
+            .flags = .{ .one_time_submit = true },
         });
+        ctx.device.cmdBindDescriptorSets(
+            command_pool.suffix,
+            .graphics,
+            ctx.pipeline_layout,
+            0,
+            &.{ctx.descriptor_set},
+            null,
+        );
         try ctx.device.endCommandBuffer(command_pool.suffix);
 
         // FIXME we need a second loop just for the submits
@@ -1531,17 +1616,17 @@ fn submit(
             .p_wait_semaphore_infos = &.{.{
                 .semaphore = queue.semaphore,
                 .value = queue.value,
-                .stage_mask = .{ .all_commands_bit = true },
+                .stage_mask = .{ .all_commands = true },
                 .device_index = 0,
             }},
             .signal_semaphore_info_count = 1,
             .p_signal_semaphore_infos = &.{.{
                 .semaphore = queue.semaphore,
                 .value = queue.value + 1,
-                .stage_mask = .{ .all_commands_bit = true },
+                .stage_mask = .{ .all_commands = true },
                 .device_index = 0,
             }},
-        }}, .null_handle);
+        }}, .null);
         queue.value += 1;
     }
 
@@ -1549,7 +1634,6 @@ fn submit(
         const queue: Queue = .fromRhi(command_buffer.queue);
         try ctx.command_pool_depots.getPtr(queue).push(
             command_pool,
-            queue,
             ctx.queues.get(queue).value,
         );
     }
@@ -1563,10 +1647,10 @@ fn submit(
     // perform present
 
     const graphics_queue = ctx.queues.get(.graphics);
-    const graphics_command_pool = try ctx.getCommandPool(.graphics, sync_point);
+    const graphics_command_pool = try ctx.getCommandPool(.graphics, fence);
 
     const present_queue = ctx.queues.get(.present);
-    const present_command_pool = try ctx.getCommandPool(.present, sync_point);
+    const present_command_pool = try ctx.getCommandPool(.present, fence);
 
     var acquire_semaphore_infos: std.ArrayList(vk.SemaphoreSubmitInfo) = .empty;
     var release_semaphores: std.ArrayList(vk.Semaphore) = .empty;
@@ -1592,17 +1676,17 @@ fn submit(
         try texture_group.texture_state_overrides.ensureUnusedCapacity(ctx.gpa, 1);
 
         try swapchain_barriers.append(arena, .{
-            .src_stage_mask = .{ .all_commands_bit = true },
-            .src_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
-            .dst_stage_mask = .{ .all_commands_bit = true },
-            .dst_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
+            .src_stage_mask = .{ .all_commands = true },
+            .src_access_mask = .{ .memory_read = true, .memory_write = true },
+            .dst_stage_mask = .{ .all_commands = true },
+            .dst_access_mask = .{ .memory_read = true, .memory_write = true },
             .image = texture.image,
             .old_layout = texture_state.layout,
             .new_layout = .read_only_optimal,
             .src_queue_family_index = present_queue.family,
             .dst_queue_family_index = present_queue.family,
             .subresource_range = .{
-                .aspect_mask = .{ .color_bit = true },
+                .aspect_mask = .{ .color = true },
                 .base_array_layer = 0,
                 .base_mip_level = 0,
                 .layer_count = 1,
@@ -1615,17 +1699,17 @@ fn submit(
         });
 
         try swapchain_barriers.append(arena, .{
-            .src_stage_mask = .{ .all_commands_bit = true },
-            .src_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
-            .dst_stage_mask = .{ .all_commands_bit = true },
-            .dst_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
+            .src_stage_mask = .{ .all_commands = true },
+            .src_access_mask = .{ .memory_read = true, .memory_write = true },
+            .dst_stage_mask = .{ .all_commands = true },
+            .dst_access_mask = .{ .memory_read = true, .memory_write = true },
             .image = swapchain.images[image_index],
             .old_layout = .undefined,
             .new_layout = .attachment_optimal,
             .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
             .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
             .subresource_range = .{
-                .aspect_mask = .{ .color_bit = true },
+                .aspect_mask = .{ .color = true },
                 .base_array_layer = 0,
                 .base_mip_level = 0,
                 .layer_count = 1,
@@ -1634,8 +1718,16 @@ fn submit(
         });
     }
     try ctx.device.beginCommandBuffer(graphics_command_pool.body, &.{
-        .flags = .{ .one_time_submit_bit = true },
+        .flags = .{ .one_time_submit = true },
     });
+    ctx.device.cmdBindDescriptorSets(
+        graphics_command_pool.body,
+        .graphics,
+        ctx.pipeline_layout,
+        0,
+        &.{ctx.descriptor_set},
+        null,
+    );
     ctx.device.cmdPipelineBarrier2(graphics_command_pool.body, &.{
         .image_memory_barrier_count = @intCast(swapchain_barriers.items.len),
         .p_image_memory_barriers = swapchain_barriers.items.ptr,
@@ -1705,16 +1797,24 @@ fn submit(
         ctx.device.cmdEndRendering(graphics_command_pool.body);
     }
     try ctx.device.endCommandBuffer(graphics_command_pool.body);
-    try present_queue.queue.submit2(&[_]vk.SubmitInfo2{.{
+    try graphics_queue.queue.submit2(&[_]vk.SubmitInfo2{.{
         .command_buffer_info_count = 1,
         .p_command_buffer_infos = @ptrCast(&[_]vk.CommandBufferSubmitInfo{.{
             .command_buffer = graphics_command_pool.body,
             .device_mask = 0,
         }}),
-    }}, .null_handle);
+
+        .signal_semaphore_info_count = 1,
+        .p_signal_semaphore_infos = &.{.{
+            .semaphore = graphics_queue.semaphore,
+            .value = graphics_queue.value + 1,
+            .stage_mask = .{ .all_commands = true },
+            .device_index = 0,
+        }},
+    }}, .null);
+    graphics_queue.value += 1;
     try ctx.command_pool_depots.getPtr(.graphics).push(
         graphics_command_pool,
-        .graphics,
         graphics_queue.value,
     );
 
@@ -1730,31 +1830,31 @@ fn submit(
         // FIXME acquire should actually relate to the first queue that writes to the swapchain
         try acquire_semaphore_infos.append(arena, .{
             .semaphore = swapchain.acquire_semaphore,
-            .stage_mask = .{ .all_commands_bit = true },
+            .stage_mask = .{ .all_commands = true },
             .device_index = 0,
             .value = undefined, // binary semaphore
         });
         try release_semaphores.append(arena, swapchain.release_semaphores[image_index]);
         try release_semaphore_infos.append(arena, .{
             .semaphore = swapchain.release_semaphores[image_index],
-            .stage_mask = .{ .all_commands_bit = true },
+            .stage_mask = .{ .all_commands = true },
             .device_index = 0,
             .value = undefined, // binary semaphore
         });
         try swapchains.append(arena, swapchain.swapchain);
         try image_indices.append(arena, image_index);
         try swapchain_barriers.append(arena, .{
-            .src_stage_mask = .{ .all_commands_bit = true },
-            .src_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
-            .dst_stage_mask = .{ .all_commands_bit = true },
-            .dst_access_mask = .{ .memory_read_bit = true, .memory_write_bit = true },
+            .src_stage_mask = .{ .all_commands = true },
+            .src_access_mask = .{ .memory_read = true, .memory_write = true },
+            .dst_stage_mask = .{ .all_commands = true },
+            .dst_access_mask = .{ .memory_read = true, .memory_write = true },
             .image = swapchain.images[image_index],
             .old_layout = .attachment_optimal,
             .new_layout = .present_src_khr,
             .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
             .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
             .subresource_range = .{
-                .aspect_mask = .{ .color_bit = true },
+                .aspect_mask = .{ .color = true },
                 .base_array_layer = 0,
                 .base_mip_level = 0,
                 .layer_count = 1,
@@ -1765,18 +1865,33 @@ fn submit(
         swapchain.acquired = false;
     }
 
+    try release_semaphore_infos.append(arena, .{
+        .semaphore = present_queue.semaphore,
+        .value = present_queue.value + 1,
+        .stage_mask = .{ .all_commands = true },
+        .device_index = 0,
+    });
+    present_queue.value += 1;
+
     if (presents.len > 0) {
-        present_queue.value += 1;
         try release_semaphore_infos.append(arena, .{
             .semaphore = present_queue.semaphore,
-            .stage_mask = .{ .all_commands_bit = true },
+            .stage_mask = .{ .all_commands = true },
             .device_index = 0,
             .value = present_queue.value,
         });
 
         try ctx.device.beginCommandBuffer(present_command_pool.body, &.{
-            .flags = .{ .one_time_submit_bit = true },
+            .flags = .{ .one_time_submit = true },
         });
+        ctx.device.cmdBindDescriptorSets(
+            present_command_pool.body,
+            .graphics,
+            ctx.pipeline_layout,
+            0,
+            &.{ctx.descriptor_set},
+            null,
+        );
         ctx.device.cmdPipelineBarrier2(present_command_pool.body, &.{
             .image_memory_barrier_count = @intCast(swapchain_barriers.items.len),
             .p_image_memory_barriers = swapchain_barriers.items.ptr,
@@ -1794,7 +1909,7 @@ fn submit(
             .p_wait_semaphore_infos = acquire_semaphore_infos.items.ptr,
             .signal_semaphore_info_count = @intCast(release_semaphore_infos.items.len),
             .p_signal_semaphore_infos = release_semaphore_infos.items.ptr,
-        }}, .null_handle);
+        }}, .null);
 
         _ = try present_queue.queue.presentKHR(&.{
             .wait_semaphore_count = @intCast(release_semaphores.items.len),
@@ -1806,7 +1921,6 @@ fn submit(
 
         try ctx.command_pool_depots.getPtr(.present).push(
             present_command_pool,
-            .present,
             present_queue.value,
         );
         // NOTE this is conservative but safe, when the presentation engine has the image
@@ -1814,7 +1928,6 @@ fn submit(
         for (acquire_semaphore_infos.items) |acquire_semaphore_info| {
             try ctx.acquire_semaphore_depot.push(
                 acquire_semaphore_info.semaphore,
-                .present,
                 present_queue.value,
             );
         }
@@ -1868,14 +1981,14 @@ fn recreateSwapchain(ctx: *Context, swapchain: *Swapchain) !void {
         .image_extent = extent,
         .image_array_layers = 1,
         .image_usage = .{
-            .color_attachment_bit = true,
-            .transfer_dst_bit = capabilities.supported_usage_flags.transfer_dst_bit,
+            .color_attachment = true,
+            .transfer_dst = capabilities.supported_usage_flags.transfer_dst,
         },
         .image_sharing_mode = .concurrent,
         .p_queue_family_indices = @ptrCast(ctx.queue_family_indices),
         .queue_family_index_count = @intCast(ctx.queue_family_indices.len),
         .pre_transform = capabilities.current_transform,
-        .composite_alpha = .{ .opaque_bit_khr = true },
+        .composite_alpha = .{ .opaque_khr = true },
         .present_mode = present_mode,
         .clipped = .true,
         .old_swapchain = old_swapchain,
@@ -1886,7 +1999,7 @@ fn recreateSwapchain(ctx: *Context, swapchain: *Swapchain) !void {
     ) catch return error.Unknown;
     errdefer ctx.device.destroySwapchainKHR(swapchain.swapchain, null);
 
-    if (old_swapchain != .null_handle) {
+    if (old_swapchain != .null) {
         for (0..swapchain.images.len) |i| {
             ctx.device.destroySemaphore(swapchain.release_semaphores[i], null);
             ctx.device.destroyImageView(swapchain.views[i], null);
@@ -1913,7 +2026,7 @@ fn recreateSwapchain(ctx: *Context, swapchain: *Swapchain) !void {
             .format = format.format,
             .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
             .subresource_range = .{
-                .aspect_mask = .{ .color_bit = true },
+                .aspect_mask = .{ .color = true },
                 .base_mip_level = 0,
                 .level_count = 1,
                 .base_array_layer = 0,
@@ -1971,7 +2084,7 @@ fn recreateSwapchain(ctx: *Context, swapchain: *Swapchain) !void {
         ));
         try ctx.device.setDebugUtilsObjectNameEXT(&.{
             .object_type = .pipeline,
-            .object_handle = @intFromEnum(pipeline.pipeline),
+            .object_handle = @backingInt(pipeline.pipeline),
             .p_object_name = "PRESENT_PIPELINE",
         });
     }
@@ -2088,9 +2201,9 @@ fn pickPhysicalDevice(
         try .initCapacity(arena, devices.len);
 
     // construct a temporary surface used to identify devices that can present
-    var surface: vk.SurfaceKHR = .null_handle;
+    var surface: vk.SurfaceKHR = .null;
     if (window) |w| surface = try ctx.platform.createWindowSurface(ctx.instance.handle, w);
-    defer if (surface != .null_handle) ctx.instance.destroySurfaceKHR(surface, null);
+    defer if (surface != .null) ctx.instance.destroySurfaceKHR(surface, null);
 
     for (devices) |dev| {
         const candidate: PhysicalDeviceCandidate =
@@ -2229,7 +2342,7 @@ fn initDevice(
 fn deinitDevice(ctx: *Context) void {
     ctx.device.destroyDevice(null);
     ctx.gpa.destroy(ctx.device.wrapper);
-    ctx.physical_device = .null_handle;
+    ctx.physical_device = undefined;
 }
 
 fn initPipelineLayout(ctx: *Context) !void {
@@ -2239,35 +2352,35 @@ fn initPipelineLayout(ctx: *Context) !void {
         .binding = 0,
         .descriptor_type = .sampled_image,
         .descriptor_count = 256 * 1024,
-        .stage_flags = .{ .vertex_bit = true, .fragment_bit = true, .compute_bit = true },
+        .stage_flags = .{ .vertex = true, .fragment = true, .compute = true },
     }, .{
         .binding = 1,
         .descriptor_type = .storage_image,
         .descriptor_count = 256 * 1024,
-        .stage_flags = .{ .vertex_bit = true, .fragment_bit = true, .compute_bit = true },
+        .stage_flags = .{ .vertex = true, .fragment = true, .compute = true },
     }, .{
         .binding = 2,
         .descriptor_type = .sampler,
         .descriptor_count = 1024,
-        .stage_flags = .{ .vertex_bit = true, .fragment_bit = true, .compute_bit = true },
+        .stage_flags = .{ .vertex = true, .fragment = true, .compute = true },
     } };
     const binding_flags: [3]vk.DescriptorBindingFlags = .{ .{
-        .update_after_bind_bit = true,
-        .update_unused_while_pending_bit = true,
-        .partially_bound_bit = true,
+        .update_after_bind = true,
+        .update_unused_while_pending = true,
+        .partially_bound = true,
     }, .{
-        .update_after_bind_bit = true,
-        .update_unused_while_pending_bit = true,
-        .partially_bound_bit = true,
+        .update_after_bind = true,
+        .update_unused_while_pending = true,
+        .partially_bound = true,
     }, .{
-        .update_after_bind_bit = true,
-        .update_unused_while_pending_bit = true,
-        .partially_bound_bit = true,
+        .update_after_bind = true,
+        .update_unused_while_pending = true,
+        .partially_bound = true,
     } };
 
     ctx.descriptor_set_layout = try ctx.device.createDescriptorSetLayout(&.{
         .binding_count = 3,
-        .flags = .{ .update_after_bind_pool_bit = true },
+        .flags = .{ .update_after_bind_pool = true },
         .p_bindings = @ptrCast(&bindings[0]),
         .p_next = &vk.DescriptorSetLayoutBindingFlagsCreateInfo{
             .binding_count = 3,
@@ -2280,7 +2393,7 @@ fn initPipelineLayout(ctx: *Context) !void {
         .p_set_layouts = @ptrCast(&ctx.descriptor_set_layout),
         .push_constant_range_count = 1,
         .p_push_constant_ranges = @ptrCast(&vk.PushConstantRange{
-            .stage_flags = .{ .vertex_bit = true, .fragment_bit = true, .compute_bit = true },
+            .stage_flags = .{ .vertex = true, .fragment = true, .compute = true },
             .offset = 0,
             .size = 128,
         }),
@@ -2293,14 +2406,14 @@ fn initPipelineLayout(ctx: *Context) !void {
         .{ .type = .sampler, .descriptor_count = 1024 },
     };
     ctx.descriptor_pool = try ctx.device.createDescriptorPool(&.{
-        .flags = .{ .update_after_bind_bit = true },
+        .flags = .{ .update_after_bind = true },
         .max_sets = 1,
         .pool_size_count = @intCast(pool_sizes.len),
         .p_pool_sizes = &pool_sizes,
     }, null);
     errdefer ctx.device.destroyDescriptorPool(ctx.descriptor_pool, null);
 
-    ctx.descriptor_set = .null_handle;
+    ctx.descriptor_set = .null;
     try ctx.device.allocateDescriptorSets(&.{
         .descriptor_pool = ctx.descriptor_pool,
         .descriptor_set_count = 1,
@@ -2389,14 +2502,14 @@ fn getSwapchainImageCount(capabilities: vk.SurfaceCapabilitiesKHR) u32 {
     return count;
 }
 
-fn getCommandPool(ctx: *Context, queue: Queue, sync_point: SyncPoint) !CommandPool {
-    const command_pool = ctx.command_pool_depots.getPtr(queue).pop(sync_point) orelse blk: {
+fn getCommandPool(ctx: *Context, queue: Queue, fence: Fence) !CommandPool {
+    const command_pool = ctx.command_pool_depots.getPtr(queue).pop(fence.get(queue)) orelse blk: {
         const pool = try ctx.device.createCommandPool(&.{
             .flags = .{},
             .queue_family_index = ctx.queues.get(queue).family,
         }, null);
         errdefer ctx.device.destroyCommandPool(pool, null);
-        var buffers: [3]vk.CommandBuffer = .{.null_handle} ** 3;
+        var buffers: [3]vk.CommandBuffer = undefined;
         try ctx.device.allocateCommandBuffers(&.{
             .command_pool = pool,
             .level = .primary,
@@ -2477,20 +2590,20 @@ const PhysicalDeviceCandidate = struct {
         const queue_families =
             try instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(dev, arena);
         for (queue_families, 0..) |family, i| {
-            if (family.queue_flags.graphics_bit) continue;
-            if (family.queue_flags.compute_bit) continue;
-            if (!family.queue_flags.transfer_bit) continue;
+            if (family.queue_flags.graphics) continue;
+            if (family.queue_flags.compute) continue;
+            if (!family.queue_flags.transfer) continue;
             candidate.queue_families.put(.transfer, @intCast(i));
             break;
         }
         for (queue_families, 0..) |family, i| {
-            if (family.queue_flags.graphics_bit) continue;
-            if (!family.queue_flags.compute_bit) continue;
+            if (family.queue_flags.graphics) continue;
+            if (!family.queue_flags.compute) continue;
             candidate.queue_families.put(.compute, @intCast(i));
             break;
         }
         for (queue_families, 0..) |family, i| {
-            if (!family.queue_flags.graphics_bit) continue;
+            if (!family.queue_flags.graphics) continue;
             if (try instance.getPhysicalDeviceSurfaceSupportKHR(
                 candidate.device,
                 @intCast(i),
@@ -2505,7 +2618,7 @@ const PhysicalDeviceCandidate = struct {
         if (candidate.queue_families.get(.graphics) == null) {
             // select graphics
             for (queue_families, 0..) |family, i| {
-                if (!family.queue_flags.graphics_bit) continue;
+                if (!family.queue_flags.graphics) continue;
                 candidate.queue_families.put(.graphics, @intCast(i));
                 break;
             }
@@ -2577,25 +2690,29 @@ const PhysicalDeviceCandidate = struct {
     }
 
     fn checkFeatureSupport(candidate: *const PhysicalDeviceCandidate) !bool {
-        inline for (std.meta.fields(vk.PhysicalDeviceFeatures)) |field| {
-            if (field.type != vk.Bool32) continue;
-            if (@field(device_features, field.name) == .false) continue;
-            if (@field(candidate.features, field.name) == .false) return false;
+        const features_info = @typeInfo(vk.PhysicalDeviceFeatures).@"struct";
+        inline for (features_info.field_names, features_info.field_types) |n, t| {
+            if (t != vk.Bool32) continue;
+            if (@field(device_features, n) == .false) continue;
+            if (@field(candidate.features, n) == .false) return false;
         }
-        inline for (std.meta.fields(vk.PhysicalDeviceVulkan11Features)) |field| {
-            if (field.type != vk.Bool32) continue;
-            if (@field(device_features_1_1, field.name) == .false) continue;
-            if (@field(candidate.features_1_1, field.name) == .false) return false;
+        const features_1_1_info = @typeInfo(vk.PhysicalDeviceVulkan11Features).@"struct";
+        inline for (features_1_1_info.field_names, features_1_1_info.field_types) |n, t| {
+            if (t != vk.Bool32) continue;
+            if (@field(device_features_1_1, n) == .false) continue;
+            if (@field(candidate.features_1_1, n) == .false) return false;
         }
-        inline for (std.meta.fields(vk.PhysicalDeviceVulkan12Features)) |field| {
-            if (field.type != vk.Bool32) continue;
-            if (@field(device_features_1_2, field.name) == .false) continue;
-            if (@field(candidate.features_1_2, field.name) == .false) return false;
+        const features_1_2_info = @typeInfo(vk.PhysicalDeviceVulkan12Features).@"struct";
+        inline for (features_1_2_info.field_names, features_1_2_info.field_types) |n, t| {
+            if (t != vk.Bool32) continue;
+            if (@field(device_features_1_2, n) == .false) continue;
+            if (@field(candidate.features_1_2, n) == .false) return false;
         }
-        inline for (std.meta.fields(vk.PhysicalDeviceVulkan13Features)) |field| {
-            if (field.type != vk.Bool32) continue;
-            if (@field(device_features_1_3, field.name) == .false) continue;
-            if (@field(candidate.features_1_3, field.name) == .false) return false;
+        const features_1_3_info = @typeInfo(vk.PhysicalDeviceVulkan13Features).@"struct";
+        inline for (features_1_3_info.field_names, features_1_3_info.field_types) |n, t| {
+            if (t != vk.Bool32) continue;
+            if (@field(device_features_1_3, n) == .false) continue;
+            if (@field(candidate.features_1_3, n) == .false) return false;
         }
         return true;
     }
@@ -2627,12 +2744,12 @@ const PhysicalDeviceCandidate = struct {
     fn cmpMemory(a: PhysicalDeviceCandidate, b: PhysicalDeviceCandidate) ?bool {
         var ha: i64 = 0;
         for (a.memory_properties.memory_heaps[0..a.memory_properties.memory_heap_count]) |heap| {
-            if (!heap.flags.device_local_bit) continue;
+            if (!heap.flags.device_local) continue;
             ha += @intCast(heap.size);
         }
         var hb: i64 = 0;
         for (b.memory_properties.memory_heaps[0..b.memory_properties.memory_heap_count]) |heap| {
-            if (!heap.flags.device_local_bit) continue;
+            if (!heap.flags.device_local) continue;
             hb += @intCast(heap.size);
         }
         if (ha == hb) return null;
@@ -2764,10 +2881,10 @@ const TextureAllocator = struct {
 
         const image_info: vk.ImageCreateInfo = .{
             .flags = .{
-                .mutable_format_bit = multiformat,
-                .cube_compatible_bit = texture_create_info.texture_type == .texture_cube or
+                .mutable_format = multiformat,
+                .cube_compatible = texture_create_info.texture_type == .texture_cube or
                     texture_create_info.texture_type == .texture_cube_array,
-                .@"2d_array_compatible_bit" = arrayview,
+                .@"2d_array_compatible" = arrayview,
             },
             .image_type = vulkanImageType(texture_create_info.texture_type),
             .format = vulkanFormat(texture_create_info.format),
@@ -2787,12 +2904,12 @@ const TextureAllocator = struct {
             .samples = vulkanSampleCount(texture_create_info.samples),
             .tiling = .optimal,
             .usage = .{
-                .storage_bit = texture_create_info.usage.storage,
-                .sampled_bit = texture_create_info.usage.sampled,
-                .transfer_src_bit = texture_create_info.usage.transfer_src,
-                .transfer_dst_bit = texture_create_info.usage.transfer_dst,
-                .color_attachment_bit = color_attachment,
-                .depth_stencil_attachment_bit = depth_stencil_attachment,
+                .storage = texture_create_info.usage.storage,
+                .sampled = texture_create_info.usage.sampled,
+                .transfer_src = texture_create_info.usage.transfer_src,
+                .transfer_dst = texture_create_info.usage.transfer_dst,
+                .color_attachment = color_attachment,
+                .depth_stencil_attachment = depth_stencil_attachment,
             },
             .sharing_mode = .exclusive,
             .initial_layout = .undefined,
@@ -2823,7 +2940,7 @@ const TextureAllocator = struct {
                 (@as(u32, 1) << @intCast(i)) == 0) continue;
             // soft requirements
             var score: i32 = 0;
-            if (memory_type.property_flags.device_local_bit) score += 1;
+            if (memory_type.property_flags.device_local) score += 1;
             if (score > best_score) {
                 best_score = score;
                 memory_type_index = @intCast(i);
@@ -2860,7 +2977,7 @@ const TextureAllocator = struct {
             // suballocate
             const suballoc = try allocator.alloc(
                 memory_type_index,
-                .{ .device_address_bit = true },
+                .{ .device_address = true },
                 if (image_memreq.memory_requirements.alignment <= Slab.granularity)
                     image_memreq.memory_requirements.size
                 else
@@ -2894,14 +3011,14 @@ const TextureAllocator = struct {
                 .base_array_layer = 0,
                 .layer_count = texture_create_info.size[2],
                 .aspect_mask = switch (texture_create_info.format) {
-                    .s8_uint => .{ .stencil_bit = true },
+                    .s8_uint => .{ .stencil = true },
                     .d16_unorm,
                     .d16_unorm_s8_uint,
                     .d24_unorm_s8_uint,
                     .d32_sfloat,
                     .d32_sfloat_s8_uint,
-                    => .{ .depth_bit = true },
-                    else => .{ .color_bit = true },
+                    => .{ .depth = true },
+                    else => .{ .color = true },
                 },
             },
         };
@@ -2954,7 +3071,7 @@ const TextureAllocator = struct {
                         .name = "",
                     },
                 },
-                .last_used = .never,
+                .last_used = .{},
                 .textures = .empty,
                 .buffer_count = 0,
                 .texture_state = .{
@@ -3081,14 +3198,14 @@ const BufferAllocator = struct {
     ) !*Buffer {
         const buffer_info: vk.BufferCreateInfo = .{
             .size = buffer_create_info.size + 16, // extra padding for wide reads near the end
-            .flags = .{ .device_address_capture_replay_bit = allocator.ctx.config.enable_debug },
+            .flags = .{ .device_address_capture_replay = allocator.ctx.config.enable_debug },
             .usage = .{
-                .transfer_src_bit = buffer_create_info.usage.transfer_src,
-                .transfer_dst_bit = buffer_create_info.usage.transfer_dst,
-                .storage_buffer_bit = buffer_create_info.usage.storage,
-                .index_buffer_bit = buffer_create_info.usage.index,
-                .indirect_buffer_bit = buffer_create_info.usage.indirect,
-                .shader_device_address_bit = true,
+                .transfer_src = buffer_create_info.usage.transfer_src,
+                .transfer_dst = buffer_create_info.usage.transfer_dst,
+                .storage_buffer = buffer_create_info.usage.storage,
+                .index_buffer = buffer_create_info.usage.index,
+                .indirect_buffer = buffer_create_info.usage.indirect,
+                .shader_device_address = true,
             },
             .sharing_mode = .concurrent,
             .p_queue_family_indices = @ptrCast(allocator.ctx.queue_family_indices),
@@ -3120,7 +3237,7 @@ const BufferAllocator = struct {
                 (@as(u32, 1) << @intCast(i)) == 0) continue;
             // soft requirements
             var score: i32 = 0;
-            if (memory_type.property_flags.device_local_bit) score += 1;
+            if (memory_type.property_flags.device_local) score += 1;
             if (score > best_score) {
                 best_score = score;
                 memory_type_index = @intCast(i);
@@ -3155,7 +3272,7 @@ const BufferAllocator = struct {
             // suballocate
             const suballoc = try allocator.alloc(
                 memory_type_index,
-                .{ .device_address_bit = true },
+                .{ .device_address = true },
                 if (buffer_memreq.memory_requirements.alignment <= Slab.granularity)
                     buffer_memreq.memory_requirements.size
                 else
@@ -3189,7 +3306,7 @@ const BufferAllocator = struct {
                         .name = "",
                     },
                 },
-                .last_used = .never,
+                .last_used = .{},
                 .textures = .empty,
                 .buffer_count = 1,
                 .texture_state = .{
@@ -3240,8 +3357,8 @@ const StagingAllocator = struct {
         const buffer = try ctx.device.createBuffer(&.{
             .size = size,
             .usage = .{
-                .transfer_src_bit = usage == .upload,
-                .transfer_dst_bit = usage == .download,
+                .transfer_src = usage == .upload,
+                .transfer_dst = usage == .download,
             },
             .sharing_mode = .concurrent,
             .p_queue_family_indices = @ptrCast(ctx.queue_family_indices),
@@ -3252,7 +3369,7 @@ const StagingAllocator = struct {
         if (ctx.config.enable_debug) {
             try ctx.device.setDebugUtilsObjectNameEXT(&.{
                 .object_type = .buffer,
-                .object_handle = @intFromEnum(buffer),
+                .object_handle = @backingInt(buffer),
                 .p_object_name = switch (usage) {
                     .upload => "UPLOAD_STAGING_BUFFER",
                     .download => "DOWNLOAD_STAGING_BUFFER",
@@ -3274,13 +3391,13 @@ const StagingAllocator = struct {
             // hard requirements
             if (buffer_memreq.memory_type_bits &
                 (@as(u32, 1) << @intCast(i)) == 0) continue;
-            if (!memory_type.property_flags.host_visible_bit) continue;
-            if (usage == .upload and !memory_type.property_flags.host_coherent_bit) continue;
+            if (!memory_type.property_flags.host_visible) continue;
+            if (usage == .upload and !memory_type.property_flags.host_coherent) continue;
             // soft requirements
             var score: i32 = 0;
-            if (memory_type.property_flags.device_local_bit) score -= 1;
-            if (usage == .download and memory_type.property_flags.host_coherent_bit) score += 2;
-            if (usage == .download and memory_type.property_flags.host_cached_bit) score += 4;
+            if (memory_type.property_flags.device_local) score -= 1;
+            if (usage == .download and memory_type.property_flags.host_coherent) score += 2;
+            if (usage == .download and memory_type.property_flags.host_cached) score += 4;
             if (score > best_score) {
                 best_score = score;
                 memory_type_index = @intCast(i);

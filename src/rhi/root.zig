@@ -609,8 +609,10 @@ pub const Context = struct {
         submit: *const fn (*anyopaque, io: std.Io, []const CommandBuffer, []const Present) Error!Fence,
         wait: *const fn (*anyopaque, Fence, FenceMask, u64) Error!void,
 
-        setBufferGroup: *const fn (*anyopaque, *const Buffer, ?*const Group) void,
-        setTextureGroup: *const fn (*anyopaque, *const Texture, ?*const Group) void,
+        // setBufferGroup: *const fn (*anyopaque, *const Buffer, ?*const Group) void,
+        // setTextureGroup: *const fn (*anyopaque, *const Texture, ?*const Group) void,
+        claimBuffers: *const fn (*anyopaque, *const Group, []*const Buffer) void,
+        claimTextures: *const fn (*anyopaque, *const Group, []*const Texture) void,
 
         // readTimestamps: *const fn (*anyopaque, []const u8) ?u64, // could maybe happen on wait?
     };
