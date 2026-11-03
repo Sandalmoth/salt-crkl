@@ -562,6 +562,28 @@ fn vulkanClearValue(clear_value: rhi.ClearValue) vk.ClearValue {
     };
 }
 
+fn vulkanFilter(filter: rhi.Filter) vk.Filter {
+    return switch (filter) {
+        .linear => .linear,
+        .nearest => .nearest,
+    };
+}
+
+fn vulkanMipmapMode(filter: rhi.Filter) vk.SamplerMipmapMode {
+    return switch (filter) {
+        .linear => .linear,
+        .nearest => .nearest,
+    };
+}
+
+fn vulkanSamplerAddressMode(address_mode: rhi.AddressMode) vk.SamplerAddressMode {
+    return switch (address_mode) {
+        .clamp_to_edge => .clamp_to_edge,
+        .mirrored_repeat => .mirrored_repeat,
+        .repeat => .repeat,
+    };
+}
+
 const Group = struct {
     const TextureState = struct {
         owner: ?Queue,
@@ -618,6 +640,7 @@ const Buffer = struct {
 };
 
 const Sampler = struct {
+    sampler: vk.Sampler,
     public: rhi.Sampler,
 };
 
@@ -656,7 +679,7 @@ const vtable: rhi.Context.VTable = .{
     .acquireSwapchain = acquireSwapchain,
     .createBuffer = createBuffer,
     .createTexture = createTexture,
-    .createSampler = undefined,
+    .createSampler = createSampler,
     .createShader = createShader,
     .createGroup = undefined,
     .createGraphicsPipeline = createGraphicsPipeline,
@@ -724,6 +747,7 @@ syncronization_epoch: u64,
 visibility_map: EnumMatrix(Stage, Stage, u64),
 
 present_pipeline: *const rhi.GraphicsPipeline, // used for final blit to swapchain
+present_sampler: *const rhi.Sampler, // sampler used for final blit
 
 pub fn init(
     gpa: std.mem.Allocator,
@@ -776,6 +800,15 @@ pub fn init(
 
     ctx.syncronization_epoch = 0;
     ctx.visibility_map = .initFill(0);
+
+    ctx.present_sampler = try createSampler(ctx, .{
+        .mag_filter = .nearest,
+        .min_filter = .nearest,
+        .mipmap_filter = .nearest,
+        .address_mode_u = .clamp_to_edge,
+        .address_mode_v = .clamp_to_edge,
+        .address_mode_w = .clamp_to_edge,
+    });
 
     return .{
         .ptr = ctx,
@@ -1224,6 +1257,78 @@ pub fn createGraphicsPipeline(
 pub fn queueDestroyGraphicsPipeline(ptr: *anyopaque, rhi_pipeline: *const rhi.GraphicsPipeline) void {
     _ = ptr;
     _ = rhi_pipeline;
+}
+
+fn createSampler(ptr: *anyopaque, create_info: rhi.SamplerCreateInfo) !*const rhi.Sampler {
+    // FIXME cleanup on error
+    const ctx: *Context = @ptrCast(@alignCast(ptr));
+    const vk_create_info: vk.SamplerCreateInfo = .{
+        .mag_filter = vulkanFilter(create_info.mag_filter),
+        .min_filter = vulkanFilter(create_info.min_filter),
+        .mipmap_mode = vulkanMipmapMode(create_info.mipmap_filter),
+        .address_mode_u = vulkanSamplerAddressMode(create_info.address_mode_u),
+        .address_mode_v = vulkanSamplerAddressMode(create_info.address_mode_v),
+        .address_mode_w = vulkanSamplerAddressMode(create_info.address_mode_w),
+        .mip_lod_bias = create_info.mip_lod_bias,
+        .anisotropy_enable = if (create_info.max_anisotropy != null) .true else .false,
+        .max_anisotropy = if (create_info.max_anisotropy) |x| x else undefined,
+        .compare_enable = if (create_info.compare_op != null) .true else .false,
+        .compare_op = if (create_info.compare_op) |x| vulkanCompareOp(x) else undefined,
+        .min_lod = create_info.min_lod,
+        .max_lod = create_info.max_lod orelse std.math.inf(f32), // is this right?
+        .border_color = .float_transparent_black,
+        .unnormalized_coordinates = .false,
+    };
+    const vk_sampler = try ctx.device.createSampler(&vk_create_info, null);
+    const sampler = try ctx.sampler_pool.create(ctx.gpa);
+    const sampler_slot = try ctx.sampler_slots.acquire();
+    sampler.* = .{
+        .sampler = vk_sampler,
+        .public = .{
+            .device_address = @intCast(sampler_slot),
+            .info = .{
+                .address_mode_u = create_info.address_mode_u,
+                .address_mode_v = create_info.address_mode_v,
+                .address_mode_w = create_info.address_mode_w,
+                .compare_op = create_info.compare_op,
+                .mag_filter = create_info.mag_filter,
+                .min_filter = create_info.min_filter,
+                .mipmap_filter = create_info.mipmap_filter,
+                .max_anisotropy = create_info.max_anisotropy,
+                .max_lod = create_info.max_lod,
+                .min_lod = create_info.min_lod,
+                .mip_lod_bias = create_info.mip_lod_bias,
+                .name = create_info.name,
+            },
+        },
+    };
+
+    ctx.device.updateDescriptorSets(&.{.{
+        .dst_set = ctx.descriptor_set,
+        .dst_binding = 2,
+        .dst_array_element = sampler_slot,
+        .descriptor_count = 1,
+        .descriptor_type = .sampler,
+        .p_image_info = @ptrCast(&.{
+            .sampler = vk_sampler,
+            .image_view = .null,
+            .image_layout = .undefined,
+        }),
+    }}, null);
+
+    if (ctx.config.enable_debug and create_info.name.len > 0) {
+        try ctx.device.setDebugUtilsObjectNameEXT(&.{
+            .object_type = .buffer,
+            .object_handle = @backingInt(vk_sampler),
+            .p_object_name = create_info.name.ptr,
+        });
+    }
+    return &sampler.public;
+}
+
+fn queueDestroySampler(ptr: *anyopaque, rhi_sampler: *const rhi.Sampler) void {
+    _ = ptr;
+    _ = rhi_sampler;
 }
 
 fn stagingAllocator(ptr: *anyopaque, usage: rhi.StagingAllocatorUsage) std.mem.Allocator {
@@ -1794,6 +1899,16 @@ fn submit(
             @fieldParentPtr("public", ctx.present_pipeline),
         ));
         ctx.device.cmdBindPipeline(graphics_command_pool.body, .graphics, pipeline.pipeline);
+        std.debug.print("{}\n", .{presents[0].texture});
+        ctx.device.cmdPushConstants(
+            graphics_command_pool.body,
+            ctx.pipeline_layout,
+            .{ .vertex = true, .fragment = true, .compute = true },
+            0,
+            @sizeOf(u32),
+            &(@as(u32, present.texture.default_view.device_address) << 10 &
+                ctx.present_sampler.device_address),
+        );
         ctx.device.cmdDraw(graphics_command_pool.body, 3, 1, 0, 0);
         ctx.device.cmdEndRendering(graphics_command_pool.body);
     }
@@ -2052,6 +2167,7 @@ fn recreateSwapchain(ctx: *Context, swapchain: *Swapchain) !void {
     // OPTIMIZE only recreate if needed
     // FIXME this needs to live inside the swapchain, since there could be multiple
     // swapchains with different formats
+    // FIXME we don't actually need to queue, the deviceWaitIdle should make this safe
     queueDestroyGraphicsPipeline(ctx, ctx.present_pipeline);
     const vertex_shader = try createShader(ctx, .{
         .stage = .vertex,
@@ -3056,6 +3172,19 @@ const TextureAllocator = struct {
         };
         texture.public.default_view = &default_view_2.public;
 
+        allocator.ctx.device.updateDescriptorSets(&.{.{
+            .dst_set = allocator.ctx.descriptor_set,
+            .dst_binding = 0,
+            .dst_array_element = default_view_slot,
+            .descriptor_count = 1,
+            .descriptor_type = .sampled_image,
+            .p_image_info = @ptrCast(&.{
+                .sampler = .null,
+                .image_view = default_view,
+                .image_layout = .shader_read_only_optimal,
+            }),
+        }}, null);
+
         if (texture_create_info.group) |group| {
             _ = group;
             @panic("TODO");
@@ -3063,9 +3192,7 @@ const TextureAllocator = struct {
             const group = try allocator.ctx.group_pool.create(allocator.ctx.gpa);
             group.* = .{
                 .public = .{
-                    .info = .{
-                        .name = "",
-                    },
+                    .info = .{ .name = "" },
                 },
                 .last_used = .{},
                 .textures = .empty,

@@ -424,7 +424,7 @@ pub const ViewCreateInfo = struct {
 };
 
 pub const View = struct {
-    device_address: u20,
+    device_address: u18,
     texture: *const Texture,
 
     info: struct {
@@ -463,14 +463,14 @@ pub const SamplerCreateInfo = struct {
     address_mode_w: AddressMode,
     mip_lod_bias: f32 = 0.0,
     max_anisotropy: ?f32 = null,
-    compare_op: ?CompareOp,
+    compare_op: ?CompareOp = null,
     min_lod: f32 = 0.0,
     max_lod: ?f32 = null,
     name: [:0]const u8 = &.{},
 };
 
 pub const Sampler = struct {
-    device_address: u12,
+    device_address: u10,
 
     info: struct {
         mag_filter: Filter,
