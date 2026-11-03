@@ -1303,18 +1303,20 @@ fn createSampler(ptr: *anyopaque, create_info: rhi.SamplerCreateInfo) !*const rh
         },
     };
 
-    ctx.device.updateDescriptorSets(&.{.{
+    const descriptor_image_info: vk.DescriptorImageInfo = .{
+        .sampler = vk_sampler,
+        .image_view = .null,
+        .image_layout = .undefined,
+    };
+    const write_descriptor_set: vk.WriteDescriptorSet = .{
         .dst_set = ctx.descriptor_set,
         .dst_binding = 2,
         .dst_array_element = sampler_slot,
         .descriptor_count = 1,
         .descriptor_type = .sampler,
-        .p_image_info = @ptrCast(&.{
-            .sampler = vk_sampler,
-            .image_view = .null,
-            .image_layout = .undefined,
-        }),
-    }}, null);
+        .p_image_info = @ptrCast(&descriptor_image_info),
+    };
+    ctx.device.updateDescriptorSets(&.{write_descriptor_set}, null);
 
     if (ctx.config.enable_debug and create_info.name.len > 0) {
         try ctx.device.setDebugUtilsObjectNameEXT(&.{
@@ -3172,18 +3174,20 @@ const TextureAllocator = struct {
         };
         texture.public.default_view = &default_view_2.public;
 
-        allocator.ctx.device.updateDescriptorSets(&.{.{
+        const descriptor_image_info: vk.DescriptorImageInfo = .{
+            .sampler = .null,
+            .image_view = default_view,
+            .image_layout = .shader_read_only_optimal,
+        };
+        const write_descriptor_set: vk.WriteDescriptorSet = .{
             .dst_set = allocator.ctx.descriptor_set,
             .dst_binding = 0,
             .dst_array_element = default_view_slot,
             .descriptor_count = 1,
             .descriptor_type = .sampled_image,
-            .p_image_info = @ptrCast(&.{
-                .sampler = .null,
-                .image_view = default_view,
-                .image_layout = .shader_read_only_optimal,
-            }),
-        }}, null);
+            .p_image_info = @ptrCast(&descriptor_image_info),
+        };
+        allocator.ctx.device.updateDescriptorSets(&.{write_descriptor_set}, null);
 
         if (texture_create_info.group) |group| {
             _ = group;
