@@ -7,13 +7,17 @@ const mem = @import("mem");
 pub const defines = @import("defines.zig");
 pub const sdl = @import("sdl.zig");
 
-pub const max_instances = 1024 * 1024;
-pub const max_models = 64 * 1024;
+pub const max_instances = 256 * 1024;
+pub const max_meshes = 64 * 1024;
+pub const max_textures = 64 * 1024;
+pub const max_materials = 16 * 1024;
+pub const max_models = 16 * 1024;
+pub const max_pipelines = 4 * 1024;
 
 const hdr_format = sdl.c.SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
 const sdr_format = sdl.c.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB;
 
-const Self = @This();
+const Renderer = @This();
 
 pub const VertexGeometry = extern struct {
     position: [3]f32,
@@ -40,7 +44,6 @@ pub const VertexMorph = extern struct {
 pub const Config = struct {
     width: u32,
     height: u32,
-    // sample_count: sdl.c.SDL_GPUSampleCount,
 };
 
 pub const CommandList = struct {
@@ -53,7 +56,7 @@ pub const CommandList = struct {
         },
     };
 
-    renderer: *Self,
+    renderer: *Renderer,
     arena: std.mem.Allocator,
     list: std.ArrayList(Command), // TODO: switch to something that doesn't reallocate
 
@@ -108,7 +111,7 @@ const UploadAllocator = struct {
     bytes: ?[*]u8 = null,
     commands: std.ArrayList(Command) = .empty,
 
-    pub fn init(renderer: *Self) !UploadAllocator {
+    pub fn init(renderer: *Renderer) !UploadAllocator {
         const buffer = try sdl.createGPUTransferBuffer(renderer.device, &.{
             .usage = sdl.c.SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
             .size = capacity,
@@ -168,26 +171,42 @@ const UploadAllocator = struct {
 };
 
 const Page = struct {
-    const capacity = (defines.block_size - @sizeOf(Header)) / @sizeOf(Instance) - 1;
+    // a page
 
     const Header = struct {
-        pipeline: *Pipeline,
-        material: *Material,
         mesh: *Mesh,
-        instances: [*]Instance,
+        instances: StaticSkipArray(*Instance, u16),
     };
 
     header: Header,
     bytes: [defines.block_size - @sizeOf(Header)]u8,
+
+    fn create(blka: std.mem.Allocator, mesh: *Mesh) !*Page {
+        const page = blka.create(Page);
+        page.header = .{
+            .mesh = mesh,
+            .instances = .initBacking(&page.bytes),
+        };
+        return page;
+    }
 };
 comptime {
     std.debug.assert(@sizeOf(Page) <= defines.block_size);
 }
 
-const Instance = struct {
+// instances are the external interface, you get a pointer to an instance
+// an instance is composed of several meshes
+// instances must have a stable address, simple solution is to cap the maximum number
+pub const Instance = struct {
     position: lin.V3d,
     orientation: lin.Qf,
     scale: lin.V3f,
+    visible: bool,
+
+    // lod state
+    src: [4]u8,
+    dst: [4]u8,
+    timer: [4]u8,
 };
 
 const Material = struct {
@@ -206,49 +225,26 @@ const Texture = struct {
     mip_levels: u32,
     min_mip_level: u32, // streaming state
     // texture: sdl.GPUTexture,
+
+    reference_count: u32,
 };
 
 const Mesh = struct {
+    material: *Material,
     buffer: *sdl.GPUBuffer,
+    bounding_sphere_offset: [3]f32,
+    bounding_sphere_radius: f32,
     vertex_allocation: mem.OffsetAllocator.Allocation,
     vertex_rigged_allocation: mem.OffsetAllocator.Allocation,
     vertex_morph_allocation: mem.OffsetAllocator.Allocation,
+
+    reference_count: u32,
 };
 
 const Model = struct {
-    // a model uses
-    // - one mesh (but all of its lods)
-    // - a pipeline
-    // - a material (textures & shader parameters)
-    // - (optional) a skeleton and morph targets
-
-    // the transform and lod state live on the gpu
-
-    mesh: *Mesh,
-    material: *Material,
-
+    // a model is a collection of meshes
+    meshes: []*Mesh,
     instance_count: usize,
-};
-
-const GpuData = extern struct {
-    position: [3][2]f32, // global high low dual
-    orientation: [4]f32,
-    scale: [3]f32,
-};
-const GPULodState = extern struct {
-    timer: u32, // 4x8 unorm
-    src: u32, // 4x8 uint
-    dst: u32, // 4x8 uint
-};
-
-// temporary on gpu
-// regenerated from the GpuData with a compute shader each frame
-const GpuTransformData = extern struct {
-    model: [4][4]f32 align(16), // relative to renderer origin
-};
-const GPUCullingData = extern struct {
-    position: [3]f32 align(16), // relative to renderer origin
-    radius: f32,
 };
 
 const GpuMeshData = extern struct {
@@ -281,7 +277,12 @@ depth_backbuffer: *sdl.GPUTexture,
 // instance_allocator: mem.SlotAllocator,
 // instance_map: std.HashMapUnmanaged(Key, struct { slot: u32, refcount: u32 }, Key.HashContext, 80),
 
-model_map: std.AutoHashMapUnmanaged(spiral.Uuid, *Model),
+// all these maps are append only (maybe we could even preload everything)
+model_map: std.AutoHashMapUnmanaged(spiral.Uuid, u32),
+// material_map: std.AutoHashMapUnmanaged(spiral.Uuid, u32),
+// pipeline_map: std.AutoHashMapUnmanaged(spiral.Uuid, u32),
+// meshe_map: std.AutoHashMapUnmanaged(spiral.Uuid, *Mesh),
+// texture_map: std.AutoHashMapUnmanaged(spiral.Uuid, *Mesh),
 
 // mesh_allocator: mem.MemoryPool(Mesh),
 // mesh_map: std.AutoHashMapUnmanaged(spiral.Uuid, struct { ptr: *Mesh, refcount: u32 }),
@@ -320,7 +321,7 @@ device: *sdl.GPUDevice,
 // origin: lin.V3d,
 
 pub fn init(
-    renderer: *Self,
+    renderer: *Renderer,
     _gpa: std.mem.Allocator,
     _blka: std.mem.Allocator,
     _io: std.Io,
@@ -372,7 +373,7 @@ pub fn init(
     const depth_backbuffer = try sdl.createGPUTexture(device, &.{
         .type = sdl.c.SDL_GPU_TEXTURETYPE_2D,
         .format = depth_stencil_format,
-        .usage = sdl.c.SDL_GPU_TEXTUREUSAGE_COLOR_TARGET,
+        .usage = sdl.c.SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET,
         .width = config.width,
         .height = config.height,
         .layer_count_or_depth = 1,
@@ -492,7 +493,7 @@ pub fn init(
     try renderer._testSetup();
 }
 
-pub fn deinit(renderer: *Self) void {
+pub fn deinit(renderer: *Renderer) void {
     renderer.upload_allocator.deinit();
 
     sdl.releaseGPUTexture(renderer.device, renderer.hdr_backbuffer);
@@ -527,7 +528,7 @@ pub fn deinit(renderer: *Self) void {
 //   binds & uniforms (offset in instance buffer)
 //   drawindirect(culled_buffer_for_single_lod)
 
-pub fn draw(renderer: *Self, arena: std.mem.Allocator, command_lists: []CommandList) !void {
+pub fn draw(renderer: *Renderer, arena: std.mem.Allocator, command_lists: []CommandList) !void {
     _ = arena;
     _ = command_lists;
 
@@ -558,13 +559,13 @@ pub fn draw(renderer: *Self, arena: std.mem.Allocator, command_lists: []CommandL
     try renderer.upload_allocator.bind();
 }
 
-fn loadModel(renderer: *Self, uuid: spiral.Uuid) !*Model {
+fn loadModel(renderer: *Renderer, uuid: spiral.Uuid) !*Model {
     _ = renderer;
     _ = uuid;
     return undefined;
 }
 
-fn _testSetup(renderer: *Self) !void {
+fn _testSetup(renderer: *Renderer) !void {
     std.debug.print("--- start testSetup ---\n", .{});
 
     var arena_impl: std.heap.ArenaAllocator = .init(renderer.gpa);
@@ -664,4 +665,292 @@ fn _testSetup(renderer: *Self) !void {
     errdefer sdl.releaseGPUGraphicsPipeline(renderer.device, pipeline);
 
     std.debug.print("--- end testSetup ---\n", .{});
+}
+
+fn StaticSkipArray(comptime T: type, comptime Skip: type) type {
+    return struct {
+        const Self = @This();
+
+        const Node = struct {
+            next: Skip,
+            prev: Skip,
+        };
+        const Data = union {
+            node: Node,
+            value: T,
+        };
+
+        capacity: usize,
+        skip: [*]Skip, // capacity + 1
+        data: [*]Data, // capacity
+        first_free_block: ?Skip,
+
+        /// init into a slice of memory at maximum capacity that fits
+        fn initBacking(backing_memory: []u8) Self {
+            const capacity = backing_memory.len / (@sizeOf(T) + @sizeOf(Skip)) - 1;
+            std.debug.print("StaticSkipArray initBacking capacity is {}\n", .{capacity});
+            std.debug.assert(capacity <= std.math.maxInt(Skip));
+
+            // (sub)allocate and setup skiplist
+            const skip: [*]Skip = @ptrCast(backing_memory.ptr);
+            skip[0] = @intCast(capacity);
+            skip[capacity - 1] = @intCast(capacity);
+            skip[capacity] = 0;
+
+            // (sub)allocate data segment and setup free-block
+            const data: [*]Data = @ptrFromInt(std.mem.alignForward(
+                usize,
+                @intFromPtr(backing_memory.ptr) + @sizeOf(Skip) * (capacity + 1),
+                @alignOf(T),
+            ));
+            data[0] = .{ .node = .{
+                .prev = 0,
+                .next = 0,
+            } };
+            std.debug.assert(
+                @intFromPtr(&data[capacity]) <= @intFromPtr(backing_memory.ptr) + backing_memory.len,
+            );
+
+            return .{
+                .capacity = capacity,
+                .skip = skip,
+                .data = data,
+                .first_free_block = 0,
+            };
+        }
+
+        /// init to a fixed capacity by allocating the required memory
+        fn initCapacity(gpa: std.mem.Allocator, capacity: usize) Self {
+            std.debug.assert(capacity <= std.math.maxInt(Skip));
+            const backing_memory = try gpa.alloc(Skip, size(capacity));
+
+            // (sub)allocate and setup skiplist
+            const skip: [*]Skip = backing_memory.ptr;
+            skip[0] = @intCast(capacity);
+            skip[capacity - 1] = @intCast(capacity);
+            skip[capacity] = 0;
+
+            // (sub)allocate data segment and setup free-block
+            const data: [*]Data = @ptrFromInt(std.mem.alignForward(
+                usize,
+                @intFromPtr(backing_memory.ptr) + @sizeOf(Skip) * (capacity + 1),
+                @alignOf(T),
+            ));
+            data[0] = .{ .node = .{
+                .prev = 0,
+                .next = 0,
+            } };
+
+            return .{
+                .capacity = capacity,
+                .skip = skip,
+                .data = data,
+                .first_free_block = 0,
+            };
+        }
+
+        fn deinit(array: *Self, gpa: std.mem.Allocator) void {
+            const backing_memory = array.skip[0..size(array.capacity)];
+            gpa.free(backing_memory);
+            array.* = undefined;
+        }
+
+        fn size(capacity: usize) usize {
+            const sizeof_skip = @sizeOf(Skip) * (capacity + 1) + @alignOf(Skip);
+            const sizeof_data = @sizeOf(Data) * (capacity + 1) + @alignOf(Data);
+            return (sizeof_skip + sizeof_data + @sizeOf(Skip) - 1) / @sizeOf(Skip);
+        }
+
+        fn full(array: Self) bool {
+            return array.first_free_block == null;
+        }
+
+        fn empty(array: Self) bool {
+            return array.skip[0] == array.capacity;
+        }
+
+        fn insertAssumeCapacity(array: *Self) *T {
+            std.debug.assert(array.first_free_block != null);
+
+            const ix = array.first_free_block.?;
+            const skip = array.skip;
+            const data = array.data;
+
+            std.debug.assert(skip[ix] > 0);
+            std.debug.assert(skip[ix] == skip[ix + skip[ix] - 1]);
+            const free_block = data[ix].node;
+            const free_block_len = skip[ix];
+
+            skip[ix + 1] = skip[ix] - 1;
+            if (skip[ix] > 2) skip[ix + skip[ix] - 1] -= 1;
+            skip[ix] = 0;
+            std.debug.assert(skip[ix + 1] < array.capacity - ix);
+
+            data[ix] = .{ .value = undefined };
+
+            if (free_block_len > 1) {
+                data[ix + 1] = .{ .node = .{
+                    .prev = ix + 1,
+                    .next = if (free_block.next != ix) free_block.next else @intCast(ix + 1),
+                } };
+                if (free_block.next != ix) {
+                    data[free_block.next].node.prev = ix + 1;
+                }
+                array.first_free_block.? += 1;
+            } else {
+                // free block is exhausted, remove from free list
+                std.debug.assert(free_block.prev == ix);
+                if (free_block.next != ix) {
+                    data[free_block.next].node.prev = free_block.next;
+                    array.first_free_block = free_block.next;
+                } else {
+                    // segment is completely full
+                    array.first_free_block = null;
+                }
+            }
+
+            return &array.data[ix].value;
+        }
+
+        fn erase(array: *Self, ix: Skip) T {
+            const skip = array.skip;
+            const data = array.data;
+
+            std.debug.assert(skip[ix] == 0);
+            const value = data[ix].value;
+
+            const skip_left = if (ix == 0) 0 else skip[ix - 1];
+            const skip_right = skip[ix + 1]; // NOTE may index into the padding skipfield
+            // there are four options for the free block
+            // a) both neighbours occupied, form new free block
+            // b/c) one neighbour occupied (left/right), extend free block
+            // d) both neighbours free, merge into the free block on the left
+            // and the way to determine the case is to look at the skipfields
+            if (skip_left == 0 and skip_right == 0) {
+                skip[ix] = 1;
+                data[ix] = .{ .node = .{
+                    .prev = ix,
+                    .next = array.first_free_block orelse ix,
+                } };
+                if (array.first_free_block) |first| array.data[first].node.prev = ix;
+                array.first_free_block = ix;
+            } else if (skip_left > 0 and skip_right == 0) {
+                const new_block_len = skip_left + 1;
+                skip[ix - skip[ix - 1]] = new_block_len;
+                skip[ix] = new_block_len;
+            } else if (skip_left == 0 and skip_right > 0) {
+                const new_block_len = skip_right + 1;
+                skip[ix + skip[ix + 1]] = new_block_len;
+                skip[ix] = new_block_len;
+                const old_block = data[ix + 1].node;
+                data[ix] = .{ .node = .{
+                    .prev = if (old_block.prev != ix + 1) old_block.prev else ix,
+                    .next = if (old_block.next != ix + 1) old_block.next else ix,
+                } };
+                // since the free block has moved one step over, update the linked list
+                if (old_block.prev == ix + 1) {
+                    array.first_free_block = ix;
+                } else {
+                    data[old_block.prev].node.next = ix;
+                }
+                if (old_block.next != ix + 1) {
+                    data[old_block.next].node.prev = ix;
+                }
+            } else if (skip_left > 0 and skip_right > 0) {
+                const new_block_len = skip_left + skip_right + 1;
+                skip[ix - skip[ix - 1]] = new_block_len;
+                skip[ix + skip[ix + 1]] = new_block_len;
+                // now remove the skip block on the right
+                const old_block = data[ix + 1].node;
+                if (old_block.prev != ix + 1) {
+                    data[old_block.prev].node.next = if (old_block.next != ix + 1)
+                        old_block.next
+                    else
+                        old_block.prev;
+                } else {
+                    array.first_free_block = if (old_block.next != ix + 1)
+                        old_block.next
+                    else
+                        null;
+                }
+                if (old_block.next != ix + 1) {
+                    data[old_block.next].node.prev = if (old_block.prev != ix + 1)
+                        old_block.prev
+                    else
+                        old_block.next;
+                }
+            } else unreachable;
+
+            return value;
+        }
+
+        fn getIndex(array: *Self, ptr: *T) ?Skip {
+            const ptr_addr = @intFromPtr(ptr);
+            const data_addr = @intFromPtr(array.data);
+            if (ptr_addr < data_addr or
+                ptr_addr >= data_addr + array.capacity * @sizeOf(T)) return null;
+            return @intCast((@intFromPtr(ptr) - @intFromPtr(array.data)) / @sizeOf(T));
+        }
+
+        const Iterator = struct {
+            const Cursor =
+                switch (Skip) {
+                    u16 => u32,
+                    u32 => u64,
+                    else => @compileError("unsupported skipfield size"),
+                };
+
+            cursor: Cursor,
+            capacity: usize,
+            data: [*]Data,
+            skip: [*]Skip,
+
+            const dummy: Iterator = .{
+                .cursor = std.math.maxInt(Cursor),
+                .capacity = 0,
+                .data = undefined,
+                .skip = undefined,
+            };
+
+            fn next(it: *Iterator) ?*T {
+                if (it.cursor >= it.capacity) return null;
+                const value_ptr = &it.data[it.cursor].value;
+                it.cursor += 1;
+                it.cursor += it.skip[it.cursor];
+                return value_ptr;
+            }
+        };
+
+        fn iterator(array: *Self) Iterator {
+            return .{
+                .cursor = array.skip[0],
+                .capacity = array.capacity,
+                .data = array.data,
+                .skip = array.skip,
+            };
+        }
+
+        fn debugPrint(array: Self) void {
+            std.debug.print("StaticSkipArray <{s}>, ", .{@typeName(T)});
+            std.debug.print("skipfield size: {s}, ", .{@typeName(Skip)});
+            std.debug.print("capacity: {}\n", .{array.capacity});
+            std.debug.print("  skip:", .{});
+            for (array.skip[0 .. array.capacity + 1]) |skip| std.debug.print(" {}", .{skip});
+            std.debug.print("\n", .{});
+            std.debug.print("  freelist: ", .{});
+            if (array.first_free_block) |first_free_block| {
+                var i = first_free_block;
+                while (true) {
+                    const node = array.data[i].node;
+                    std.debug.print("({} [{}] {})", .{ node.prev, i, node.next });
+                    if (node.next == i) break;
+                    std.debug.print("->", .{});
+                    i = node.next;
+                }
+            } else {
+                std.debug.print("[StaticSkipArray is full]", .{});
+            }
+            std.debug.print("\n", .{});
+        }
+    };
 }

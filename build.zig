@@ -108,6 +108,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "spiral", .module = spiral },
             .{ .name = "ecs", .module = ecs },
             .{ .name = "keygen", .module = keygen },
+            .{ .name = "vulkan", .module = vulkan },
         },
     });
 

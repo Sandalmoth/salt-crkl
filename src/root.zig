@@ -5,6 +5,8 @@ pub const defines = @import("defines.zig");
 pub const sdl = @import("sdl.zig");
 pub const Renderer = @import("renderer.zig");
 
+const vx = @import("vx.zig");
+
 pub const KeyGen = @import("keygen").KeyGen;
 
 pub const ecs = struct {
@@ -80,6 +82,9 @@ pub const Context = struct {
         var seed: u32 = undefined;
         ctx.io.random(std.mem.asBytes(&seed));
         ctx.keygen = .init(seed);
+
+        const vkctx: vx.Context = undefined;
+        std.debug.print("{}\n", .{vkctx});
     }
 
     pub fn deinit(ctx: *Context) void {

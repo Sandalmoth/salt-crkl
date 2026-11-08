@@ -80,7 +80,7 @@ pub const ViewSwizzle = struct {
     a: Component = .a,
 };
 
-pub const ViewRange = struct {
+pub const TextureRange = struct {
     base_mip_level: u32,
     level_count: u32,
     base_array_layer: u32,
@@ -419,7 +419,7 @@ pub const ViewCreateInfo = struct {
     view_type: ?ViewType = null,
     format: ?Format = null,
     swizzle: ViewSwizzle = .{},
-    range: ?ViewRange,
+    range: ?TextureRange,
     name: [:0]const u8 = &.{},
 };
 
@@ -431,7 +431,7 @@ pub const View = struct {
         view_type: ViewType,
         format: Format,
         swizzle: ViewSwizzle,
-        range: ViewRange,
+        range: TextureRange,
         name: [:0]const u8,
     },
 };
