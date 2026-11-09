@@ -1,24 +1,38 @@
 const std = @import("std");
-pub const vk = @import("vulkan");
 
-const SlotPool = @import("vx/SlotPool.zig");
+// overall design
+// bindless oriented, buffers are (almost) always by address
+// textures and samplers are in one large heap
 
-const Platform = struct {};
+// intended to run on anything from the last 10-ish years
 
-const Config = struct {};
+// there is an upload and download staging buffer built in
+// they have transfer src/dst and are mapped and have a destruction queue
+// but you cannot access their device address, they are just for staging
+
+// the command buffer has access to an all-usages temp memory buffer
+// you can push data into that and it's available for that submit (replaces uniforms)
+// shaders take a single address for their data (e.g. in temp buffer)
+
+// there is also general buffer memory that is on device, but it's not mapped
+
+// context funcitions are thread safe (like create/destroy)
+// destroy is automatically deferred until safe
+
+// command buffers are not (generally) threadsafe (intended to be single thread used)
+
+// gpu buffers are handled via their device address
+// which can be translated on the backend to buffer + offset using e.g. a segment tree
+
+// all buffers (except the upload/download staging) support
+// storage, transfer src/dst, indirect, index
+
+// no vertex buffers (vertex pulling only)
+// we assume that there is something equivalent to gl_draw_id available for multidrawindirect
 
 pub const Window = *anyopaque;
 
-pub const BufferUsage = struct {
-    storage: bool = false,
-    transfer_src: bool = false,
-    transfer_dst: bool = false,
-    index: bool = false,
-    indirect: bool = false,
-};
-
 pub const BufferCreateInfo = struct {
-    usage: BufferUsage,
     size: usize,
     name: [:0]const u8 = &.{},
 };
@@ -27,7 +41,6 @@ pub const Buffer = struct {
     device_address: u64,
 
     info: struct {
-        usage: BufferUsage,
         size: usize,
         name: [:0]const u8,
     },
@@ -139,13 +152,11 @@ pub const GraphicsPipeline = struct {
 
 pub const ComputePipelineCreateInfo = struct {
     shader: *const Shader,
-    local_size: [3]u32,
     name: [:0]const u8 = &.{},
 };
 
 pub const ComputePipeline = struct {
     info: struct {
-        local_size: [3]u32,
         name: [:0]const u8,
     },
 };
@@ -168,14 +179,14 @@ pub const Swapchain = struct {
 };
 
 pub const ShaderCreateInfo = struct {
-    stage: Stage,
+    stage: ShaderStage,
     src: []const u8,
     name: [:0]const u8 = &.{},
 };
 
 pub const Shader = struct {
     info: struct {
-        stage: Stage,
+        stage: ShaderStage,
         name: [:0]const u8,
     },
 };
@@ -258,7 +269,7 @@ pub const CompareOp = enum {
     always,
 };
 
-pub const Stage = enum { vertex, fragment, compute };
+pub const ShaderStage = enum { vertex, fragment, compute };
 
 pub const PresentMode = enum {
     fifo,
@@ -498,7 +509,8 @@ pub const DrawIndexedIndirectCommand = extern struct {
     index_count: u32,
     instance_count: u32,
     first_index: u32,
-    _pad: u64 = 0, // vertex offset and first instance are not supported
+    _vertex_offset: i32 = 0, // not supported
+    _first_instance: u32 = 0, // not supported
 };
 
 pub const DispatchIndirectCommand = extern struct {
@@ -507,46 +519,7 @@ pub const DispatchIndirectCommand = extern struct {
     z: u32,
 };
 
-//     enum class Stage : uint64
-// {
-//     none = 0,
-//     indirect = 1ull << 0u,
-//     index_input = 1ull << 1u,
-//     vertex = 1ull << 2u,
-//     task = 1ull << 3u,
-//     mesh = 1ull << 4u,
-//     depth_stencil_tests = 1ull << 5u,
-//     fragment = 1ull << 6u,
-//     color_output = 1ull << 7u,
-//     compute = 1ull << 8u,
-//     transfer = 1ull << 9u,
-//     host = 1ull << 10u, // Barrier destination only, paired with host_read.
-//     all_commands = 1ull << 11u, // All GPU command stages; excludes host.
-// };
-
-// constexpr Stage operator|(Stage lhs, Stage rhs) noexcept
-// {
-//     return static_cast<Stage>(static_cast<uint64>(lhs) | static_cast<uint64>(rhs));
-// }
-
-// enum class Access : uint64
-// {
-//     none = 0,
-//     transfer_read = 1ull << 0u,
-//     transfer_write = 1ull << 1u,
-//     shader_read = 1ull << 2u,
-//     shader_write = 1ull << 3u,
-//     color_read = 1ull << 4u,
-//     color_write = 1ull << 5u,
-//     depth_stencil_read = 1ull << 6u,
-//     depth_stencil_write = 1ull << 7u,
-//     indirect_read = 1ull << 8u,
-//     index_read = 1ull << 9u,
-//     host_read = 1ull << 10u,
-//     descriptor_read = 1ull << 11u,
-// };
-
-const Stage = enum {
+const Stage = struct {
     transfer: bool = false,
     indirect: bool = false,
     compute: bool = false,
@@ -554,7 +527,7 @@ const Stage = enum {
     fragment: bool = false,
 };
 
-const Access = enum {
+const Access = struct {
     read: bool = false,
     write: bool = false,
 };
@@ -565,9 +538,8 @@ const Layout = enum {
     read_only,
 };
 
-const Transition = enum {
+const Transition = struct {
     texture: *const Texture,
-    range: TextureRange,
     layout: Layout,
     discard: bool,
 };
@@ -628,16 +600,16 @@ pub const CommandList = struct {
         // device addresses are used to replace buffer ids and offsets in most cases
         // they can be translated on the backend into buffer + offset (probably using like a segment tree)
 
-        // copies to/from upload/download staging buffers
+        // copies to/from upload/download staging buffers (from a stagingAllocator)
         // (which are handled via mapped as []u8 cpu memory)
         bufferUpload: *const fn (*anyopaque, []const u8, *const Buffer, u64) Error!void,
         bufferDownload: *const fn (*anyopaque, *const Buffer, u64, []const u8) Error!void,
-        // textureUpload
-        // textureDownload
+        // textureUpload: *const fn (*anyopaque, []const u8, ...)
+        // textureDownload:
 
         // copies between gpu side buffers or textures
         bufferCopy: *const fn (*anyopaque, u64, u64, u64) Error!void, // src_dev_addr, dst_dev_addr, size
-        // textureCopy
+        // textureCopy (similar to blit)
         blit: *const fn (*anyopaque, *const Texture, BlitRegion, *const Texture, BlitRegion, Filter) Error!void,
 
         // put data in a temporary buffer with lifetime equal to this command buffer
@@ -650,7 +622,7 @@ pub const CommandList = struct {
         // we don't need to specify an instance buffer or offset, just use a device address
         drawIndexed: *const fn (*anyopaque, u64, u64, u32, u32) Error!void, // root_data index_dev_addr index_count instance_count
         // note that we assume stride == @sizeOf(DrawIndexedIndirectCommand), a packed buffer
-        drawIndexedIndirect: *const fn (*anyopaque, u64, u64, u64, u32, u32) Error!void, // root_data, index_dev_addr, indirect_dev_addr, draw_count
+        drawIndexedIndirect: *const fn (*anyopaque, u64, u64, u64, u32) Error!void, // root_data, index_dev_addr, indirect_dev_addr, draw_count
         drawIndexedIndirectCount: *const fn (*anyopaque, u64, u64, u64, u64, u32) Error!void, // root_data, index_dev_addr, indirect_dev_addr, count_dev_addr, max_count
         endRenderPass: *const fn (*anyopaque) Error!void,
 
@@ -659,6 +631,8 @@ pub const CommandList = struct {
         dispatch: *const fn (*anyopaque, u64, u32, u32, u32) Error!void,
         dispatchIndirect: *const fn (*anyopaque, u64, u64) Error!void,
         endComputePass: *const fn (*anyopaque) Error!void,
+
+        present: *const fn (*anyopaque, *const Texture) Error!void,
 
         barrier: *const fn (*anyopaque, Stage, Access, Stage, Access, []const Transition) Error!void,
     };

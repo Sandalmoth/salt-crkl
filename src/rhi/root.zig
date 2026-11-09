@@ -37,8 +37,6 @@ pub const SampleCount = enum {
     count_4,
     count_8,
     count_16,
-    count_32,
-    count_64,
 };
 
 pub const TextureType = enum {
