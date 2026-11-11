@@ -287,13 +287,10 @@ pub const TextureType = enum {
 pub const Format = enum {
     r8g8b8a8_unorm,
     r8g8b8a8_srgb,
-    b8g8r8a8_unorm,
-    b8g8r8a8_srgb,
     r16g16b16a16_sfloat,
     r32_uint,
     s8_uint,
     d16_unorm,
-    d16_unorm_s8_uint,
     d24_unorm_s8_uint,
     d32_sfloat,
     d32_sfloat_s8_uint,
@@ -311,9 +308,6 @@ pub const SampleCount = enum {
     count_2,
     count_4,
     count_8,
-    count_16,
-    count_32,
-    count_64,
 };
 
 pub const Aspect = enum {
@@ -572,7 +566,7 @@ pub const Context = struct {
     pub const VTable = struct {
         createSwapchain: *const fn (*anyopaque, SwapchainCreateInfo, ?*const Swapchain) Error!*const Swapchain,
         destroySwapchain: *const fn (*anyopaque, *const Swapchain) void,
-        acquireSwapchain: *const fn (*anyopaque, *const Swapchain, u64) Error!*const Texture,
+        acquireSwapchain: *const fn (*anyopaque, *const Swapchain, u64) Error!void,
 
         createTexture: *const fn (*anyopaque, TextureCreateInfo) Error!*const Texture,
         createSampler: *const fn (*anyopaque, SamplerCreateInfo) Error!*const Sampler,
@@ -597,6 +591,9 @@ pub const Context = struct {
         submit: *const fn (*anyopaque, []const CommandList) Error!Fence,
 
         wait: *const fn (*anyopaque, Fence, u64) Error!void,
+
+        // some more things to consider
+        // textureSupported
     };
 };
 
@@ -643,9 +640,13 @@ pub const CommandList = struct {
         dispatchIndirect: *const fn (*anyopaque, u64, u64) void, // root_data indirect_dev_addr
         endComputePass: *const fn (*anyopaque) void,
 
-        present: *const fn (*anyopaque, *const Texture) void,
+        present: *const fn (*anyopaque, *const Texture, *const Swapchain) void,
 
         barrier: *const fn (*anyopaque, Scope) void,
         transition: *const fn (*anyopaque, Scope, *const Texture, Layout, bool) void, // bool is whether to discard contents
+
+        // some more things to consider
+        // debugLabel
+        // timestamp
     };
 };
