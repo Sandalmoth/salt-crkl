@@ -2,57 +2,186 @@ const std = @import("std");
 
 pub const Vulkan = @import("VulkanContext.zig");
 
+// overall design
+// bindless oriented, buffers are (almost) always by address
+// textures and samplers are in one large heap
+
+// intended to run on anything from the last 10-ish years
+
+// there is an upload and download staging buffer built in
+// they have transfer src/dst and are mapped and have a destruction queue
+// but you cannot access their device address, they are just for staging
+
+// the command buffer has access to an all-usages temp memory buffer
+// you can push data into that and it's available for that submit (replaces uniforms)
+// shaders take a single address for their data (e.g. in temp buffer)
+
+// there is also general buffer memory that is on device, but it's not mapped
+
+// context funcitions are thread safe (like create/destroy)
+// destroy is automatically deferred until safe
+
+// command buffers are not (generally) threadsafe (intended to be single thread used)
+
+// gpu buffers are handled via their device address
+// which can be translated on the backend to buffer + offset using e.g. a segment tree
+
+// all buffers (except the upload/download staging) support
+// storage, transfer src/dst, indirect, index
+
+// no vertex buffers (vertex pulling only)
+// we assume that there is something equivalent to gl_draw_id available for multidrawindirect
+
 pub const Window = *anyopaque;
 
-// enums and config/helper structs
-
-pub const PresentMode = enum {
-    fifo,
-    mailbox,
+pub const TextureCreateInfo = struct {
+    usage: TextureUsage,
+    format: Format,
+    texture_type: TextureType,
+    mip_levels: u32,
+    size: [3]u32, // x, y, z or layer_count
+    samples: SampleCount = .count_1,
+    views: []const ViewCreateInfo = &.{},
+    name: [:0]const u8 = &.{},
 };
 
-pub const Composition = enum {
-    sdr,
+pub const Texture = struct {
+    default_view: *const View,
+    views: []const View,
+
+    info: struct {
+        usage: TextureUsage,
+        size: [3]u32,
+        format: Format,
+        mip_levels: u32,
+        sample_count: SampleCount,
+        texture_type: TextureType,
+        name: [:0]const u8,
+    },
 };
 
-pub const Format = enum {
-    r8g8b8a8_unorm,
-    r8g8b8a8_srgb,
-    b8g8r8a8_unorm,
-    b8g8r8a8_srgb,
-    r16g16b16a16_sfloat,
-    r32_uint,
-    s8_uint,
-    d16_unorm,
-    d16_unorm_s8_uint,
-    d24_unorm_s8_uint,
-    d32_sfloat,
-    d32_sfloat_s8_uint,
-    // TODO check for other particularly useful and well supported formats
+pub const ViewCreateInfo = struct {
+    view_type: ?ViewType = null,
+    format: ?Format = null,
+    swizzle: ViewSwizzle = .{},
+    range: ?ViewRange = null,
+    name: [:0]const u8 = &.{},
 };
 
-pub const SampleCount = enum {
-    count_1,
-    count_2,
-    count_4,
-    count_8,
-    count_16,
+pub const View = struct {
+    device_address: u20,
+    texture: *const Texture,
+
+    info: struct {
+        view_type: ViewType,
+        format: Format,
+        swizzle: ViewSwizzle,
+        range: ViewRange,
+        name: [:0]const u8,
+    },
 };
 
-pub const TextureType = enum {
-    texture_2d,
-    texture_3d,
-    texture_cube,
-    texture_2d_array,
-    texture_cube_array,
+pub const SamplerCreateInfo = struct {
+    mag_filter: Filter,
+    min_filter: Filter,
+    mipmap_filter: Filter,
+    address_mode_u: AddressMode,
+    address_mode_v: AddressMode,
+    address_mode_w: AddressMode,
+    mip_lod_bias: f32 = 0.0,
+    max_anisotropy: ?f32 = null,
+    compare_op: ?CompareOp = null,
+    min_lod: f32 = 0.0,
+    max_lod: ?f32 = null,
+    name: [:0]const u8 = &.{},
 };
 
-pub const ViewType = enum {
-    view_2d,
-    view_3d,
-    view_cube,
-    view_2d_array,
-    view_cube_array,
+pub const Sampler = struct {
+    device_address: u10,
+
+    info: struct {
+        mag_filter: Filter,
+        min_filter: Filter,
+        mipmap_filter: Filter,
+        address_mode_u: AddressMode,
+        address_mode_v: AddressMode,
+        address_mode_w: AddressMode,
+        mip_lod_bias: f32 = 0.0,
+        max_anisotropy: ?f32 = null,
+        compare_op: ?CompareOp,
+        min_lod: f32 = 0.0,
+        max_lod: ?f32 = null,
+        name: [:0]const u8 = &.{},
+    },
+};
+
+pub const GraphicsPipelineCreateInfo = struct {
+    vertex_shader: *const Shader,
+    fragment_shader: ?*const Shader,
+    polygon_mode: PolygonMode = .fill,
+    multisample: MultisampleState = .{},
+    color_attachments: []const ColorAttachment,
+    depth_attachment_format: ?Format,
+    stencil_attachment_format: ?Format,
+    name: [:0]const u8 = &.{},
+};
+
+pub const GraphicsPipeline = struct {
+    info: struct {
+        fragment_shader: bool,
+        polygon_mode: PolygonMode,
+        multisample: MultisampleState,
+        color_attachments: []const ColorAttachment,
+        depth_attachment_format: ?Format,
+        stencil_attachment_format: ?Format,
+        name: [:0]const u8,
+    },
+};
+
+pub const ComputePipelineCreateInfo = struct {
+    shader: *const Shader,
+    name: [:0]const u8 = &.{},
+};
+
+pub const ComputePipeline = struct {
+    info: struct {
+        name: [:0]const u8,
+    },
+};
+
+pub const SwapchainCreateInfo = struct {
+    name: [:0]const u8 = &.{},
+    window: Window,
+    present_mode: PresentMode = .fifo,
+    composition: Composition = .sdr,
+    recreate: ?*Swapchain = null,
+};
+
+pub const Swapchain = struct {
+    info: struct {
+        name: [:0]const u8,
+        present_mode: PresentMode,
+        composition: Composition,
+        size: [3]u32,
+    },
+};
+
+pub const ShaderCreateInfo = struct {
+    stage: ShaderStage,
+    src: []const u8,
+    name: [:0]const u8 = &.{},
+};
+
+pub const Shader = struct {
+    info: struct {
+        stage: ShaderStage,
+        name: [:0]const u8,
+    },
+};
+
+pub const MultisampleState = struct {
+    sample_count: SampleCount = .count_1,
+    enable_alpha_to_coverage: bool = false,
 };
 
 pub const TextureUsage = struct {
@@ -63,64 +192,32 @@ pub const TextureUsage = struct {
     attachment: bool = false, // color or depth_stencil is inferred based on format
 };
 
-pub const ViewSwizzle = struct {
-    const Component = enum {
-        zero,
-        one,
-        r,
-        g,
-        b,
-        a,
-    };
-    r: Component = .r,
-    g: Component = .g,
-    b: Component = .b,
-    a: Component = .a,
+pub const ColorWriteMask = struct {
+    r: bool = true,
+    g: bool = true,
+    b: bool = true,
+    a: bool = true,
 };
 
-pub const TextureRange = struct {
-    base_mip_level: u32,
-    level_count: u32,
-    base_array_layer: u32,
-    layer_count: u32,
-    mask: ?enum { depth, stencil } = null,
+pub const BlendState = struct {
+    src_color_blend_factor: BlendFactor,
+    dst_color_blend_factor: BlendFactor,
+    color_blend_op: BlendOp,
+    src_alpha_blend_factor: BlendFactor,
+    dst_alpha_blend_factor: BlendFactor,
+    alpha_blend_op: BlendOp,
 };
 
-pub const BufferUsage = struct {
-    storage: bool = false,
-    transfer_src: bool = false,
-    transfer_dst: bool = false,
-    index: bool = false,
-    indirect: bool = false,
-};
-
-pub const Filter = enum {
-    nearest,
-    linear,
+pub const ColorAttachment = struct {
+    format: Format,
+    color_write_mask: ColorWriteMask = .{},
+    blend_state: ?BlendState = null,
 };
 
 pub const AddressMode = enum {
     repeat,
     mirrored_repeat,
     clamp_to_edge,
-};
-
-pub const PolygonMode = enum {
-    fill,
-    line,
-    point,
-};
-
-pub const MultisampleState = struct {
-    sample_count: SampleCount = .count_1,
-    enable_alpha_to_coverage: bool = false,
-};
-
-pub const ColorWriteMask = struct {
-    r: bool = true,
-    g: bool = true,
-    b: bool = true,
-    a: bool = true,
 };
 
 pub const BlendFactor = enum {
@@ -149,21 +246,6 @@ pub const BlendOp = enum {
     max,
 };
 
-pub const BlendState = struct {
-    src_color_blend_factor: BlendFactor,
-    dst_color_blend_factor: BlendFactor,
-    color_blend_op: BlendOp,
-    src_alpha_blend_factor: BlendFactor,
-    dst_alpha_blend_factor: BlendFactor,
-    alpha_blend_op: BlendOp,
-};
-
-pub const ColorAttachment = struct {
-    format: Format,
-    color_write_mask: ColorWriteMask = .{},
-    blend_state: ?BlendState = null,
-};
-
 pub const CompareOp = enum {
     never,
     less,
@@ -173,6 +255,171 @@ pub const CompareOp = enum {
     not_equal,
     greater_or_equal,
     always,
+};
+
+pub const ShaderStage = enum { vertex, fragment, compute };
+
+pub const PresentMode = enum {
+    fifo,
+    mailbox,
+};
+
+pub const Composition = enum {
+    sdr,
+};
+
+pub const StagingAllocatorUsage = enum {
+    upload,
+    download,
+};
+
+pub const Filter = enum {
+    nearest,
+    linear,
+};
+
+pub const TextureType = enum {
+    texture_2d,
+    texture_3d,
+    texture_cube,
+    texture_2d_array,
+    texture_cube_array,
+};
+
+pub const Format = enum {
+    r8g8b8a8_unorm,
+    r8g8b8a8_srgb,
+    r16g16b16a16_sfloat,
+    r32_uint,
+    s8_uint,
+    d16_unorm,
+    d24_unorm_s8_uint,
+    d32_sfloat,
+    d32_sfloat_s8_uint,
+    // TODO check for other particularly useful and well supported formats
+};
+
+pub const PolygonMode = enum {
+    fill,
+    line,
+    point,
+};
+
+pub const SampleCount = enum {
+    count_1,
+    count_2,
+    count_4,
+    count_8,
+};
+
+pub const Aspect = enum {
+    depth,
+    stencil,
+};
+
+pub const ViewRange = struct {
+    base_mip_level: u32,
+    level_count: u32,
+    base_array_layer: u32,
+    layer_count: u32,
+    aspect: ?Aspect = null,
+};
+
+pub const ViewSwizzle = struct {
+    const Component = enum {
+        zero,
+        one,
+        r,
+        g,
+        b,
+        a,
+    };
+    r: Component = .r,
+    g: Component = .g,
+    b: Component = .b,
+    a: Component = .a,
+};
+
+pub const ViewType = enum {
+    view_2d,
+    view_3d,
+    view_cube,
+    view_2d_array,
+    view_cube_array,
+};
+
+pub const Fence = enum(u64) { _ };
+
+pub const TextureRegion = struct {
+    bounds: [2][3]u32,
+    mip_level: u32,
+};
+
+pub const TextureCopyRegion = struct {
+    src_offset: [3]u32,
+    src_mip_level: u32,
+    dst_offset: [3]u32,
+    dst_mip_level: u32,
+    extent: [3]u32,
+    aspect: ?Aspect = null,
+};
+
+pub const BlitRegion = struct {
+    bounds: [2][3]i32,
+    mip_level: u32,
+};
+
+pub const RenderingAttachment = struct {
+    view: *const View,
+    load_op: LoadOp,
+    store_op: StoreOp,
+    clear_value: ?ClearValue = null,
+};
+
+pub const ClearValue = union(enum) {
+    color: union(enum) {
+        float: [4]f32,
+        int: [4]i32,
+        uint: [4]u32,
+    },
+    depth_stencil: struct {
+        depth: f32,
+        stencil: u8,
+    },
+
+    pub fn float(values: [4]f32) ClearValue {
+        return .{ .color = .{ .float = values } };
+    }
+    pub fn int(values: [4]i32) ClearValue {
+        return .{ .color = .{ .int = values } };
+    }
+    pub fn uint(values: [4]u32) ClearValue {
+        return .{ .color = .{ .uint = values } };
+    }
+    pub fn depthStencil(depth: f32, stencil: u8) ClearValue {
+        return .{ .depth_stencil = .{ .depth = depth, .stencil = stencil } };
+    }
+};
+
+pub const LoadOp = enum {
+    load,
+    clear,
+    dont_care,
+};
+
+pub const StoreOp = enum {
+    store,
+    dont_care,
+    none,
+};
+
+pub const DynamicState = struct {
+    viewport: Viewport,
+    scissor: Scissor,
+    input_assembly: InputAssemblyState = .{},
+    rasterization: RasterizationState = .{},
+    depth_stencil: DepthStencilState = .{},
+    blend_constants: [4]f32 = .{ 0.0, 0.0, 0.0, 0.0 },
 };
 
 pub const Viewport = extern struct {
@@ -259,93 +506,12 @@ pub const DepthStencilState = struct {
     stencil_test: ?StencilState = null,
 };
 
-pub const DynamicState = struct {
-    viewport: Viewport,
-    scissor: Scissor,
-    input_assembly: InputAssemblyState = .{},
-    rasterization: RasterizationState = .{},
-    depth_stencil: DepthStencilState = .{},
-    blend_constants: [4]f32 = .{ 0.0, 0.0, 0.0, 0.0 },
-};
-
-pub const StagingAllocatorUsage = enum { upload, download };
-
-pub const Queue = enum { graphics, compute, transfer };
-
-pub const BlitRegion = struct {
-    bounds: [2][3]i32,
-    mip_level: u32,
-};
-
-pub const LoadOp = enum {
-    load,
-    clear,
-    dont_care,
-};
-
-pub const StoreOp = enum {
-    store,
-    dont_care,
-    none,
-};
-
-pub const ClearValue = union(enum) {
-    color: union(enum) {
-        float: [4]f32,
-        int: [4]i32,
-        uint: [4]u32,
-    },
-    depth_stencil: struct {
-        depth: f32,
-        stencil: u8,
-    },
-
-    pub fn float(values: [4]f32) ClearValue {
-        return .{ .color = .{ .float = values } };
-    }
-    pub fn int(values: [4]i32) ClearValue {
-        return .{ .color = .{ .int = values } };
-    }
-    pub fn uint(values: [4]u32) ClearValue {
-        return .{ .color = .{ .uint = values } };
-    }
-    pub fn depthStencil(depth: f32, stencil: u8) ClearValue {
-        return .{ .depth_stencil = .{ .depth = depth, .stencil = stencil } };
-    }
-};
-
-pub const RenderingAttachment = struct {
-    view: *const View,
-    load_op: LoadOp,
-    store_op: StoreOp,
-    clear_value: ?ClearValue = null,
-};
-
-pub const RenderPassAccess = struct {
-    color_attachments: []const RenderingAttachment = &.{},
-    depth_attachment: ?RenderingAttachment = null,
-    stencil_attachment: ?RenderingAttachment = null,
-    vertex_read_groups: []const Group = &.{},
-    fragment_read_groups: []const Group = &.{},
-    fragment_write_groups: []const Group = &.{},
-};
-
-pub const ComputePassAccess = struct {
-    read_groups: []const Group = &.{},
-    write_groups: []const Group = &.{},
-};
-
-pub const Present = struct {
-    swapchain: *const Swapchain,
-    texture: *const Texture,
-};
-
 pub const DrawIndexedIndirectCommand = extern struct {
     index_count: u32,
     instance_count: u32,
     first_index: u32,
-    vertex_offset: i32,
-    first_instance: u32,
+    _vertex_offset: i32 = 0, // not supported
+    _first_instance: u32 = 0, // not supported
 };
 
 pub const DispatchIndirectCommand = extern struct {
@@ -354,202 +520,38 @@ pub const DispatchIndirectCommand = extern struct {
     z: u32,
 };
 
-pub const TimestampStage = enum {
-    top,
-    bottom,
+const Stage = struct {
+    transfer: bool = false,
+    indirect: bool = false,
+    compute: bool = false,
+    vertex: bool = false,
+    fragment: bool = false,
+
+    const all = .{
+        .transfer = true,
+        .indirect = true,
+        .compute = true,
+        .vertex = true,
+        .fragment = true,
+    };
 };
 
-pub const Fence = struct {
-    graphics: ?u64,
-    compute: ?u64,
-    transfer: ?u64,
+const Access = struct {
+    read: bool = false,
+    write: bool = false,
 };
 
-pub const FenceMask = struct {
-    graphics: bool = true,
-    compute: bool = true,
-    transfer: bool = true,
+const Layout = enum {
+    general,
+    attachment,
+    read_only,
 };
 
-pub const Stage = enum { vertex, fragment, compute };
-
-// objects
-
-pub const GroupCreateInfo = struct {
-    name: [:0]const u8 = &.{},
-};
-
-pub const Group = struct {
-    info: struct {
-        name: [:0]const u8,
-    },
-};
-
-pub const TextureCreateInfo = struct {
-    usage: TextureUsage,
-    format: Format,
-    texture_type: TextureType,
-    mip_levels: u32,
-    size: [3]u32, // x, y, z or layer_count
-    samples: SampleCount = .count_1,
-    views: []const ViewCreateInfo = &.{},
-    group: ?*const Group = null,
-    name: [:0]const u8 = &.{},
-};
-
-pub const Texture = struct {
-    group: *const Group,
-    default_view: *const View,
-    views: []const View,
-
-    info: struct {
-        usage: TextureUsage,
-        size: [3]u32,
-        format: Format,
-        mip_levels: u32,
-        sample_count: SampleCount,
-        texture_type: TextureType,
-        name: [:0]const u8,
-    },
-};
-
-pub const ViewCreateInfo = struct {
-    view_type: ?ViewType = null,
-    format: ?Format = null,
-    swizzle: ViewSwizzle = .{},
-    range: ?TextureRange,
-    name: [:0]const u8 = &.{},
-};
-
-pub const View = struct {
-    device_address: u18,
-    texture: *const Texture,
-
-    info: struct {
-        view_type: ViewType,
-        format: Format,
-        swizzle: ViewSwizzle,
-        range: TextureRange,
-        name: [:0]const u8,
-    },
-};
-
-pub const BufferCreateInfo = struct {
-    usage: BufferUsage,
-    size: usize,
-    group: ?*const Group = null,
-    name: [:0]const u8 = &.{},
-};
-
-pub const Buffer = struct {
-    group: *const Group,
-    device_address: u64,
-
-    info: struct {
-        usage: BufferUsage,
-        size: usize,
-        name: [:0]const u8,
-    },
-};
-
-pub const SamplerCreateInfo = struct {
-    mag_filter: Filter,
-    min_filter: Filter,
-    mipmap_filter: Filter,
-    address_mode_u: AddressMode,
-    address_mode_v: AddressMode,
-    address_mode_w: AddressMode,
-    mip_lod_bias: f32 = 0.0,
-    max_anisotropy: ?f32 = null,
-    compare_op: ?CompareOp = null,
-    min_lod: f32 = 0.0,
-    max_lod: ?f32 = null,
-    name: [:0]const u8 = &.{},
-};
-
-pub const Sampler = struct {
-    device_address: u10,
-
-    info: struct {
-        mag_filter: Filter,
-        min_filter: Filter,
-        mipmap_filter: Filter,
-        address_mode_u: AddressMode,
-        address_mode_v: AddressMode,
-        address_mode_w: AddressMode,
-        mip_lod_bias: f32 = 0.0,
-        max_anisotropy: ?f32 = null,
-        compare_op: ?CompareOp,
-        min_lod: f32 = 0.0,
-        max_lod: ?f32 = null,
-        name: [:0]const u8 = &.{},
-    },
-};
-
-pub const ShaderCreateInfo = struct {
-    stage: Stage,
-    src: []const u8,
-    name: [:0]const u8 = &.{},
-};
-
-pub const Shader = struct {
-    info: struct {
-        stage: Stage,
-        name: [:0]const u8,
-    },
-};
-
-pub const GraphicsPipelineCreateInfo = struct {
-    vertex_shader: *const Shader,
-    fragment_shader: ?*const Shader,
-    polygon_mode: PolygonMode = .fill,
-    multisample: MultisampleState = .{},
-    color_attachments: []const ColorAttachment,
-    depth_attachment_format: ?Format,
-    stencil_attachment_format: ?Format,
-    name: [:0]const u8 = &.{},
-};
-
-pub const GraphicsPipeline = struct {
-    info: struct {
-        fragment_shader: bool,
-        polygon_mode: PolygonMode,
-        multisample: MultisampleState,
-        color_attachments: []const ColorAttachment,
-        depth_attachment_format: ?Format,
-        stencil_attachment_format: ?Format,
-        name: [:0]const u8,
-    },
-};
-
-pub const ComputePipelineCreateInfo = struct {
-    shader: *const Shader,
-    local_size: [3]u32,
-    name: [:0]const u8 = &.{},
-};
-
-pub const ComputePipeline = struct {
-    info: struct {
-        local_size: [3]u32,
-        name: [:0]const u8,
-    },
-};
-
-pub const SwapchainCreateInfo = struct {
-    name: [:0]const u8 = &.{},
-    window: Window,
-    present_mode: PresentMode = .fifo,
-    composition: Composition = .sdr,
-    recreate: ?*Swapchain = null,
-};
-
-pub const Swapchain = struct {
-    info: struct {
-        name: [:0]const u8,
-        present_mode: PresentMode,
-        composition: Composition,
-        size: [3]u32,
-    },
+const Scope = struct {
+    src_stages: Stage,
+    src_access: Access,
+    dst_stages: Stage,
+    dst_access: Access,
 };
 
 pub const Context = struct {
@@ -561,58 +563,38 @@ pub const Context = struct {
         Timeout,
         DeviceLost,
         Unknown,
-        // TODO cleanup and narrow down to one uniform set of errors like what's above
-        OutOfHostMemory,
-        ValidationFailed,
-        SurfaceLostKHR,
-        OutOfDateKHR,
-        FullScreenExclusiveModeLostEXT,
-        PresentTimingQueueFullEXT,
-        Minimized,
-        InvalidVideoStdParametersKHR,
-        CompressionExhaustedEXT,
-        InvalidOpaqueCaptureAddressKHR,
-        InvalidExternalHandle,
-        MaxAllocs,
-        OutOfSlots,
-        InvalidShaderNV,
     };
 
-    ptr: *anyopaque,
-    vtable: *const VTable,
-
     pub const VTable = struct {
-        createSwapchain: *const fn (*anyopaque, SwapchainCreateInfo) Error!*const Swapchain,
+        createSwapchain: *const fn (*anyopaque, SwapchainCreateInfo, ?*const Swapchain) Error!*const Swapchain,
         destroySwapchain: *const fn (*anyopaque, *const Swapchain) void,
-        acquireSwapchain: *const fn (*anyopaque, *const Swapchain, u64) Error!bool,
+        acquireSwapchain: *const fn (*anyopaque, *const Swapchain, u64) Error!void,
 
-        createBuffer: *const fn (*anyopaque, BufferCreateInfo) Error!*const Buffer,
         createTexture: *const fn (*anyopaque, TextureCreateInfo) Error!*const Texture,
         createSampler: *const fn (*anyopaque, SamplerCreateInfo) Error!*const Sampler,
-        createGroup: *const fn (*anyopaque) Error!*const Group,
         createShader: *const fn (*anyopaque, ShaderCreateInfo) Error!*const Shader,
         createGraphicsPipeline: *const fn (*anyopaque, GraphicsPipelineCreateInfo) Error!*const GraphicsPipeline,
         createComputePipeline: *const fn (*anyopaque, ComputePipelineCreateInfo) Error!*const ComputePipeline,
 
-        destroyBuffer: *const fn (*anyopaque, *const Buffer) void,
         destroyTexture: *const fn (*anyopaque, *const Texture) void,
         destroySampler: *const fn (*anyopaque, *const Sampler) void,
-        destroyGroup: *const fn (*anyopaque, *const Group) void,
         destroyShader: *const fn (*anyopaque, *const Shader) void,
         destroyGraphicsPipeline: *const fn (*anyopaque, *const GraphicsPipeline) void,
         destroyComputePipeline: *const fn (*anyopaque, *const ComputePipeline) void,
 
         stagingAllocator: *const fn (*anyopaque, StagingAllocatorUsage) std.mem.Allocator,
+        alloc: *const fn (*anyopaque, u64, u64) Error!u64, // size alignment
+        free: *const fn (*anyopaque, u64) void, // device_address
 
-        submit: *const fn (*anyopaque, io: std.Io, []const CommandBuffer, []const Present) Error!Fence,
-        wait: *const fn (*anyopaque, Fence, FenceMask, u64) Error!void,
+        flush: *const fn (*anyopaque, []const u8) void, // for download staging allocator, call before reading, possibly a noop
 
-        // setBufferGroup: *const fn (*anyopaque, *const Buffer, ?*const Group) void,
-        // setTextureGroup: *const fn (*anyopaque, *const Texture, ?*const Group) void,
-        claimBuffers: *const fn (*anyopaque, *const Group, []*const Buffer) void,
-        claimTextures: *const fn (*anyopaque, *const Group, []*const Texture) void,
+        acquireCommandList: *const fn (*anyopaque) CommandList,
+        submit: *const fn (*anyopaque, []const CommandList) Error!Fence,
 
-        // readTimestamps: *const fn (*anyopaque, []const u8) ?u64, // could maybe happen on wait?
+        wait: *const fn (*anyopaque, Fence, u64) Error!void,
+
+        // some more things to consider
+        // textureSupported
     };
 
     pub fn createSwapchain(ctx: Context, create_info: SwapchainCreateInfo) Error!*const Swapchain {
@@ -623,12 +605,6 @@ pub const Context = struct {
     }
     pub fn acquireSwapchain(ctx: Context, swapchain: *const Swapchain, timeout: u64) Error!bool {
         return ctx.vtable.acquireSwapchain(ctx.ptr, swapchain, timeout);
-    }
-    pub fn createBuffer(ctx: Context, create_info: BufferCreateInfo) Error!*const Buffer {
-        return ctx.vtable.createBuffer(ctx.ptr, create_info);
-    }
-    pub fn destroyBuffer(ctx: Context, buffer: *const Buffer) void {
-        ctx.vtable.destroyBuffer(ctx.ptr, buffer);
     }
     pub fn createTexture(ctx: Context, create_info: TextureCreateInfo) Error!*const Texture {
         return ctx.vtable.createTexture(ctx.ptr, create_info);
@@ -651,299 +627,71 @@ pub const Context = struct {
     pub fn stagingAllocator(ctx: Context, usage: StagingAllocatorUsage) std.mem.Allocator {
         return ctx.vtable.stagingAllocator(ctx.ptr, usage);
     }
-
-    pub fn submit(
-        ctx: Context,
-        io: std.Io,
-        command_buffers: []const CommandBuffer,
-        presents: []const Present,
-    ) Error!Fence {
-        return ctx.vtable.submit(ctx.ptr, io, command_buffers, presents);
+    pub fn alloc(ctx: Context, size: u64, alignment: u64) u64 {
+        std.debug.assert(std.math.isPowerOfTwo(alignment));
+        return ctx.vtable.alloc(ctx.ptr, size, alignment);
     }
+    pub fn free(ctx: Context, device_address: u64) void {
+        return ctx.vtable.free(ctx.ptr, device_address);
+    }
+
+    ptr: *anyopaque,
+    vtable: *const VTable,
 };
 
-// NOTE could we design some kind of compile time safety for this
-// where calling functions incompatible with the queue
-// and where calling illegal functions inside the passes is a compile error
-// for now, just have runtime asserts
-pub const CommandBuffer = struct {
-    // TODO add definitions and functions
-
-    const Command = union(enum) {
-        buffer_upload: struct {
-            src: []const u8,
-            dst: *const Buffer,
-            dst_offset: u64,
-        },
-        buffer_download: struct {},
-        texture_upload: struct {},
-        texture_download: struct {},
-
-        buffer_copy: struct {},
-        texture_copy: struct {},
-        blit: struct {
-            src: *const Texture,
-            src_region: BlitRegion,
-            dst: *const Texture,
-            dst_region: BlitRegion,
-            filter: Filter,
-        },
-
-        // push_label: [:0]u8,
-        // pop_label: void,
-        // timestamp: [:0]u8,
-
-        push_constant: []u8,
-
-        begin_render_pass: struct {
-            color_attachments: []const RenderingAttachment,
-            depth_attachment: ?*const RenderingAttachment,
-            stencil_attachment: ?*const RenderingAttachment,
-            vertex_read_groups: []const Group,
-            fragment_read_groups: []const Group,
-            fragment_write_groups: []const Group,
-        },
-        bind_graphics_pipeline: struct {
-            pipeline: *const GraphicsPipeline,
-            dynamic_state: *const DynamicState,
-        },
-        draw_indexed: struct {
-            index_buffer: *const Buffer,
-            index_count: u32,
-            instance_count: u32,
-        },
-        draw_indexed_indirect: struct {},
-        draw_indexed_indirect_count: struct {},
-        end_render_pass: void,
-
-        begin_compute_pass: struct {},
-        bind_compute_pipeline: struct {},
-        dispatch: struct {},
-        dispatch_indirect: struct {},
-        end_compute_pass: void,
+pub const CommandList = struct {
+    pub const Error = error{
+        OutOfMemory,
     };
 
-    arena: std.mem.Allocator,
-    commands: std.ArrayList(Command), // TODO reimplement segmentedlist (rip as of 0.16) or better
+    pub const VTable = struct {
+        // in principle anything could fail (from e.g. out of memory when appending the command)
+        // but such failures will just error on submit instead to make the handling easier
+        // device addresses are used to replace buffer ids and offsets
+        // they can be translated on the backend into buffer + offset (probably using like a segment tree)
 
-    queue: Queue,
-    active_pass: ?enum { render, compute },
+        // copies to/from upload/download staging buffers (from a stagingAllocator)
+        // (which are handled via mapped as []u8 cpu memory)
+        upload: *const fn (*anyopaque, []const u8, u64) void,
+        download: *const fn (*anyopaque, u64, []const u8) void,
+        textureUpload: *const fn (*anyopaque, []const u8, *const Texture, TextureRegion) void,
+        textureDownload: *const fn (*anyopaque, *const Texture, TextureRegion, []u8) void,
 
-    pub fn init(arena: std.mem.Allocator, queue: Queue) CommandBuffer {
-        return .{
-            .arena = arena,
-            .commands = .empty,
-            .queue = queue,
-            .active_pass = null,
-        };
-    }
+        // copies between gpu side buffers or textures
+        copy: *const fn (*anyopaque, u64, u64, u64) void, // src_dev_addr, dst_dev_addr, size
+        textureCopy: *const fn (*anyopaque, *const Texture, *const Texture, TextureCopyRegion) void,
+        blit: *const fn (*anyopaque, *const Texture, BlitRegion, *const Texture, BlitRegion, Filter) void,
 
-    pub fn bufferUpload(
-        command_buffer: *CommandBuffer,
-        src: anytype,
-        dst: *const Buffer,
-        dst_offset: u64,
-    ) !void {
-        std.debug.assert(command_buffer.active_pass == null);
-        const command = try command_buffer.commands.addOne(command_buffer.arena);
-        const src_ptr = @typeInfo(@TypeOf(src)).pointer;
-        command.* = .{ .buffer_upload = .{
-            .src = switch (src_ptr.size) {
-                .one => std.mem.asBytes(src),
-                .slice => std.mem.sliceAsBytes(src),
-                else => unreachable,
-            },
-            .dst = dst,
-            .dst_offset = dst_offset,
-        } };
-    }
+        // put data in a temporary buffer with lifetime equal to this command buffer
+        // return a device address, replaces uniforms and "single use" streamed buffers
+        pushTmp: *const fn (*anyopaque, []const u8) Error!u64,
 
-    pub fn blit(
-        command_buffer: *CommandBuffer,
-        src: *const Texture,
-        src_region: BlitRegion,
-        dst: *const Texture,
-        dst_region: BlitRegion,
-        filter: Filter,
-    ) void {
-        _ = command_buffer;
-        _ = src;
-        _ = src_region;
-        _ = dst;
-        _ = dst_region;
-        _ = filter;
-    }
+        beginRenderPass: *const fn (*anyopaque, []const RenderingAttachment, ?*RenderingAttachment, ?*RenderingAttachment) void,
+        bindGraphicsPipeline: *const fn (*anyopaque, *const GraphicsPipeline, DynamicState) void,
+        // takes a single gpu pointer for data (which could be in a buffer or from pushTmp)
+        // we don't need to specify an instance buffer or offset, just use a device address
+        drawIndexed: *const fn (*anyopaque, u64, u64, u32, u32) void, // root_data index_dev_addr index_count instance_count
+        // note that we assume stride == @sizeOf(DrawIndexedIndirectCommand), a packed buffer
+        drawIndexedIndirect: *const fn (*anyopaque, u64, u64, u64, u32) void, // root_data, index_dev_addr, indirect_dev_addr, draw_count
+        drawIndexedIndirectCount: *const fn (*anyopaque, u64, u64, u64, u64, u32) void, // root_data, index_dev_addr, indirect_dev_addr, count_dev_addr, max_count
+        endRenderPass: *const fn (*anyopaque) void,
 
-    pub fn beginRenderPass(
-        command_buffer: *CommandBuffer,
-        color_attachments: []const RenderingAttachment,
-        depth_attachment: ?RenderingAttachment,
-        stencil_attachment: ?RenderingAttachment,
-        vertex_read_groups: []const Group,
-        fragment_read_groups: []const Group,
-        fragment_write_groups: []const Group,
-    ) !void {
-        // TODO validate that we have at least one attachment
-        std.debug.assert(command_buffer.active_pass == null);
-        const arena = command_buffer.arena;
-        const command = try command_buffer.commands.addOne(arena);
-        errdefer _ = command_buffer.commands.pop();
-        var depth_attachment_copy: ?*RenderingAttachment = null;
-        if (depth_attachment) |attachment| {
-            depth_attachment_copy = try arena.create(RenderingAttachment);
-            depth_attachment_copy.?.* = attachment;
-        }
-        var stencil_attachment_copy: ?*RenderingAttachment = null;
-        if (stencil_attachment) |attachment| {
-            stencil_attachment_copy = try arena.create(RenderingAttachment);
-            stencil_attachment_copy.?.* = attachment;
-        }
-        command.* = .{ .begin_render_pass = .{
-            .color_attachments = try arena.dupe(RenderingAttachment, color_attachments),
-            .depth_attachment = depth_attachment_copy,
-            .stencil_attachment = stencil_attachment_copy,
-            .vertex_read_groups = try arena.dupe(Group, vertex_read_groups),
-            .fragment_read_groups = try arena.dupe(Group, fragment_read_groups),
-            .fragment_write_groups = try arena.dupe(Group, fragment_write_groups),
-        } };
-        command_buffer.active_pass = .render;
-    }
+        beginComputePass: *const fn (*anyopaque) void,
+        bindComputePipeline: *const fn (*anyopaque, *const ComputePipeline) void,
+        dispatch: *const fn (*anyopaque, u64, u32, u32, u32) void, // root_data x y z
+        dispatchIndirect: *const fn (*anyopaque, u64, u64) void, // root_data indirect_dev_addr
+        endComputePass: *const fn (*anyopaque) void,
 
-    pub fn bindGraphicsPipeline(
-        command_buffer: *CommandBuffer,
-        pipeline: *const GraphicsPipeline,
-        dynamic_state: DynamicState,
-    ) !void {
-        const arena = command_buffer.arena;
-        const command = try command_buffer.commands.addOne(arena);
-        errdefer _ = command_buffer.commands.pop();
-        const dynamic_state_copy = try arena.create(DynamicState);
-        dynamic_state_copy.* = dynamic_state;
-        command.* = .{ .bind_graphics_pipeline = .{
-            .pipeline = pipeline,
-            .dynamic_state = dynamic_state_copy,
-        } };
-    }
+        present: *const fn (*anyopaque, *const Texture, *const Swapchain) void,
 
-    pub fn endRenderPass(command_buffer: *CommandBuffer) !void {
-        std.debug.assert(
-            command_buffer.active_pass != null and command_buffer.active_pass.? == .render,
-        );
-        const command = try command_buffer.commands.addOne(command_buffer.arena);
-        errdefer _ = command_buffer.commands.pop();
-        command.* = .{ .end_render_pass = {} };
-        command_buffer.active_pass = null;
-    }
+        barrier: *const fn (*anyopaque, Scope) void,
+        transition: *const fn (*anyopaque, Scope, *const Texture, Layout, bool) void, // bool is whether to discard contents
 
-    pub fn drawIndexed(
-        command_buffer: *CommandBuffer,
-        index_buffer: *const Buffer,
-        index_count: u32,
-        instance_count: u32,
-    ) !void {
-        std.debug.assert(
-            command_buffer.active_pass != null and command_buffer.active_pass.? == .render,
-        );
-        const command = try command_buffer.commands.addOne(command_buffer.arena);
-        errdefer _ = command_buffer.commands.pop();
-        command.* = .{ .draw_indexed = .{
-            .index_buffer = index_buffer,
-            .index_count = index_count,
-            .instance_count = instance_count,
-        } };
-    }
+        // some more things to consider
+        // debugLabel
+        // timestamp
+    };
 
-    pub fn pushConstant(command_buffer: *CommandBuffer, data: anytype) !void {
-        const T = @TypeOf(data);
-        std.debug.assert(@sizeOf(T) <= 128);
-        const arena = command_buffer.arena;
-        const command = try command_buffer.commands.addOne(arena);
-        errdefer _ = command_buffer.commands.pop();
-        command.* = .{ .push_constant = try arena.dupe(u8, std.mem.asBytes(&data)) };
-    }
+    ptr: *anyopaque,
+    vtable: *const VTable,
 };
-
-// pub const CommandBuffer = struct {
-//     ptr: *anyopaque,
-//     vtable: *const VTable,
-
-//     pub const VTable = struct {
-//         cancel: *const fn (*anyopaque) void,
-
-//         bufferUpload: *const fn (*anyopaque, *anyopaque, usize, *const Buffer, u64) void,
-//         bufferDownload: *const fn (*anyopaque, *const Buffer, u64, *anyopaque, usize) void,
-//         textureUpload: *const fn (*anyopaque, *anyopaque, usize, *const Texture, u64) void,
-//         textureDownload: *const fn (*anyopaque, *const Texture, u64, *anyopaque, usize) void,
-
-//         bufferCopy: *const fn (*anyopaque, *const Buffer, u64, *const Buffer, u64, u64) void,
-//         textureCopy: *const fn (*anyopaque, *const Texture, *const Texture) void, // TODO args
-//         blit: *const fn (*anyopaque, *const Texture, BlitRegion, *const Texture, BlitRegion, Filter) void,
-//         resolve: *const fn (*anyopaque, *const Texture, *const Texture, ResolveRegion) void,
-
-//         beginRenderPass: *const fn (*anyopaque, RenderPassAccess) *RenderPass,
-//         endRenderPass: *const fn (*anyopaque, *RenderPass) void,
-//         beginComputePass: *const fn (*anyopaque, ComputePassAccess) *RenderPass,
-//         endComputePass: *const fn (*anyopaque, *RenderPass) void,
-
-//         waitAndAcquireSwapchainTexture: *const fn (*anyopaque, *const Swapchain) ?*const Texture,
-
-//         timestamp: *const fn (*anyopaque) ?Timestamp,
-//     };
-
-//     pub fn cancel(
-//         command_buffer: CommandBuffer,
-//     ) void {
-//         return command_buffer.vtable.cancel(command_buffer.ptr);
-//     }
-//     pub fn waitAndAcquireSwapchainTexture(
-//         command_buffer: CommandBuffer,
-//         swapchain: *const Swapchain,
-//     ) ?*const Texture {
-//         return command_buffer.vtable.waitAndAcquireSwapchainTexture(command_buffer.ptr, swapchain);
-//     }
-
-//     // generics will have to be wrapped like this
-//     // fn bufferUpload(
-//     //     cmdbuf: *CommandBuffer,
-//     //     src: anytype,
-//     //     buf: *const Buffer,
-//     //     offset: u64,
-//     // ) void {
-//     //     const info = @typeInfo(@TypeOf(src));
-//     //     std.debug.assert(info == .pointer);
-//     //     const ptr: *anyopaque = switch (info.pointer.size) {
-//     //         .slice => @ptrCast(src.ptr),
-//     //         else => @ptrCast(src),
-//     //     };
-//     //     const len: usize = switch (info.pointer.size) {
-//     //         .slice => @sizeOf(info.pointer.child) * src.len,
-//     //         else => @sizeOf(info.pointer.child),
-//     //     };
-//     //     cmdbuf.vtable.bufferUpload(cmdbuf, ptr, len, buf, offset);
-//     // }
-// };
-
-// pub const RenderPass = struct {
-//     ptr: *anyopaque,
-//     vtable: *const VTable,
-
-//     pub const VTable = struct {
-//         pushConstant: *const fn (*anyopaque, *anyopaque, usize) void, // TODO generic wrap
-//         bindPipeline: *const fn (*anyopaque, *const GraphicsPipeline, GraphicsPipeline.DynamicState) void,
-//         drawIndexed: *const fn (*anyopaque, u32, u32, u32, i32, u32) void,
-//         drawIndexedIndirect: *const fn (*anyopaque, *const Buffer, u64, u32) void,
-//         drawIndexedIndirectCount: *const fn (*anyopaque, *const Buffer, u64, *const Buffer, u64, u32) void,
-//     };
-// };
-
-// pub const ComputePass = struct {
-//     ptr: *anyopaque,
-//     vtable: *const VTable,
-
-//     pub const VTable = struct {
-//         pushConstant: *const fn (*anyopaque, *anyopaque, usize) void, // TODO generic wrap
-//         bindPipeline: *const fn (*anyopaque, *const ComputePipeline) void,
-//         dispatch: *const fn (*anyopaque, u32, u32, u32) void,
-//         dispatchIndirect: *const fn (*anyopaque, *const Buffer, u64) void,
-//     };
-// };

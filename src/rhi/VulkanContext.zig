@@ -2,209 +2,11 @@ const std = @import("std");
 pub const vk = @import("vulkan");
 
 const rhi = @import("root.zig");
+const allocators = @import("allocators.zig");
+
 const log = std.log.scoped(.rhi_vulkan);
 
-const MemoryPool = std.heap.MemoryPool;
-const OffsetAllocator = @import("OffsetAllocator.zig").Allocator;
-const Allocation = @import("OffsetAllocator.zig").Allocation;
-
-const present_shader_vertex_spv align(@alignOf(u32)) = @embedFile("present_shader_vertex.spv").*;
-const present_shader_fragment_spv align(@alignOf(u32)) = @embedFile("present_shader_fragment.spv").*;
-
-/// when the queue semaphores reach these values the fence is cleared
-const Fence = struct {
-    graphics: u64 = 0,
-    compute: u64 = 0,
-    transfer: u64 = 0,
-    present: u64 = 0,
-
-    fn get(fence: Fence, queue: Queue) u64 {
-        return switch (queue) {
-            .graphics => fence.graphics,
-            .compute => fence.compute,
-            .transfer => fence.transfer,
-            .present => fence.present,
-        };
-    }
-};
-
-/// storage for popping all the items whose fence is passed at once
-fn ReclamationQueue(comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        gpa: std.mem.Allocator,
-        data: std.MultiArrayList(struct {
-            value: T,
-            fence: Fence,
-        }),
-
-        fn init(gpa: std.mem.Allocator) Self {
-            return .{
-                .gpa = gpa,
-                .data = .empty,
-            };
-        }
-
-        fn deinit(queue: *Self) void {
-            queue.data.deinit(queue.gpa);
-        }
-
-        fn push(queue: *Self, fence: Fence, value: T) !void {
-            try queue.data.append(queue.gpa, .{ .fence = fence, .value = value });
-        }
-
-        const Iterator = struct {
-            queue: *Self,
-            cursor: usize,
-            fence: Fence,
-
-            pub fn pop(it: *Iterator) ?T {
-                // if (it.cursor == 0) return null;
-                // const i = it.cursor - 1;
-                const fences = it.queue.data.items(.fence);
-                while (it.cursor > 0) {
-                    const i = it.cursor - 1;
-                    if (it.fence.graphics >= fences[i].graphics and
-                        it.fence.compute >= fences[i].compute and
-                        it.fence.transfer >= fences[i].transfer and
-                        it.fence.present >= fences[i].present)
-                    {
-                        const value = it.queue.data.items(.value)[i];
-                        it.queue.data.swapRemove(i);
-                        return value;
-                    } else {
-                        it.cursor -= 1;
-                    }
-                }
-                return null;
-            }
-        };
-
-        fn iterator(queue: *Self) !void {
-            return .{
-                .queue = queue,
-                .cursor = queue.data.len,
-            };
-        }
-
-        fn debugPrint(depot: *Self) void {
-            std.debug.print("ReleaseQueue <{s}> [ ", .{@typeName(T)});
-
-            for (depot.data.items) |item| {
-                std.debug.print("{} ", .{item});
-            }
-            std.debug.print("]\n", .{});
-        }
-    };
-}
-
-/// similar to reclamation queue but works only on one (implicit) queue
-fn Depot(comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        const Node = struct {
-            data: T,
-            semaphore_value: u64,
-        };
-
-        gpa: std.mem.Allocator,
-        data: std.ArrayList(Node),
-
-        fn init(gpa: std.mem.Allocator) Self {
-            return .{
-                .gpa = gpa,
-                .data = .empty,
-            };
-        }
-
-        fn deinit(depot: *Self) void {
-            depot.data.deinit(depot.gpa);
-            depot.* = undefined;
-        }
-
-        fn push(depot: *Self, data: T, semaphore_value: u64) !void {
-            try depot.data.append(depot.gpa, .{
-                .data = data,
-                .semaphore_value = semaphore_value,
-            });
-        }
-
-        fn pop(depot: *Self, semaphore_value: u64) ?T {
-            for (depot.data.items, 0..) |data, i| {
-                if (data.semaphore_value > semaphore_value) continue;
-                return depot.data.swapRemove(i).data;
-            }
-            return null;
-        }
-
-        fn debugPrint(depot: *Self) void {
-            std.debug.print("Depot <{s}> [ ", .{@typeName(T)});
-
-            for (depot.data.items) |item| {
-                std.debug.print("{} ", .{item});
-            }
-            std.debug.print("]\n", .{});
-        }
-    };
-}
-
-const SlotPool = struct {
-    top: u32,
-    slots: []u32,
-
-    fn init(gpa: std.mem.Allocator, capacity: u32) !SlotPool {
-        const slots = try gpa.alloc(u32, capacity);
-        for (0..capacity) |i| slots[i] = @intCast(i);
-        return .{ .top = capacity, .slots = slots };
-    }
-
-    fn deinit(pool: *SlotPool, gpa: std.mem.Allocator) void {
-        if (pool.top != @as(u32, @intCast(pool.slots.len))) log.debug(
-            "SlotPool not empty on deinit expected {} actual {}",
-            .{ pool.slots.len, pool.top },
-        );
-        gpa.free(pool.slots);
-        pool.* = undefined;
-    }
-
-    fn acquire(pool: *SlotPool) !u32 {
-        if (pool.top == 0) return error.OutOfSlots;
-        pool.top -= 1;
-        return pool.slots[pool.top];
-    }
-
-    fn release(pool: *SlotPool, slot: u32) void {
-        std.debug.assert(pool.top < @as(u32, @intCast(pool.slots.len)));
-        pool.slots[pool.top] = slot;
-        pool.top += 1;
-    }
-};
-
-/// like std.EnumArray but two dimensional
-fn EnumMatrix(comptime A: type, comptime B: type, comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        const AIndexer = std.enums.EnumIndexer(A);
-        const BIndexer = std.enums.EnumIndexer(B);
-
-        values: [AIndexer.count * BIndexer.count]T,
-
-        fn initFill(value: T) Self {
-            return .{ .values = @splat(value) };
-        }
-
-        fn get(matrix: Self, a: A, b: B) T {
-            return matrix.values[AIndexer.indexOf(a) + AIndexer.count * BIndexer.indexOf(b)];
-        }
-
-        fn set(matrix: *Self, a: A, b: B, value: T) void {
-            matrix.values[AIndexer.indexOf(a) + AIndexer.count * BIndexer.indexOf(b)] = value;
-        }
-    };
-}
+const Context = @This();
 
 pub const PlatformError = error{Platform};
 pub const Platform = struct {
@@ -215,6 +17,8 @@ pub const Platform = struct {
     getFramebufferSize: *const fn (window: *anyopaque) PlatformError!vk.Extent2D,
 };
 
+/// enable_validation activates the validation layer
+/// enable_debug activates debug_utils and buffer_device_address_capture_replay
 pub const Config = struct {
     name: [:0]const u8,
     preferred_physical_device: ?[]const u8 = null,
@@ -222,6 +26,13 @@ pub const Config = struct {
     download_staging_size: usize = 128 * 1024 * 1024,
     enable_debug: bool = @import("builtin").mode == .debug,
     enable_validation: bool = @import("builtin").mode == .debug,
+};
+
+const PhysicalQueue = struct {
+    queue: vk.QueueProxy,
+    family: u32,
+    semaphore: vk.Semaphore,
+    value: u64,
 };
 
 const api_version: u32 = @bitCast(vk.API_VERSION_1_3);
@@ -276,431 +87,31 @@ const device_features_1_3 = vk.PhysicalDeviceVulkan13Features{
     .synchronization_2 = .true,
 };
 
-const Queue = enum {
-    graphics,
-    compute,
-    transfer,
-    present,
-
-    fn fromRhi(rhi_queue: rhi.Queue) Queue {
-        return switch (rhi_queue) {
-            .graphics => .graphics,
-            .compute => .compute,
-            .transfer => .transfer,
-        };
-    }
-};
-
-const PhysicalQueue = struct {
-    queue: vk.QueueProxy,
-    family: u32,
-    semaphore: vk.Semaphore,
-    value: u64,
-};
-
-const CommandPool = struct {
-    pool: vk.CommandPool,
-    prefix: vk.CommandBuffer,
-    body: vk.CommandBuffer,
-    suffix: vk.CommandBuffer,
-};
-
-const Stage = enum {
-    vertex,
-    fragment,
-    compute,
-    tranfer,
-};
-
-fn vulkanStencilOp(stencil_op: rhi.StencilOp) vk.StencilOp {
-    return switch (stencil_op) {
-        .keep => .keep,
-        .zero => .zero,
-        .replace => .replace,
-        .increment_and_clamp => .increment_and_clamp,
-        .decrement_and_clamp => .decrement_and_clamp,
-        .invert => .invert,
-        .increment_and_wrap => .increment_and_wrap,
-        .decrement_and_wrap => .decrement_and_wrap,
-    };
-}
-
-fn vulkanCompareOp(compare_op: rhi.CompareOp) vk.CompareOp {
-    return switch (compare_op) {
-        .never => .never,
-        .less => .less,
-        .equal => .equal,
-        .less_or_equal => .less_or_equal,
-        .greater => .greater,
-        .not_equal => .not_equal,
-        .greater_or_equal => .greater_or_equal,
-        .always => .always,
-    };
-}
-
-fn vulkanStencilOpState(stencil_op_state: rhi.StencilOpState) vk.StencilOpState {
-    return .{
-        .fail_op = vulkanStencilOp(stencil_op_state.fail_op),
-        .pass_op = vulkanStencilOp(stencil_op_state.pass_op),
-        .depth_fail_op = vulkanStencilOp(stencil_op_state.depth_fail_op),
-        .compare_op = vulkanCompareOp(stencil_op_state.compare_op),
-        .compare_mask = stencil_op_state.compare_mask,
-        .write_mask = stencil_op_state.write_mask,
-        .reference = stencil_op_state.reference,
-    };
-}
-
-fn vulkanFrontFace(front_face: rhi.FrontFace) vk.FrontFace {
-    return switch (front_face) {
-        .clockwise => .clockwise,
-        .counter_clockwise => .counter_clockwise,
-    };
-}
-
-fn vulkanCullMode(cull_mode: rhi.CullMode) vk.CullModeFlags {
-    return .{
-        .front = cull_mode.front,
-        .back = cull_mode.back,
-    };
-}
-
-fn vulkanPrimitiveTopology(primitive_topology: rhi.PrimitiveTopology) vk.PrimitiveTopology {
-    return switch (primitive_topology) {
-        .point_list => .point_list,
-        .line_list => .line_list,
-        .line_strip => .line_strip,
-        .triangle_list => .triangle_list,
-        .triangle_strip => .triangle_strip,
-        .triangle_fan => .triangle_fan,
-    };
-}
-
-fn vulkanViewport(viewport: rhi.Viewport) vk.Viewport {
-    return .{
-        .x = viewport.x,
-        .y = viewport.y,
-        .width = viewport.width,
-        .height = viewport.height,
-        .min_depth = viewport.min_depth,
-        .max_depth = viewport.max_depth,
-    };
-}
-
-fn vulkanScissor(scissor: rhi.Scissor) vk.Rect2D {
-    return .{
-        .offset = .{ .x = scissor.x, .y = scissor.y },
-        .extent = .{ .width = scissor.width, .height = scissor.height },
-    };
-}
-
-fn vulkanImageType(texture_type: rhi.TextureType) vk.ImageType {
-    return switch (texture_type) {
-        .texture_2d => .@"2d",
-        .texture_3d => .@"3d",
-        .texture_cube => .@"2d",
-        .texture_2d_array => .@"2d",
-        .texture_cube_array => .@"2d",
-    };
-}
-
-fn vulkanImageViewType(texture_view_type: anytype) vk.ImageViewType {
-    const T = @TypeOf(texture_view_type);
-    if (T == rhi.TextureType) {
-        return switch (texture_view_type) {
-            .texture_2d => .@"2d",
-            .texture_3d => .@"3d",
-            .texture_cube => .cube,
-            .texture_2d_array => .@"2d_array",
-            .texture_cube_array => .cube_array,
-        };
-    }
-    if (T == rhi.ViewType) {
-        return switch (texture_view_type) {
-            .view_2d => .@"2d",
-            .view_3d => .@"3d",
-            .view_cube => .cube,
-            .view_2d_array => .@"2d_array",
-            .view_cube_array => .cube_array,
-        };
-    }
-    @compileError("vulkanImageViewType takes either an rhi.TextureType or an rhi.ViewType");
-}
-
-fn vulkanFormat(format: rhi.Format) vk.Format {
-    return switch (format) {
-        .r8g8b8a8_unorm => .r8g8b8a8_unorm,
-        .r8g8b8a8_srgb => .r8g8b8a8_srgb,
-        .b8g8r8a8_unorm => .b8g8r8a8_unorm,
-        .b8g8r8a8_srgb => .b8g8r8a8_srgb,
-        .r16g16b16a16_sfloat => .r16g16b16a16_sfloat,
-        .r32_uint => .r32_uint,
-        .s8_uint => .s8_uint,
-        .d16_unorm => .d16_unorm,
-        .d16_unorm_s8_uint => .d16_unorm_s8_uint,
-        .d24_unorm_s8_uint => .d24_unorm_s8_uint,
-        .d32_sfloat => .d32_sfloat,
-        .d32_sfloat_s8_uint => .d32_sfloat_s8_uint,
-    };
-}
-
-// needed to create the pipeline for presenting to the swapchain
-fn rhiFormat(format: vk.Format) rhi.Format {
-    return switch (format) {
-        .r8g8b8a8_unorm => .r8g8b8a8_unorm,
-        .r8g8b8a8_srgb => .r8g8b8a8_srgb,
-        .b8g8r8a8_unorm => .b8g8r8a8_unorm,
-        .b8g8r8a8_srgb => .b8g8r8a8_srgb,
-        .r16g16b16a16_sfloat => .r16g16b16a16_sfloat,
-        .r32_uint => .r32_uint,
-        .s8_uint => .s8_uint,
-        .d16_unorm => .d16_unorm,
-        .d16_unorm_s8_uint => .d16_unorm_s8_uint,
-        .d24_unorm_s8_uint => .d24_unorm_s8_uint,
-        .d32_sfloat => .d32_sfloat,
-        .d32_sfloat_s8_uint => .d32_sfloat_s8_uint,
-        else => {
-            log.err("unsupported vulkan format {s}", .{@tagName(format)});
-            @panic("");
-        },
-    };
-}
-
-fn vulkanSampleCount(sample_count: rhi.SampleCount) vk.SampleCountFlags {
-    return .{
-        .@"1" = sample_count == .count_1,
-        .@"2" = sample_count == .count_2,
-        .@"4" = sample_count == .count_4,
-        .@"8" = sample_count == .count_8,
-        .@"16" = sample_count == .count_16,
-        .@"32" = sample_count == .count_32,
-        .@"64" = sample_count == .count_64,
-    };
-}
-
-fn vulkanStage(stage: rhi.Stage) vk.ShaderStageFlags {
-    return switch (stage) {
-        .vertex => .{ .vertex = true },
-        .fragment => .{ .fragment = true },
-        .compute => .{ .compute = true },
-    };
-}
-
-fn vulkanColorWriteMask(mask: rhi.ColorWriteMask) vk.ColorComponentFlags {
-    return .{
-        .r = mask.r,
-        .g = mask.g,
-        .b = mask.b,
-        .a = mask.a,
-    };
-}
-
-fn vulkanBlendFactor(blend_factor: rhi.BlendFactor) vk.BlendFactor {
-    return switch (blend_factor) {
-        .zero => .zero,
-        .one => .one,
-        .src_color => .src_color,
-        .one_minus_src_color => .one_minus_src_color,
-        .dst_color => .dst_color,
-        .one_minus_dst_color => .one_minus_dst_color,
-        .src_alpha => .src_alpha,
-        .one_minus_src_alpha => .one_minus_src_alpha,
-        .dst_alpha => .dst_alpha,
-        .one_minus_dst_alpha => .one_minus_dst_alpha,
-        .constant_color => .constant_color,
-        .one_minus_constant_color => .one_minus_constant_color,
-        .constant_alpha => .constant_alpha,
-        .one_minus_constant_alpha => .one_minus_constant_alpha,
-        .src_alpha_saturate => .src_alpha_saturate,
-    };
-}
-
-fn vulkanBlendOp(blend_op: rhi.BlendOp) vk.BlendOp {
-    return switch (blend_op) {
-        .add => .add,
-        .subtract => .subtract,
-        .reverse_subtract => .reverse_subtract,
-        .min => .min,
-        .max => .max,
-    };
-}
-
-fn vulkanPolygonMode(polygon_mode: rhi.PolygonMode) vk.PolygonMode {
-    return switch (polygon_mode) {
-        .fill => .fill,
-        .line => .line,
-        .point => .point,
-    };
-}
-
-fn vulkanLoadOp(load_op: rhi.LoadOp) vk.AttachmentLoadOp {
-    return switch (load_op) {
-        .load => .load,
-        .clear => .clear,
-        .dont_care => .dont_care,
-    };
-}
-
-fn vulkanStoreOp(store_op: rhi.StoreOp) vk.AttachmentStoreOp {
-    return switch (store_op) {
-        .store => .store,
-        .dont_care => .dont_care,
-        .none => .none,
-    };
-}
-
-fn vulkanClearValue(clear_value: rhi.ClearValue) vk.ClearValue {
-    return switch (clear_value) {
-        .color => |color| switch (color) {
-            .float => |float| .{ .color = .{ .float_32 = float } },
-            .int => |int| .{ .color = .{ .int_32 = int } },
-            .uint => |uint| .{ .color = .{ .uint_32 = uint } },
-        },
-        .depth_stencil => |depth_stencil| .{ .depth_stencil = .{
-            .depth = depth_stencil.depth,
-            .stencil = depth_stencil.stencil,
-        } },
-    };
-}
-
-fn vulkanFilter(filter: rhi.Filter) vk.Filter {
-    return switch (filter) {
-        .linear => .linear,
-        .nearest => .nearest,
-    };
-}
-
-fn vulkanMipmapMode(filter: rhi.Filter) vk.SamplerMipmapMode {
-    return switch (filter) {
-        .linear => .linear,
-        .nearest => .nearest,
-    };
-}
-
-fn vulkanSamplerAddressMode(address_mode: rhi.AddressMode) vk.SamplerAddressMode {
-    return switch (address_mode) {
-        .clamp_to_edge => .clamp_to_edge,
-        .mirrored_repeat => .mirrored_repeat,
-        .repeat => .repeat,
-    };
-}
-
-const Group = struct {
-    const TextureState = struct {
-        owner: ?Queue,
-        layout: vk.ImageLayout,
-    };
-
-    public: rhi.Group,
-
-    texture_state: TextureState,
-    texture_state_overrides: std.AutoArrayHashMapUnmanaged(*Texture, TextureState),
-
-    last_used: Fence,
-
-    textures: std.AutoArrayHashMapUnmanaged(*Texture, void),
-    buffer_count: usize,
-
-    last_write_epoch: u64,
-    last_write_stage_mask: std.EnumSet(Stage),
-    last_read_epoch: u64,
-    last_read_stage_mask: std.EnumSet(Stage),
-};
-
-const View = struct {
-    public: rhi.View,
-    view: vk.ImageView,
-};
-
-const Texture = struct {
-    public: rhi.Texture,
-    memory: union(enum) {
-        slab: struct {
-            allocation: Allocation,
-            slab: *TextureAllocator.Slab,
-        },
-        dedicated: vk.DeviceMemory,
-    },
-    image: vk.Image,
-
-    fn group(texture: *Texture) *Group {
-        return @ptrCast(@alignCast(@constCast(texture.public.group)));
-    }
-};
-
-const Buffer = struct {
-    public: rhi.Buffer,
-    buffer: vk.Buffer,
-    memory: union(enum) {
-        slab: struct {
-            allocation: Allocation,
-            slab: *BufferAllocator.Slab,
-        },
-        dedicated: vk.DeviceMemory,
-    },
-};
-
-const Sampler = struct {
-    sampler: vk.Sampler,
-    public: rhi.Sampler,
-};
-
-const Shader = struct {
-    public: rhi.Shader,
-    module: vk.ShaderModule,
-};
-
-const GraphicsPipeline = struct {
-    public: rhi.GraphicsPipeline,
-    pipeline: vk.Pipeline,
-};
-
-const ComputePipeline = struct {
-    public: rhi.ComputePipeline,
-};
-
-const Swapchain = struct {
-    public: rhi.Swapchain,
-    acquired: bool,
-    window: rhi.Window,
-    surface: vk.SurfaceKHR,
-    swapchain: vk.SwapchainKHR,
-    images: []vk.Image,
-    views: []vk.ImageView,
-    release_semaphores: []vk.Semaphore,
-    image_index: ?u32,
-    acquire_semaphore: vk.Semaphore,
-};
-
-const Context = @This();
-
 const vtable: rhi.Context.VTable = .{
-    .createSwapchain = createSwapchain,
-    .destroySwapchain = destroySwapchain,
-    .acquireSwapchain = acquireSwapchain,
-    .createBuffer = createBuffer,
-    .createTexture = createTexture,
-    .createSampler = createSampler,
-    .createShader = createShader,
-    .createGroup = undefined,
-    .createGraphicsPipeline = createGraphicsPipeline,
+    .createSwapchain = undefined,
+    .destroySwapchain = undefined,
+    .acquireSwapchain = undefined,
+    .createTexture = undefined,
+    .createSampler = undefined,
+    .createShader = undefined,
+    .createGraphicsPipeline = undefined,
     .createComputePipeline = undefined,
-    .destroyBuffer = queueDestroyBuffer,
-    .destroyTexture = queueDestroyTexture,
+    .destroyTexture = undefined,
     .destroySampler = undefined,
-    .destroyShader = destroyShader,
-    .destroyGroup = undefined,
-    .destroyGraphicsPipeline = queueDestroyGraphicsPipeline,
+    .destroyShader = undefined,
+    .destroyGraphicsPipeline = undefined,
     .destroyComputePipeline = undefined,
-    .stagingAllocator = stagingAllocator,
-    .submit = submit,
+    .stagingAllocator = undefined,
+    .alloc = undefined,
+    .free = undefined,
+    .flush = undefined,
+    .acquireCommandList = undefined,
+    .submit = undefined,
     .wait = undefined,
-    // .setBufferGroup = undefined,
-    // .setTextureGroup = undefined,
-    .claimBuffers = undefined,
-    .claimTextures = undefined,
 };
 
 gpa: std.mem.Allocator,
+io: std.Io,
 platform: Platform,
 config: Config,
 
@@ -713,46 +124,25 @@ physical_device_properties: vk.PhysicalDeviceProperties,
 physical_device_descriptor_indexing_properties: vk.PhysicalDeviceDescriptorIndexingProperties,
 physical_device_memory_properties: vk.PhysicalDeviceMemoryProperties,
 
+graphics_queue: *PhysicalQueue,
+present_queue: *PhysicalQueue,
+queue_family_indices: []u32,
+
 descriptor_set_layout: vk.DescriptorSetLayout,
 pipeline_layout: vk.PipelineLayout,
 descriptor_pool: vk.DescriptorPool,
 descriptor_set: vk.DescriptorSet,
-texture_view_slots: SlotPool,
-sampler_slots: SlotPool,
 
-// pools are for resources that are recreated, not reused
-group_pool: MemoryPool(Group),
-swapchain_pool: MemoryPool(Swapchain),
-shader_pool: MemoryPool(Shader),
-graphics_pipeline_pool: MemoryPool(GraphicsPipeline),
-compute_pipeline_pool: MemoryPool(ComputePipeline),
-buffer_pool: MemoryPool(Buffer),
-texture_pool: MemoryPool(Texture),
-sampler_pool: MemoryPool(Sampler),
-view_pool: MemoryPool(View),
-
-// depots are for resources that are reused, not recreated
-command_pool_depots: std.EnumArray(Queue, Depot(CommandPool)),
-acquire_semaphore_depot: Depot(vk.Semaphore),
-
-queues: std.EnumArray(Queue, *PhysicalQueue),
-queue_family_indices: []u32,
-
-texture_allocator: TextureAllocator,
-buffer_allocator: BufferAllocator,
-upload_allocator: StagingAllocator,
-download_allocator: StagingAllocator,
-
-syncronization_epoch: u64,
-visibility_map: EnumMatrix(Stage, Stage, u64),
-
-present_pipeline: *const rhi.GraphicsPipeline, // used for final blit to swapchain
-present_sampler: *const rhi.Sampler, // sampler used for final blit
+buffer_allocator: allocators.BufferAllocator,
+texture_allocator: allocators.TextureAllocator,
+upload_allocator: allocators.StagingAllocator,
+download_allocator: allocators.StagingAllocator,
 
 pub fn init(
     gpa: std.mem.Allocator,
-    platform: Platform,
-    config: Config,
+    io: std.Io,
+    platform: Context.Platform,
+    config: Context.Config,
     window: rhi.Window,
 ) !rhi.Context {
     var arena_impl: std.heap.ArenaAllocator = .init(gpa);
@@ -763,56 +153,43 @@ pub fn init(
     errdefer gpa.destroy(ctx);
 
     ctx.gpa = gpa;
+    ctx.io = io;
     ctx.platform = platform;
     ctx.config = config;
     ctx.base = .load(platform.getInstanceProcAddress);
 
     try ctx.initInstance(arena, platform, config);
     errdefer ctx.deinitInstance();
-    const physical_device_candidate = try ctx.pickPhysicalDevice(arena, config, window);
-    try ctx.initDevice(arena, physical_device_candidate);
+    try ctx.initDevice(arena, config, window);
     errdefer ctx.deinitDevice();
     try ctx.initPipelineLayout();
     errdefer ctx.deinitPipelineLayout();
+    // const physical_device_candidate = try ctx.pickPhysicalDevice(arena, config, window);
+    // try ctx.initDevice(arena, physical_device_candidate);
+    // errdefer ctx.deinitDevice();
+    // try ctx.initPipelineLayout();
+    // errdefer ctx.deinitPipelineLayout();
 
-    ctx.group_pool = .empty;
-    ctx.shader_pool = .empty;
-    ctx.graphics_pipeline_pool = .empty;
-    ctx.compute_pipeline_pool = .empty;
-    ctx.buffer_pool = .empty;
-    ctx.texture_pool = .empty;
-    ctx.sampler_pool = .empty;
-    ctx.swapchain_pool = .empty;
-    ctx.view_pool = .empty;
+    // ctx.command_pool_depots = .initFill(.init(gpa));
+    // ctx.acquire_semaphore_depot = .init(gpa);
 
-    ctx.command_pool_depots = .initFill(.init(gpa));
-    ctx.acquire_semaphore_depot = .init(gpa);
+    // // TODO init all allocators
+    // ctx.texture_allocator = try .init(ctx);
+    // errdefer ctx.texture_allocator.deinit();
+    // ctx.buffer_allocator = try .init(ctx);
+    // errdefer ctx.buffer_allocator.deinit();
+    // ctx.upload_allocator = try .init(ctx, .upload);
+    // errdefer ctx.upload_allocator.deinit();
+    // ctx.download_allocator = try .init(ctx, .download);
+    // errdefer ctx.download_allocator.deinit();
 
-    // TODO init all allocators
-    ctx.texture_allocator = try .init(ctx);
-    errdefer ctx.texture_allocator.deinit();
     ctx.buffer_allocator = try .init(ctx);
-    errdefer ctx.buffer_allocator.deinit();
-    ctx.upload_allocator = try .init(ctx, .upload);
-    errdefer ctx.upload_allocator.deinit();
-    ctx.download_allocator = try .init(ctx, .download);
-    errdefer ctx.download_allocator.deinit();
-
-    ctx.syncronization_epoch = 0;
-    ctx.visibility_map = .initFill(0);
-
-    ctx.present_sampler = try createSampler(ctx, .{
-        .mag_filter = .nearest,
-        .min_filter = .nearest,
-        .mipmap_filter = .nearest,
-        .address_mode_u = .clamp_to_edge,
-        .address_mode_v = .clamp_to_edge,
-        .address_mode_w = .clamp_to_edge,
-    });
+    std.debug.print("{}\n", .{try ctx.buffer_allocator.alloc(123, 0)});
+    std.debug.print("{}\n", .{try ctx.buffer_allocator.alloc(456, 0)});
 
     return .{
         .ptr = ctx,
-        .vtable = &vtable,
+        .vtable = &Context.vtable,
     };
 }
 
@@ -823,59 +200,7 @@ pub fn deinit(rhi_ctx: rhi.Context) void {
         log.warn("Failed deviceWaitIdle in deinit: {}", .{e});
     };
 
-    queueDestroyGraphicsPipeline(ctx, ctx.present_pipeline);
-
-    ctx.texture_allocator.deinit();
     ctx.buffer_allocator.deinit();
-    ctx.upload_allocator.deinit();
-    ctx.download_allocator.deinit();
-
-    ctx.view_pool.deinit(ctx.gpa);
-    ctx.swapchain_pool.deinit(ctx.gpa);
-    ctx.shader_pool.deinit(ctx.gpa);
-    ctx.graphics_pipeline_pool.deinit(ctx.gpa);
-    ctx.compute_pipeline_pool.deinit(ctx.gpa);
-    ctx.buffer_pool.deinit(ctx.gpa);
-    ctx.texture_pool.deinit(ctx.gpa);
-    ctx.sampler_pool.deinit(ctx.gpa);
-    ctx.group_pool.deinit(ctx.gpa);
-
-    for ([_]Queue{ .graphics, .compute, .transfer, .present }) |queue| {
-        const depot = ctx.command_pool_depots.getPtr(queue);
-        log.debug("destroying {} {} queue command pools", .{ depot.data.items.len, queue });
-        for (depot.data.items) |item| {
-            const buffers: [3]vk.CommandBuffer = .{
-                item.data.prefix,
-                item.data.body,
-                item.data.suffix,
-            };
-            ctx.device.freeCommandBuffers(item.data.pool, &buffers);
-            ctx.device.destroyCommandPool(item.data.pool, null);
-        }
-        depot.deinit();
-    }
-
-    ctx.gpa.free(ctx.queue_family_indices);
-
-    log.debug(
-        "destroying {} queue acquire semaphores",
-        .{ctx.acquire_semaphore_depot.data.items.len},
-    );
-    for (ctx.acquire_semaphore_depot.data.items) |item| {
-        ctx.device.destroySemaphore(item.data, null);
-    }
-    ctx.acquire_semaphore_depot.deinit();
-
-    var physical_queues: [4]?*PhysicalQueue = @splat(null);
-    outer: for ([_]Queue{ .graphics, .compute, .transfer, .present }, 0..) |queue, j| {
-        for (0..4) |i| if (physical_queues[i] == ctx.queues.get(queue)) continue :outer;
-        physical_queues[j] = ctx.queues.get(queue);
-    }
-    for (physical_queues[0..4]) |q| {
-        const queue = q orelse continue;
-        ctx.device.destroySemaphore(queue.semaphore, null);
-        ctx.gpa.destroy(queue);
-    }
 
     ctx.deinitPipelineLayout();
     ctx.deinitDevice();
@@ -884,1339 +209,12 @@ pub fn deinit(rhi_ctx: rhi.Context) void {
     ctx.gpa.destroy(ctx);
 }
 
-fn createSwapchain(
-    ptr: *anyopaque,
-    create_info: rhi.SwapchainCreateInfo,
-) rhi.Context.Error!*const rhi.Swapchain {
-    const ctx: *Context = @ptrCast(@alignCast(ptr));
-    const swapchain: *Swapchain = try ctx.swapchain_pool.create(ctx.gpa);
-
-    const surface = try ctx.platform.createWindowSurface(ctx.instance.handle, create_info.window);
-    errdefer ctx.instance.destroySurfaceKHR(surface, null);
-
-    swapchain.* = Swapchain{
-        .public = .{ .info = .{
-            .name = create_info.name,
-            .composition = .sdr,
-            .present_mode = .fifo,
-            .size = .{ 0, 0, 0 },
-        } },
-        .acquired = false,
-        .surface = surface,
-        .window = create_info.window,
-        .swapchain = .null,
-        .images = &.{},
-        .views = &.{},
-        .release_semaphores = &.{},
-        .image_index = null,
-        .acquire_semaphore = .null,
-    };
-
-    return &swapchain.public;
-}
-
-fn destroySwapchain(ptr: *anyopaque, rhi_swapchain: *const rhi.Swapchain) void {
-    const ctx: *Context = @ptrCast(@alignCast(ptr));
-    const swapchain: *Swapchain = @alignCast(@constCast(
-        @fieldParentPtr("public", rhi_swapchain),
-    ));
-
-    // needs idle to make sure it's not in use since we can't wait on present
-    ctx.device.deviceWaitIdle() catch |e| {
-        log.warn("Failed deviceWaitIdle in destroySwapchain: {}", .{e});
-    };
-
-    if (swapchain.swapchain != .null) {
-        for (0..swapchain.images.len) |i| {
-            ctx.device.destroySemaphore(swapchain.release_semaphores[i], null);
-            ctx.device.destroyImageView(swapchain.views[i], null);
-        }
-        ctx.device.destroySwapchainKHR(swapchain.swapchain, null);
-        ctx.gpa.free(swapchain.release_semaphores);
-        ctx.gpa.free(swapchain.views);
-        ctx.gpa.free(swapchain.images);
-    }
-
-    ctx.instance.destroySurfaceKHR(swapchain.surface, null);
-
-    ctx.swapchain_pool.destroy(swapchain);
-}
-
-fn acquireSwapchain(
-    ptr: *anyopaque,
-    rhi_swapchain: *const rhi.Swapchain,
-    timeout: u64,
-) rhi.Context.Error!bool {
-    const ctx: *Context = @ptrCast(@alignCast(ptr));
-    const swapchain: *Swapchain = @alignCast(@constCast(
-        @fieldParentPtr("public", rhi_swapchain),
-    ));
-
-    std.debug.assert(!swapchain.acquired);
-
-    if (swapchain.swapchain == .null) {
-        try ctx.recreateSwapchain(swapchain);
-    }
-
-    const acquire_semaphore = ctx.acquire_semaphore_depot.pop(
-        try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.present).semaphore),
-    ) orelse
-        ctx.device.createSemaphore(&.{}, null) catch return false;
-    // FIXME if we return early, this needs to be pushed
-
-    const result = ctx.device.acquireNextImageKHR(
-        swapchain.swapchain,
-        timeout,
-        acquire_semaphore,
-        .null,
-    ) catch |e| switch (e) {
-        error.OutOfDateKHR => vk.DeviceWrapper.AcquireNextImageKHRResult{
-            .result = .error_out_of_date_khr,
-            .image_index = undefined,
-        },
-        else => return e,
-    };
-    switch (result.result) {
-        .success => {
-            swapchain.acquired = true;
-            swapchain.image_index = result.image_index;
-            swapchain.acquire_semaphore = acquire_semaphore;
-        },
-        .timeout => {},
-        .not_ready => {},
-        .suboptimal_khr, .error_out_of_date_khr => {
-            try ctx.recreateSwapchain(swapchain);
-        },
-        else => unreachable,
-    }
-
-    return swapchain.acquired;
-}
-
-fn createTexture(
-    ptr: *anyopaque,
-    create_info: rhi.TextureCreateInfo,
-) rhi.Context.Error!*const rhi.Texture {
-    const ctx: *Context = @ptrCast(@alignCast(ptr));
-    const texture = try ctx.texture_allocator.createTexture(create_info);
-
-    if (ctx.config.enable_debug and create_info.name.len > 0) {
-        try ctx.device.setDebugUtilsObjectNameEXT(&.{
-            .object_type = .image,
-            .object_handle = @backingInt(texture.image),
-            .p_object_name = create_info.name.ptr,
-        });
-    }
-
-    return &texture.public;
-}
-
-fn queueDestroyTexture(ptr: *anyopaque, rhi_texture: *const rhi.Texture) void {
-    const ctx: *Context = @ptrCast(@alignCast(ptr));
-    const texture: *Texture = @alignCast(@constCast(
-        @fieldParentPtr("public", rhi_texture),
-    ));
-
-    _ = ctx;
-    _ = texture;
-}
-
-fn createBuffer(
-    ptr: *anyopaque,
-    create_info: rhi.BufferCreateInfo,
-) rhi.Context.Error!*const rhi.Buffer {
-    const ctx: *Context = @ptrCast(@alignCast(ptr));
-    const buffer = try ctx.buffer_allocator.createBuffer(create_info);
-
-    if (ctx.config.enable_debug and create_info.name.len > 0) {
-        try ctx.device.setDebugUtilsObjectNameEXT(&.{
-            .object_type = .buffer,
-            .object_handle = @backingInt(buffer.buffer),
-            .p_object_name = create_info.name.ptr,
-        });
-    }
-
-    return &buffer.public;
-}
-
-fn queueDestroyBuffer(ptr: *anyopaque, rhi_buffer: *const rhi.Buffer) void {
-    const ctx: *Context = @ptrCast(@alignCast(ptr));
-    const buffer: *Buffer = @alignCast(@constCast(
-        @fieldParentPtr("public", rhi_buffer),
-    ));
-
-    _ = ctx;
-    _ = buffer;
-}
-
-fn createShader(
-    ptr: *anyopaque,
-    create_info: rhi.ShaderCreateInfo,
-) rhi.Context.Error!*const rhi.Shader {
-    const ctx: *Context = @ptrCast(@alignCast(ptr));
-    std.debug.assert(@intFromPtr(create_info.src.ptr) % 4 == 0); // SPIR-V alignment requirement
-    const shader = try ctx.shader_pool.create(ctx.gpa);
-    errdefer ctx.shader_pool.destroy(shader);
-    shader.* = .{
-        .public = .{
-            .info = .{
-                .stage = create_info.stage,
-                .name = create_info.name,
-            },
-        },
-        .module = try ctx.device.createShaderModule(&.{
-            .code_size = create_info.src.len,
-            .p_code = @ptrCast(@alignCast(create_info.src.ptr)),
-        }, null),
-    };
-    return &shader.public;
-}
-
-fn destroyShader(
-    ptr: *anyopaque,
-    rhi_shader: *const rhi.Shader,
-) void {
-    const ctx: *Context = @ptrCast(@alignCast(ptr));
-    const shader: *Shader = @alignCast(@constCast(@fieldParentPtr("public", rhi_shader)));
-    ctx.device.destroyShaderModule(shader.module, null);
-    ctx.shader_pool.destroy(shader);
-}
-
-pub fn createGraphicsPipeline(
-    ptr: *anyopaque,
-    create_info: rhi.GraphicsPipelineCreateInfo,
-) rhi.Context.Error!*const rhi.GraphicsPipeline {
-    const ctx: *Context = @ptrCast(@alignCast(ptr));
-    const pipeline = try ctx.graphics_pipeline_pool.create(ctx.gpa);
-    errdefer ctx.graphics_pipeline_pool.destroy(pipeline);
-
-    // TODO handle fragment-shader-free pipelines
-    const vertex_shader: *Shader = @alignCast(@constCast(
-        @fieldParentPtr("public", create_info.vertex_shader),
-    ));
-    const fragment_shader: *Shader = @alignCast(@constCast(
-        @fieldParentPtr("public", create_info.fragment_shader.?),
-    ));
-    const shader_stages = [_]vk.PipelineShaderStageCreateInfo{ .{
-        .stage = vulkanStage(vertex_shader.public.info.stage),
-        .module = vertex_shader.module,
-        .p_name = "main",
-    }, .{
-        .stage = vulkanStage(fragment_shader.public.info.stage),
-        .module = fragment_shader.module,
-        .p_name = "main",
-    } };
-
-    const dynamic_states = [_]vk.DynamicState{
-        .viewport,
-        .scissor,
-        .depth_bias,
-        .blend_constants,
-        // .depth_bounds,
-        .stencil_compare_mask,
-        .stencil_write_mask,
-        .stencil_reference,
-        .cull_mode,
-        .front_face,
-        .primitive_topology,
-        .depth_test_enable,
-        .depth_write_enable,
-        .depth_compare_op,
-        .depth_bounds_test_enable,
-        .stencil_test_enable,
-        .stencil_op,
-        .depth_bias_enable,
-        .primitive_restart_enable,
-    };
-
-    // TODO probably better to have a reusable arena in Context
-    var arena_impl: std.heap.ArenaAllocator = .init(ctx.gpa);
-    defer arena_impl.deinit();
-    const arena = arena_impl.allocator();
-
-    const color_attachment_formats = try arena.alloc(
-        vk.Format,
-        create_info.color_attachments.len,
-    );
-    const color_blend_attachments = try arena.alloc(
-        vk.PipelineColorBlendAttachmentState,
-        create_info.color_attachments.len,
-    );
-    for (create_info.color_attachments, 0..) |color_attachment, i| {
-        color_attachment_formats[i] = vulkanFormat(color_attachment.format);
-        var cba = std.mem.zeroes(vk.PipelineColorBlendAttachmentState);
-        cba.color_write_mask = vulkanColorWriteMask(color_attachment.color_write_mask);
-        if (color_attachment.blend_state) |blend_state| {
-            cba.blend_enable = .true;
-            cba.src_color_blend_factor = vulkanBlendFactor(blend_state.src_color_blend_factor);
-            cba.dst_color_blend_factor = vulkanBlendFactor(blend_state.dst_color_blend_factor);
-            cba.color_blend_op = vulkanBlendOp(blend_state.color_blend_op);
-            cba.src_alpha_blend_factor = vulkanBlendFactor(blend_state.src_alpha_blend_factor);
-            cba.dst_alpha_blend_factor = vulkanBlendFactor(blend_state.dst_alpha_blend_factor);
-            cba.alpha_blend_op = vulkanBlendOp(blend_state.alpha_blend_op);
-        }
-        color_blend_attachments[i] = cba;
-    }
-
-    const dynamic_rendering: vk.PipelineRenderingCreateInfo = .{
-        .color_attachment_count = @intCast(color_attachment_formats.len),
-        .p_color_attachment_formats = if (color_attachment_formats.len > 0) @ptrCast(&color_attachment_formats[0]) else null,
-        .depth_attachment_format = if (create_info.depth_attachment_format) |format| vulkanFormat(format) else .undefined,
-        .stencil_attachment_format = if (create_info.stencil_attachment_format) |format| vulkanFormat(format) else .undefined,
-        .view_mask = 0, // multiview is not supported
-    };
-
-    const pipeline_create_info: vk.GraphicsPipelineCreateInfo = .{
-        .stage_count = @intCast(shader_stages.len),
-        .p_stages = @ptrCast(&shader_stages[0]),
-        .p_vertex_input_state = &.{}, // not supported
-        .p_input_assembly_state = &.{
-            .topology = .triangle_list,
-            .primitive_restart_enable = .false,
-        },
-        .p_viewport_state = &.{
-            .viewport_count = 1, // multiple viewports are not supported
-            .scissor_count = 1, // multiple viewports are not supported
-        },
-        .p_rasterization_state = &.{
-            .depth_clamp_enable = .false, // depth clamp not supported
-            .rasterizer_discard_enable = .false,
-            .polygon_mode = vulkanPolygonMode(create_info.polygon_mode),
-            .line_width = 1.0,
-            .cull_mode = .{ .back = true },
-            .front_face = .counter_clockwise,
-            .depth_bias_enable = .false,
-            .depth_bias_constant_factor = 0.0,
-            .depth_bias_clamp = 0.0,
-            .depth_bias_slope_factor = 0.0,
-        },
-        .p_multisample_state = &.{
-            .rasterization_samples = vulkanSampleCount(create_info.multisample.sample_count),
-            .sample_shading_enable = .false, // sample shading not supported
-            .min_sample_shading = 1.0, // sample shading not supported
-            .p_sample_mask = null, // sample mask not supported
-            .alpha_to_coverage_enable = if (create_info.multisample.enable_alpha_to_coverage) .true else .false,
-            .alpha_to_one_enable = .false, // alpha to one not supported
-        },
-        .p_depth_stencil_state = &.{
-            .depth_test_enable = .false,
-            .depth_write_enable = .false,
-            .depth_compare_op = .never,
-            .depth_bounds_test_enable = .false, // depth boudns not supported
-            .stencil_test_enable = .false,
-            .front = std.mem.zeroes(vk.StencilOpState),
-            .back = std.mem.zeroes(vk.StencilOpState),
-            .min_depth_bounds = 0.0, // depth boudns not supported
-            .max_depth_bounds = 0.0, // depth boudns not supported
-        },
-        .p_color_blend_state = &.{
-            .logic_op_enable = .false, // logic op is not supported
-            .logic_op = .clear, // logic op is not supported
-            .attachment_count = @intCast(color_blend_attachments.len),
-            .p_attachments = if (color_blend_attachments.len > 0) @ptrCast(&color_blend_attachments[0]) else null,
-            .blend_constants = @splat(1.0),
-        },
-        .p_dynamic_state = &.{
-            .dynamic_state_count = @intCast(dynamic_states.len),
-            .p_dynamic_states = &dynamic_states,
-        },
-        .layout = ctx.pipeline_layout,
-        .render_pass = .null, // dynamic rendering
-        .subpass = 0,
-        .base_pipeline_handle = .null,
-        .base_pipeline_index = -1,
-        .p_next = &dynamic_rendering,
-    };
-
-    var pipelines: [1]vk.Pipeline = undefined;
-    _ = try ctx.device.createGraphicsPipelines(
-        .null,
-        &.{pipeline_create_info},
-        null,
-        &pipelines,
-    );
-
-    pipeline.* = .{
-        .public = .{
-            .info = .{
-                .fragment_shader = create_info.fragment_shader != null,
-                .polygon_mode = create_info.polygon_mode,
-                .multisample = create_info.multisample,
-                .color_attachments = create_info.color_attachments,
-                .depth_attachment_format = create_info.depth_attachment_format,
-                .stencil_attachment_format = create_info.stencil_attachment_format,
-                .name = create_info.name,
-            },
-        },
-        .pipeline = pipelines[0],
-    };
-
-    return &pipeline.public;
-}
-
-pub fn queueDestroyGraphicsPipeline(ptr: *anyopaque, rhi_pipeline: *const rhi.GraphicsPipeline) void {
-    _ = ptr;
-    _ = rhi_pipeline;
-}
-
-fn createSampler(ptr: *anyopaque, create_info: rhi.SamplerCreateInfo) !*const rhi.Sampler {
-    // FIXME cleanup on error
-    const ctx: *Context = @ptrCast(@alignCast(ptr));
-    const vk_create_info: vk.SamplerCreateInfo = .{
-        .mag_filter = vulkanFilter(create_info.mag_filter),
-        .min_filter = vulkanFilter(create_info.min_filter),
-        .mipmap_mode = vulkanMipmapMode(create_info.mipmap_filter),
-        .address_mode_u = vulkanSamplerAddressMode(create_info.address_mode_u),
-        .address_mode_v = vulkanSamplerAddressMode(create_info.address_mode_v),
-        .address_mode_w = vulkanSamplerAddressMode(create_info.address_mode_w),
-        .mip_lod_bias = create_info.mip_lod_bias,
-        .anisotropy_enable = if (create_info.max_anisotropy != null) .true else .false,
-        .max_anisotropy = if (create_info.max_anisotropy) |x| x else undefined,
-        .compare_enable = if (create_info.compare_op != null) .true else .false,
-        .compare_op = if (create_info.compare_op) |x| vulkanCompareOp(x) else undefined,
-        .min_lod = create_info.min_lod,
-        .max_lod = create_info.max_lod orelse std.math.inf(f32), // is this right?
-        .border_color = .float_transparent_black,
-        .unnormalized_coordinates = .false,
-    };
-    const vk_sampler = try ctx.device.createSampler(&vk_create_info, null);
-    const sampler = try ctx.sampler_pool.create(ctx.gpa);
-    const sampler_slot = try ctx.sampler_slots.acquire();
-    sampler.* = .{
-        .sampler = vk_sampler,
-        .public = .{
-            .device_address = @intCast(sampler_slot),
-            .info = .{
-                .address_mode_u = create_info.address_mode_u,
-                .address_mode_v = create_info.address_mode_v,
-                .address_mode_w = create_info.address_mode_w,
-                .compare_op = create_info.compare_op,
-                .mag_filter = create_info.mag_filter,
-                .min_filter = create_info.min_filter,
-                .mipmap_filter = create_info.mipmap_filter,
-                .max_anisotropy = create_info.max_anisotropy,
-                .max_lod = create_info.max_lod,
-                .min_lod = create_info.min_lod,
-                .mip_lod_bias = create_info.mip_lod_bias,
-                .name = create_info.name,
-            },
-        },
-    };
-
-    const descriptor_image_info: vk.DescriptorImageInfo = .{
-        .sampler = vk_sampler,
-        .image_view = .null,
-        .image_layout = .undefined,
-    };
-    const write_descriptor_set: vk.WriteDescriptorSet = .{
-        .dst_set = ctx.descriptor_set,
-        .dst_binding = 2,
-        .dst_array_element = sampler_slot,
-        .descriptor_count = 1,
-        .descriptor_type = .sampler,
-        .p_image_info = @ptrCast(&descriptor_image_info),
-    };
-    ctx.device.updateDescriptorSets(&.{write_descriptor_set}, null);
-
-    if (ctx.config.enable_debug and create_info.name.len > 0) {
-        try ctx.device.setDebugUtilsObjectNameEXT(&.{
-            .object_type = .buffer,
-            .object_handle = @backingInt(vk_sampler),
-            .p_object_name = create_info.name.ptr,
-        });
-    }
-    return &sampler.public;
-}
-
-fn queueDestroySampler(ptr: *anyopaque, rhi_sampler: *const rhi.Sampler) void {
-    _ = ptr;
-    _ = rhi_sampler;
-}
-
-fn stagingAllocator(ptr: *anyopaque, usage: rhi.StagingAllocatorUsage) std.mem.Allocator {
-    const ctx: *Context = @ptrCast(@alignCast(ptr));
-    return .{
-        .ptr = switch (usage) {
-            .upload => &ctx.upload_allocator,
-            .download => &ctx.download_allocator,
-        },
-        .vtable = &.{
-            .alloc = StagingAllocator.alloc,
-            .resize = StagingAllocator.resize,
-            .remap = StagingAllocator.remap,
-            .free = StagingAllocator.free,
-        },
-    };
-}
-
-fn submit(
-    ptr: *anyopaque,
-    io: std.Io,
-    command_buffers: []const rhi.CommandBuffer,
-    presents: []const rhi.Present,
-) rhi.Context.Error!rhi.Fence {
-    const ctx: *Context = @ptrCast(@alignCast(ptr));
-
-    var arena_impl: std.heap.ArenaAllocator = .init(ctx.gpa);
-    defer arena_impl.deinit();
-    const arena = arena_impl.allocator();
-
-    // where we are right now on the timeline
-    const fence: Fence = .{
-        .graphics = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.graphics).semaphore),
-        .compute = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.compute).semaphore),
-        .transfer = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.transfer).semaphore),
-        .present = try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.present).semaphore),
-    };
-
-    _ = io;
-
-    const command_pools = try arena.alloc(CommandPool, command_buffers.len);
-    for (command_buffers, 0..) |command_buffer, i| {
-        command_pools[i] = try ctx.getCommandPool(.fromRhi(command_buffer.queue), fence);
-        // FIXME cleanup if we error
-    }
-
-    // TODO this can be done in parallel using the io
-    for (command_buffers, command_pools) |command_buffer, command_pool| {
-        try ctx.device.beginCommandBuffer(command_pool.body, &.{
-            .flags = .{ .one_time_submit = true },
-        });
-        ctx.device.cmdBindDescriptorSets(
-            command_pool.body,
-            .graphics,
-            ctx.pipeline_layout,
-            0,
-            &.{ctx.descriptor_set},
-            null,
-        );
-        const queue = ctx.queues.get(.fromRhi(command_buffer.queue));
-        for (command_buffer.commands.items) |command| {
-            switch (command) {
-                .begin_render_pass => |cmd| {
-                    // FIXME need to dispatch barriers based on the groups here
-
-                    const color_attachment_infos: []vk.RenderingAttachmentInfo =
-                        if (cmd.color_attachments.len > 0)
-                            try arena.alloc(vk.RenderingAttachmentInfo, cmd.color_attachments.len)
-                        else
-                            &.{};
-                    const depth_attachment_info: ?*vk.RenderingAttachmentInfo =
-                        if (cmd.depth_attachment != null)
-                            try arena.create(vk.RenderingAttachmentInfo)
-                        else
-                            null;
-                    const stencil_attachment_info: ?*vk.RenderingAttachmentInfo =
-                        if (cmd.stencil_attachment != null)
-                            try arena.create(vk.RenderingAttachmentInfo)
-                        else
-                            null;
-
-                    var render_area_width: ?u32 = null;
-                    var render_area_height: ?u32 = null;
-
-                    for (cmd.color_attachments, 0..) |attachment, i| {
-                        const view: *View = @alignCast(@constCast(
-                            @fieldParentPtr("public", attachment.view),
-                        ));
-                        const texture: *Texture = @alignCast(@constCast(
-                            @fieldParentPtr("public", view.public.texture),
-                        ));
-                        const group = texture.group();
-                        const state =
-                            group.texture_state_overrides.get(texture) orelse group.texture_state;
-                        if (state.owner) |owner| {
-                            std.debug.assert(owner == Queue.fromRhi(command_buffer.queue));
-                        }
-
-                        // also checks that all attachments are the same size
-                        if (render_area_width == null) {
-                            render_area_width = texture.public.info.size[0];
-                        } else {
-                            std.debug.assert(render_area_width == texture.public.info.size[0]);
-                        }
-                        if (render_area_height == null) {
-                            render_area_height = texture.public.info.size[1];
-                        } else {
-                            std.debug.assert(render_area_height == texture.public.info.size[1]);
-                        }
-
-                        // OPTIMIZE batch all the layout transitions
-                        // FIXME insert minimal barrier and record this usage
-                        // though note that queue family ownership transfers are handled elsewhere
-                        if (state.layout != .attachment_optimal) {
-                            try group.texture_state_overrides.ensureUnusedCapacity(ctx.gpa, 1);
-                            const image_memory_barrier: vk.ImageMemoryBarrier2 = .{
-                                .src_stage_mask = .{ .all_commands = true },
-                                .src_access_mask = .{
-                                    .memory_read = true,
-                                    .memory_write = true,
-                                },
-                                .dst_stage_mask = .{ .color_attachment_output = true },
-                                .dst_access_mask = .{ .color_attachment_write = true },
-                                .old_layout = state.layout,
-                                .new_layout = .attachment_optimal,
-                                .src_queue_family_index = queue.family,
-                                .dst_queue_family_index = queue.family,
-                                .image = texture.image,
-                                .subresource_range = .{
-                                    .aspect_mask = .{ .color = true },
-                                    .base_mip_level = 0,
-                                    .level_count = texture.public.info.mip_levels,
-                                    .base_array_layer = 0,
-                                    .layer_count = texture.public.info.size[2],
-                                },
-                            };
-                            ctx.device.cmdPipelineBarrier2(
-                                command_pool.body,
-                                &.{
-                                    .image_memory_barrier_count = 1,
-                                    .p_image_memory_barriers = @ptrCast(&image_memory_barrier),
-                                },
-                            );
-                            group.texture_state_overrides.putAssumeCapacity(texture, .{
-                                .owner = .fromRhi(command_buffer.queue),
-                                .layout = .attachment_optimal,
-                            });
-                        }
-
-                        color_attachment_infos[i] = .{
-                            .image_view = view.view,
-                            .image_layout = (group.texture_state_overrides.get(texture) orelse
-                                group.texture_state).layout,
-                            .resolve_mode = .{},
-                            .resolve_image_layout = .undefined,
-                            .load_op = vulkanLoadOp(attachment.load_op),
-                            .store_op = vulkanStoreOp(attachment.store_op),
-                            .clear_value = if (attachment.clear_value) |clear_value|
-                                vulkanClearValue(clear_value)
-                            else
-                                undefined,
-                        };
-                    }
-                    if (cmd.depth_attachment) |attachment| {
-                        // TODO
-                        _ = attachment;
-                    }
-                    if (cmd.stencil_attachment) |attachment| {
-                        // TODO
-                        _ = attachment;
-                    }
-
-                    ctx.device.cmdBeginRendering(command_pool.body, &.{
-                        .color_attachment_count = @intCast(color_attachment_infos.len),
-                        .p_color_attachments = color_attachment_infos.ptr,
-                        .p_depth_attachment = depth_attachment_info,
-                        .p_stencil_attachment = stencil_attachment_info,
-                        .layer_count = 1,
-                        .view_mask = 0,
-                        .render_area = .{
-                            .offset = .{ .x = 0, .y = 0 },
-                            .extent = .{
-                                .width = render_area_width.?,
-                                .height = render_area_height.?,
-                            },
-                        },
-                    });
-                },
-                .bind_graphics_pipeline => |cmd| {
-                    // set all the dynamic state
-                    // TODO we should probably store the state in the command buffer and
-                    // only update the diff
-                    const dynamic_state = cmd.dynamic_state;
-                    ctx.device.cmdSetViewport(command_pool.body, 0, &.{vulkanViewport(dynamic_state.viewport)});
-                    ctx.device.cmdSetScissor(command_pool.body, 0, &.{vulkanScissor(dynamic_state.scissor)});
-                    ctx.device.cmdSetPrimitiveTopology(
-                        command_pool.body,
-                        vulkanPrimitiveTopology(dynamic_state.input_assembly.primitive_topology),
-                    );
-                    ctx.device.cmdSetPrimitiveRestartEnable(
-                        command_pool.body,
-                        if (dynamic_state.input_assembly.enable_primitive_restart) .true else .false,
-                    );
-                    ctx.device.cmdSetCullMode(
-                        command_pool.body,
-                        vulkanCullMode(dynamic_state.rasterization.cull_mode),
-                    );
-                    ctx.device.cmdSetFrontFace(
-                        command_pool.body,
-                        vulkanFrontFace(dynamic_state.rasterization.front_face),
-                    );
-                    if (dynamic_state.rasterization.depth_bias) |depth_bias| {
-                        ctx.device.cmdSetDepthBiasEnable(command_pool.body, .true);
-                        ctx.device.cmdSetDepthBias(
-                            command_pool.body,
-                            depth_bias.constant_factor,
-                            depth_bias.clamp,
-                            depth_bias.slope_factor,
-                        );
-                    } else {
-                        ctx.device.cmdSetDepthBiasEnable(command_pool.body, .false);
-                    }
-                    if (dynamic_state.depth_stencil.depth_test) |compare_op| {
-                        ctx.device.cmdSetDepthTestEnable(command_pool.body, .true);
-                        ctx.device.cmdSetDepthCompareOp(command_pool.body, vulkanCompareOp(compare_op));
-                    } else {
-                        ctx.device.cmdSetDepthTestEnable(command_pool.body, .false);
-                    }
-                    ctx.device.cmdSetDepthWriteEnable(
-                        command_pool.body,
-                        if (dynamic_state.depth_stencil.enable_depth_write) .true else .false,
-                    );
-                    if (dynamic_state.depth_stencil.stencil_test) |stencil_test| {
-                        ctx.device.cmdSetStencilTestEnable(command_pool.body, .true);
-                        const front_op_state = vulkanStencilOpState(stencil_test.front);
-                        const back_op_state = vulkanStencilOpState(stencil_test.back);
-                        ctx.device.cmdSetStencilOp(
-                            command_pool.body,
-                            .{ .front = true },
-                            front_op_state.fail_op,
-                            front_op_state.pass_op,
-                            front_op_state.depth_fail_op,
-                            front_op_state.compare_op,
-                        );
-                        ctx.device.cmdSetStencilCompareMask(
-                            command_pool.body,
-                            .{ .front = true },
-                            front_op_state.compare_mask,
-                        );
-                        ctx.device.cmdSetStencilWriteMask(
-                            command_pool.body,
-                            .{ .front = true },
-                            front_op_state.write_mask,
-                        );
-                        ctx.device.cmdSetStencilReference(
-                            command_pool.body,
-                            .{ .front = true },
-                            front_op_state.reference,
-                        );
-                        ctx.device.cmdSetStencilOp(
-                            command_pool.body,
-                            .{ .back = true },
-                            back_op_state.fail_op,
-                            back_op_state.pass_op,
-                            back_op_state.depth_fail_op,
-                            back_op_state.compare_op,
-                        );
-                        ctx.device.cmdSetStencilCompareMask(
-                            command_pool.body,
-                            .{ .back = true },
-                            back_op_state.compare_mask,
-                        );
-                        ctx.device.cmdSetStencilWriteMask(
-                            command_pool.body,
-                            .{ .back = true },
-                            back_op_state.write_mask,
-                        );
-                        ctx.device.cmdSetStencilReference(
-                            command_pool.body,
-                            .{ .back = true },
-                            back_op_state.reference,
-                        );
-                    } else {
-                        ctx.device.cmdSetStencilTestEnable(command_pool.body, .false);
-                    }
-
-                    const pipeline: *GraphicsPipeline = @alignCast(@constCast(
-                        @fieldParentPtr("public", cmd.pipeline),
-                    ));
-                    ctx.device.cmdBindPipeline(command_pool.body, .graphics, pipeline.pipeline);
-                },
-                .end_render_pass => {
-                    ctx.device.cmdEndRendering(command_pool.body);
-                },
-                .buffer_upload => |cmd| {
-                    const src = ctx.upload_allocator.buffer;
-                    const src_offset = @intFromPtr(cmd.src.ptr) -
-                        @intFromPtr(ctx.upload_allocator.mapped_memory.ptr);
-                    const dst: *Buffer = @alignCast(@constCast(@fieldParentPtr("public", cmd.dst)));
-                    ctx.device.cmdCopyBuffer(command_pool.body, src, dst.buffer, &.{.{
-                        .src_offset = src_offset,
-                        .dst_offset = cmd.dst_offset,
-                        .size = cmd.src.len,
-                    }});
-                },
-                .draw_indexed => |cmd| {
-                    const buffer: *Buffer = @alignCast(@constCast(
-                        @fieldParentPtr("public", cmd.index_buffer),
-                    ));
-                    // OPTIMIZE keep track of the currently bound buffer and only bind if changed
-                    ctx.device.cmdBindIndexBuffer(command_pool.body, buffer.buffer, 0, .uint32);
-                    ctx.device.cmdDrawIndexed(
-                        command_pool.body,
-                        cmd.index_count,
-                        cmd.instance_count,
-                        0,
-                        0,
-                        0,
-                    );
-                },
-                .push_constant => |cmd| {
-                    // FIXME on certain commands like draw_indexed
-                    // if we haven't called pushConstant they fail validation
-                    // so, we need to insert a dummy pushConstant somewhere
-                    ctx.device.cmdPushConstants(
-                        command_pool.body,
-                        ctx.pipeline_layout,
-                        .{ .vertex = true, .fragment = true, .compute = true },
-                        0,
-                        @intCast(cmd.len),
-                        cmd.ptr,
-                    );
-                },
-                else => log.err("TODO: handle command {}", .{command}),
-            }
-        }
-
-        // FIXME we should correctly insert barriers only when there is a dependency
-        // this is a purely get-it-to-work implementation
-        ctx.device.cmdPipelineBarrier2(command_pool.body, &.{
-            .memory_barrier_count = 1,
-            .p_memory_barriers = &.{.{
-                .src_stage_mask = .{ .all_commands = true },
-                .src_access_mask = .{ .memory_read = true, .memory_write = true },
-                .dst_stage_mask = .{ .all_commands = true },
-                .dst_access_mask = .{ .memory_read = true, .memory_write = true },
-            }},
-        });
-
-        try ctx.device.endCommandBuffer(command_pool.body);
-
-        try ctx.device.beginCommandBuffer(command_pool.prefix, &.{
-            .flags = .{ .one_time_submit = true },
-        });
-        ctx.device.cmdBindDescriptorSets(
-            command_pool.prefix,
-            .graphics,
-            ctx.pipeline_layout,
-            0,
-            &.{ctx.descriptor_set},
-            null,
-        );
-        try ctx.device.endCommandBuffer(command_pool.prefix);
-
-        try ctx.device.beginCommandBuffer(command_pool.suffix, &.{
-            .flags = .{ .one_time_submit = true },
-        });
-        ctx.device.cmdBindDescriptorSets(
-            command_pool.suffix,
-            .graphics,
-            ctx.pipeline_layout,
-            0,
-            &.{ctx.descriptor_set},
-            null,
-        );
-        try ctx.device.endCommandBuffer(command_pool.suffix);
-
-        // FIXME we need a second loop just for the submits
-        // since all the barrier insertion needs to happen first
-        // in the same way, we should only insert semaphores between queues that have a dependency
-        // and we should make the semaphore stage mask as narrow as possible
-        // this is purely a get-it-to-work implementation
-        std.debug.print("submit translated pool\n", .{});
-        try queue.queue.submit2(&[_]vk.SubmitInfo2{.{
-            .command_buffer_info_count = 1,
-            .p_command_buffer_infos = @ptrCast(&[_]vk.CommandBufferSubmitInfo{.{
-                .command_buffer = command_pool.body,
-                .device_mask = 0,
-            }}),
-            .wait_semaphore_info_count = 1,
-            .p_wait_semaphore_infos = &.{.{
-                .semaphore = queue.semaphore,
-                .value = queue.value,
-                .stage_mask = .{ .all_commands = true },
-                .device_index = 0,
-            }},
-            .signal_semaphore_info_count = 1,
-            .p_signal_semaphore_infos = &.{.{
-                .semaphore = queue.semaphore,
-                .value = queue.value + 1,
-                .stage_mask = .{ .all_commands = true },
-                .device_index = 0,
-            }},
-        }}, .null);
-        queue.value += 1;
-    }
-
-    for (command_buffers, command_pools) |command_buffer, command_pool| {
-        const queue: Queue = .fromRhi(command_buffer.queue);
-        try ctx.command_pool_depots.getPtr(queue).push(
-            command_pool,
-            ctx.queues.get(queue).value,
-        );
-    }
-
-    // for each present
-    // transition the src image to the graphics queue
-    // we can assume that the swapchain image is on the graphics queue
-    // because we don't care about the contents since we always fully overwrite
-    // perform a graphics pass to transfer the src image onto the swapchain
-    // transfer the swapchain image to the present queue
-    // perform present
-
-    const graphics_queue = ctx.queues.get(.graphics);
-    const graphics_command_pool = try ctx.getCommandPool(.graphics, fence);
-
-    const present_queue = ctx.queues.get(.present);
-    const present_command_pool = try ctx.getCommandPool(.present, fence);
-
-    var acquire_semaphore_infos: std.ArrayList(vk.SemaphoreSubmitInfo) = .empty;
-    var release_semaphores: std.ArrayList(vk.Semaphore) = .empty;
-    var release_semaphore_infos: std.ArrayList(vk.SemaphoreSubmitInfo) = .empty;
-    var swapchains: std.ArrayList(vk.SwapchainKHR) = .empty;
-    var image_indices: std.ArrayList(u32) = .empty;
-    var swapchain_barriers: std.ArrayList(vk.ImageMemoryBarrier2) = .empty;
-
-    // transition present_src and swapchain for present_pipeline
-    // NOTE unlike other textures, the swapchain is created as concurrent
-    for (presents) |present| {
-        const swapchain: *Swapchain = @alignCast(@constCast(
-            @fieldParentPtr("public", present.swapchain),
-        ));
-        std.debug.assert(swapchain.acquired);
-        const image_index = swapchain.image_index.?;
-        const texture: *Texture = @alignCast(@constCast(
-            @fieldParentPtr("public", present.texture),
-        ));
-        const texture_group = texture.group();
-        const texture_state = texture_group.texture_state_overrides.get(texture) orelse texture_group.texture_state;
-
-        try texture_group.texture_state_overrides.ensureUnusedCapacity(ctx.gpa, 1);
-
-        try swapchain_barriers.append(arena, .{
-            .src_stage_mask = .{ .all_commands = true },
-            .src_access_mask = .{ .memory_read = true, .memory_write = true },
-            .dst_stage_mask = .{ .all_commands = true },
-            .dst_access_mask = .{ .memory_read = true, .memory_write = true },
-            .image = texture.image,
-            .old_layout = texture_state.layout,
-            .new_layout = .read_only_optimal,
-            .src_queue_family_index = present_queue.family,
-            .dst_queue_family_index = present_queue.family,
-            .subresource_range = .{
-                .aspect_mask = .{ .color = true },
-                .base_array_layer = 0,
-                .base_mip_level = 0,
-                .layer_count = 1,
-                .level_count = 1,
-            },
-        });
-        texture_group.texture_state_overrides.putAssumeCapacity(texture, .{
-            .layout = .read_only_optimal,
-            .owner = .graphics,
-        });
-
-        try swapchain_barriers.append(arena, .{
-            .src_stage_mask = .{ .all_commands = true },
-            .src_access_mask = .{ .memory_read = true, .memory_write = true },
-            .dst_stage_mask = .{ .all_commands = true },
-            .dst_access_mask = .{ .memory_read = true, .memory_write = true },
-            .image = swapchain.images[image_index],
-            .old_layout = .undefined,
-            .new_layout = .attachment_optimal,
-            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .subresource_range = .{
-                .aspect_mask = .{ .color = true },
-                .base_array_layer = 0,
-                .base_mip_level = 0,
-                .layer_count = 1,
-                .level_count = 1,
-            },
-        });
-    }
-    try ctx.device.beginCommandBuffer(graphics_command_pool.body, &.{
-        .flags = .{ .one_time_submit = true },
-    });
-    ctx.device.cmdBindDescriptorSets(
-        graphics_command_pool.body,
-        .graphics,
-        ctx.pipeline_layout,
-        0,
-        &.{ctx.descriptor_set},
-        null,
-    );
-    ctx.device.cmdPipelineBarrier2(graphics_command_pool.body, &.{
-        .image_memory_barrier_count = @intCast(swapchain_barriers.items.len),
-        .p_image_memory_barriers = swapchain_barriers.items.ptr,
-    });
-    swapchain_barriers.clearRetainingCapacity();
-    for (presents) |present| {
-        const swapchain: *Swapchain = @alignCast(@constCast(
-            @fieldParentPtr("public", present.swapchain),
-        ));
-        std.debug.assert(swapchain.acquired);
-        const image_index = swapchain.image_index.?;
-        // const texture: *Texture = @alignCast(@constCast(
-        // @fieldParentPtr("public", present.texture),
-        // ));
-        const color_attachment_info: vk.RenderingAttachmentInfo = .{
-            .image_view = swapchain.views[image_index],
-            .image_layout = .attachment_optimal,
-            .resolve_mode = .{},
-            .resolve_image_layout = .undefined,
-            .load_op = .dont_care,
-            .store_op = .store,
-            .clear_value = undefined,
-        };
-        ctx.device.cmdBeginRendering(graphics_command_pool.body, &.{
-            .color_attachment_count = 1,
-            .p_color_attachments = @ptrCast(&color_attachment_info),
-            .p_depth_attachment = null,
-            .p_stencil_attachment = null,
-            .layer_count = 1,
-            .view_mask = 0,
-            .render_area = .{
-                .offset = .{ .x = 0, .y = 0 },
-                .extent = .{
-                    .width = swapchain.public.info.size[0],
-                    .height = swapchain.public.info.size[1],
-                },
-            },
-        });
-        ctx.device.cmdSetViewport(graphics_command_pool.body, 0, &.{.{
-            .x = 0,
-            .y = 0,
-            .width = @floatFromInt(swapchain.public.info.size[0]),
-            .height = @floatFromInt(swapchain.public.info.size[1]),
-            .min_depth = 0.0,
-            .max_depth = 1.0,
-        }});
-        ctx.device.cmdSetScissor(graphics_command_pool.body, 0, &.{.{
-            .offset = .{ .x = 0, .y = 0 },
-            .extent = .{
-                .width = swapchain.public.info.size[0],
-                .height = swapchain.public.info.size[1],
-            },
-        }});
-        ctx.device.cmdSetPrimitiveTopology(graphics_command_pool.body, .triangle_list);
-        ctx.device.cmdSetPrimitiveRestartEnable(graphics_command_pool.body, .false);
-        ctx.device.cmdSetCullMode(graphics_command_pool.body, .{});
-        ctx.device.cmdSetFrontFace(graphics_command_pool.body, .counter_clockwise);
-        ctx.device.cmdSetDepthBiasEnable(graphics_command_pool.body, .false);
-        ctx.device.cmdSetDepthTestEnable(graphics_command_pool.body, .false);
-        ctx.device.cmdSetDepthWriteEnable(graphics_command_pool.body, .false);
-        ctx.device.cmdSetStencilTestEnable(graphics_command_pool.body, .false);
-        const pipeline: *GraphicsPipeline = @alignCast(@constCast(
-            @fieldParentPtr("public", ctx.present_pipeline),
-        ));
-        ctx.device.cmdBindPipeline(graphics_command_pool.body, .graphics, pipeline.pipeline);
-        std.debug.print("{}\n", .{presents[0].texture});
-        ctx.device.cmdPushConstants(
-            graphics_command_pool.body,
-            ctx.pipeline_layout,
-            .{ .vertex = true, .fragment = true, .compute = true },
-            0,
-            @sizeOf(u32),
-            &(@as(u32, present.texture.default_view.device_address) << 10 &
-                ctx.present_sampler.device_address),
-        );
-        ctx.device.cmdDraw(graphics_command_pool.body, 3, 1, 0, 0);
-        ctx.device.cmdEndRendering(graphics_command_pool.body);
-    }
-    try ctx.device.endCommandBuffer(graphics_command_pool.body);
-    std.debug.print("submit blit\n", .{});
-    try graphics_queue.queue.submit2(&[_]vk.SubmitInfo2{.{
-        .command_buffer_info_count = 1,
-        .p_command_buffer_infos = @ptrCast(&[_]vk.CommandBufferSubmitInfo{.{
-            .command_buffer = graphics_command_pool.body,
-            .device_mask = 0,
-        }}),
-
-        .signal_semaphore_info_count = 1,
-        .p_signal_semaphore_infos = &.{.{
-            .semaphore = graphics_queue.semaphore,
-            .value = graphics_queue.value + 1,
-            .stage_mask = .{ .all_commands = true },
-            .device_index = 0,
-        }},
-    }}, .null);
-    graphics_queue.value += 1;
-    try ctx.command_pool_depots.getPtr(.graphics).push(
-        graphics_command_pool,
-        graphics_queue.value,
-    );
-
-    // FIXME if graphics != present, we need to wait on the semaphore after this sumbit
-
-    for (presents) |present| {
-        const swapchain: *Swapchain = @alignCast(@constCast(
-            @fieldParentPtr("public", present.swapchain),
-        ));
-        std.debug.assert(swapchain.acquired);
-        const image_index = swapchain.image_index.?;
-
-        // FIXME acquire should actually relate to the first queue that writes to the swapchain
-        try acquire_semaphore_infos.append(arena, .{
-            .semaphore = swapchain.acquire_semaphore,
-            .stage_mask = .{ .all_commands = true },
-            .device_index = 0,
-            .value = undefined, // binary semaphore
-        });
-        try release_semaphores.append(arena, swapchain.release_semaphores[image_index]);
-        try release_semaphore_infos.append(arena, .{
-            .semaphore = swapchain.release_semaphores[image_index],
-            .stage_mask = .{ .all_commands = true },
-            .device_index = 0,
-            .value = undefined, // binary semaphore
-        });
-        try swapchains.append(arena, swapchain.swapchain);
-        try image_indices.append(arena, image_index);
-        try swapchain_barriers.append(arena, .{
-            .src_stage_mask = .{ .all_commands = true },
-            .src_access_mask = .{ .memory_read = true, .memory_write = true },
-            .dst_stage_mask = .{ .all_commands = true },
-            .dst_access_mask = .{ .memory_read = true, .memory_write = true },
-            .image = swapchain.images[image_index],
-            .old_layout = .attachment_optimal,
-            .new_layout = .present_src_khr,
-            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .subresource_range = .{
-                .aspect_mask = .{ .color = true },
-                .base_array_layer = 0,
-                .base_mip_level = 0,
-                .layer_count = 1,
-                .level_count = 1,
-            },
-        });
-
-        swapchain.acquired = false;
-    }
-
-    if (presents.len > 0) {
-        try release_semaphore_infos.append(arena, .{
-            .semaphore = present_queue.semaphore,
-            .stage_mask = .{ .all_commands = true },
-            .device_index = 0,
-            .value = present_queue.value + 1,
-        });
-        present_queue.value += 1;
-
-        try ctx.device.beginCommandBuffer(present_command_pool.body, &.{
-            .flags = .{ .one_time_submit = true },
-        });
-        ctx.device.cmdBindDescriptorSets(
-            present_command_pool.body,
-            .graphics,
-            ctx.pipeline_layout,
-            0,
-            &.{ctx.descriptor_set},
-            null,
-        );
-        ctx.device.cmdPipelineBarrier2(present_command_pool.body, &.{
-            .image_memory_barrier_count = @intCast(swapchain_barriers.items.len),
-            .p_image_memory_barriers = swapchain_barriers.items.ptr,
-        });
-        try ctx.device.endCommandBuffer(present_command_pool.body);
-
-        std.debug.print("submit present\n", .{});
-        try present_queue.queue.submit2(&[_]vk.SubmitInfo2{.{
-            .command_buffer_info_count = 1,
-            .p_command_buffer_infos = @ptrCast(&[_]vk.CommandBufferSubmitInfo{.{
-                .command_buffer = present_command_pool.body,
-                .device_mask = 0,
-            }}),
-            // FIXME the acquire will change
-            .wait_semaphore_info_count = @intCast(acquire_semaphore_infos.items.len),
-            .p_wait_semaphore_infos = acquire_semaphore_infos.items.ptr,
-            .signal_semaphore_info_count = @intCast(release_semaphore_infos.items.len),
-            .p_signal_semaphore_infos = release_semaphore_infos.items.ptr,
-        }}, .null);
-
-        _ = try present_queue.queue.presentKHR(&.{
-            .wait_semaphore_count = @intCast(release_semaphores.items.len),
-            .p_wait_semaphores = release_semaphores.items.ptr,
-            .swapchain_count = @intCast(swapchains.items.len),
-            .p_swapchains = swapchains.items.ptr,
-            .p_image_indices = image_indices.items.ptr,
-        });
-
-        try ctx.command_pool_depots.getPtr(.present).push(
-            present_command_pool,
-            present_queue.value,
-        );
-        // NOTE this is conservative but safe, when the presentation engine has the image
-        // the acquire semaphore is long-since used
-        for (acquire_semaphore_infos.items) |acquire_semaphore_info| {
-            try ctx.acquire_semaphore_depot.push(
-                acquire_semaphore_info.semaphore,
-                present_queue.value,
-            );
-        }
-    }
-
-    return undefined;
-}
-
-fn recreateSwapchain(ctx: *Context, swapchain: *Swapchain) !void {
-    // TODO rewrite
-    try ctx.device.deviceWaitIdle();
-
-    var arena_impl = std.heap.ArenaAllocator.init(ctx.gpa);
-    defer _ = arena_impl.deinit();
-    const arena = arena_impl.allocator();
-
-    const capabilities = ctx.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(
-        ctx.physical_device,
-        swapchain.surface,
-    ) catch return error.Unknown;
-    const formats = ctx.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(
-        ctx.physical_device,
-        swapchain.surface,
-        arena,
-    ) catch return error.Unknown;
-    const present_modes = ctx.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(
-        ctx.physical_device,
-        swapchain.surface,
-        arena,
-    ) catch return error.Unknown;
-
-    log.debug("(re)creating swapchain", .{});
-    const format = pickSwapchainFormat(.sdr, formats) orelse formats[0];
-    log.debug("- format:       {} {}", .{ format.format, format.color_space });
-    const present_mode = pickSwapchainPresentMode(.fifo, present_modes) orelse .fifo_khr;
-    log.debug("- present_mode: {}", .{present_mode});
-    const extent = try getSwapchainExtent(ctx.platform, capabilities, swapchain.window);
-    log.debug("- extent:       {}", .{extent});
-    const count = getSwapchainImageCount(capabilities);
-    log.debug("- image count:  {}", .{count});
-
-    swapchain.public.info.size = .{ extent.width, extent.height, 1 };
-
-    const old_swapchain = swapchain.swapchain;
-
-    var create_info = vk.SwapchainCreateInfoKHR{
-        .surface = swapchain.surface,
-        .min_image_count = count,
-        .image_format = format.format,
-        .image_color_space = format.color_space,
-        .image_extent = extent,
-        .image_array_layers = 1,
-        .image_usage = .{
-            .color_attachment = true,
-            .transfer_dst = capabilities.supported_usage_flags.transfer_dst,
-        },
-        .image_sharing_mode = .concurrent,
-        .p_queue_family_indices = @ptrCast(ctx.queue_family_indices),
-        .queue_family_index_count = @intCast(ctx.queue_family_indices.len),
-        .pre_transform = capabilities.current_transform,
-        .composite_alpha = .{ .opaque_khr = true },
-        .present_mode = present_mode,
-        .clipped = .true,
-        .old_swapchain = old_swapchain,
-    };
-    swapchain.swapchain = ctx.device.createSwapchainKHR(
-        &create_info,
-        null,
-    ) catch return error.Unknown;
-    errdefer ctx.device.destroySwapchainKHR(swapchain.swapchain, null);
-
-    if (old_swapchain != .null) {
-        for (0..swapchain.images.len) |i| {
-            ctx.device.destroySemaphore(swapchain.release_semaphores[i], null);
-            ctx.device.destroyImageView(swapchain.views[i], null);
-        }
-        ctx.device.destroySwapchainKHR(old_swapchain, null);
-        ctx.gpa.free(swapchain.release_semaphores);
-        ctx.gpa.free(swapchain.views);
-        ctx.gpa.free(swapchain.images);
-    }
-
-    swapchain.images = ctx.device.getSwapchainImagesAllocKHR(
-        swapchain.swapchain,
-        ctx.gpa,
-    ) catch return error.Unknown;
-    errdefer ctx.gpa.free(swapchain.images);
-    std.debug.assert(swapchain.images.len == count);
-
-    swapchain.views = try ctx.gpa.alloc(vk.ImageView, count);
-    errdefer ctx.gpa.free(swapchain.views);
-    for (swapchain.images, 0..) |image, i| {
-        const view_create_info = vk.ImageViewCreateInfo{
-            .image = image,
-            .view_type = .@"2d",
-            .format = format.format,
-            .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
-            .subresource_range = .{
-                .aspect_mask = .{ .color = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        };
-        swapchain.views[i] = ctx.device.createImageView(&view_create_info, null) catch {
-            // cleanup pattern
-            var j = i;
-            while (j > 0) : (j -= 1) ctx.device.destroyImageView(swapchain.views[j - 1], null);
-            return error.Unknown;
-        };
-    }
-
-    swapchain.release_semaphores = try ctx.gpa.alloc(vk.Semaphore, count);
-    errdefer ctx.gpa.free(swapchain.release_semaphores);
-    for (0..count) |i| {
-        swapchain.release_semaphores[i] = ctx.device.createSemaphore(&.{}, null) catch {
-            var j = i;
-            while (j > 0) : (j -= 1) ctx.device.destroySemaphore(swapchain.release_semaphores[j - 1], null);
-            return error.Unknown;
-        };
-    }
-
-    // the present pipeline needs to knnow the swapchain format
-    // so recreate it when the swapchain is recreated just in case
-    // OPTIMIZE only recreate if needed
-    // FIXME this needs to live inside the swapchain, since there could be multiple
-    // swapchains with different formats
-    // FIXME we don't actually need to queue, the deviceWaitIdle should make this safe
-    queueDestroyGraphicsPipeline(ctx, ctx.present_pipeline);
-    const vertex_shader = try createShader(ctx, .{
-        .stage = .vertex,
-        .src = &present_shader_vertex_spv,
-    });
-    defer destroyShader(ctx, vertex_shader);
-    const fragment_shader = try createShader(ctx, .{
-        .stage = .fragment,
-        .src = &present_shader_fragment_spv,
-    });
-    defer destroyShader(ctx, fragment_shader);
-    ctx.present_pipeline = try createGraphicsPipeline(ctx, .{
-        .vertex_shader = vertex_shader,
-        .fragment_shader = fragment_shader,
-        .color_attachments = &.{.{
-            .format = rhiFormat(format.format),
-        }},
-        .depth_attachment_format = null,
-        .stencil_attachment_format = null,
-    });
-    errdefer queueDestroyGraphicsPipeline(ctx, ctx.present_pipeline);
-
-    if (ctx.config.enable_debug) {
-        const pipeline: *GraphicsPipeline = @alignCast(@constCast(
-            @fieldParentPtr("public", ctx.present_pipeline),
-        ));
-        try ctx.device.setDebugUtilsObjectNameEXT(&.{
-            .object_type = .pipeline,
-            .object_handle = @backingInt(pipeline.pipeline),
-            .p_object_name = "PRESENT_PIPELINE",
-        });
-    }
-
-    // FIXME FIXME if we fail at any point here we'll get a very hard to recover state
-    // we should probably first put the swapchain struct in some safe state
-    // and then only overwrite it if everything succeeds
-}
-
 fn initInstance(
     ctx: *Context,
     arena: std.mem.Allocator,
     platform: Platform,
     config: Config,
 ) !void {
-    // enable_validation activates the validation layer
-    // enable_debug activates the debug_utils instance extension
-
     var all_layers: std.ArrayList([*:0]const u8) = .empty;
     try all_layers.appendSlice(arena, &layers);
     if (config.enable_validation) try all_layers.appendSlice(arena, &debug_layers);
@@ -2304,12 +302,221 @@ fn deinitInstance(ctx: *Context) void {
     ctx.gpa.destroy(ctx.instance.wrapper);
 }
 
-fn pickPhysicalDevice(
+const PhysicalDeviceCandidate = struct {
+    device: vk.PhysicalDevice,
+
+    properties: vk.PhysicalDeviceProperties,
+    descriptor_indexing_properties: vk.PhysicalDeviceDescriptorIndexingProperties,
+    memory_properties: vk.PhysicalDeviceMemoryProperties,
+    features: vk.PhysicalDeviceFeatures,
+    features_1_1: vk.PhysicalDeviceVulkan11Features,
+    features_1_2: vk.PhysicalDeviceVulkan12Features,
+    features_1_3: vk.PhysicalDeviceVulkan13Features,
+
+    graphics_queue_family: u32,
+    present_queue_family: u32,
+
+    fn init(
+        arena: std.mem.Allocator,
+        instance: vk.InstanceProxy,
+        dev: vk.PhysicalDevice,
+        surface: vk.SurfaceKHR,
+    ) !PhysicalDeviceCandidate {
+        var candidate = PhysicalDeviceCandidate{
+            .device = dev,
+            .properties = undefined,
+            .descriptor_indexing_properties = undefined,
+            .memory_properties = instance.getPhysicalDeviceMemoryProperties(dev),
+            .features = undefined,
+            .features_1_1 = .{},
+            .features_1_2 = .{},
+            .features_1_3 = .{},
+            .graphics_queue_family = std.math.maxInt(u32),
+            .present_queue_family = std.math.maxInt(u32),
+        };
+
+        var descriptor_indexing_properties: vk.PhysicalDeviceDescriptorIndexingProperties = undefined;
+        descriptor_indexing_properties.s_type = .physical_device_descriptor_indexing_properties;
+        descriptor_indexing_properties.p_next = null;
+        var properties2: vk.PhysicalDeviceProperties2 = .{
+            .p_next = &descriptor_indexing_properties,
+            .properties = undefined,
+        };
+        instance.getPhysicalDeviceProperties2(dev, &properties2);
+        candidate.properties = properties2.properties;
+        candidate.descriptor_indexing_properties = descriptor_indexing_properties;
+
+        candidate.features_1_2.p_next = &candidate.features_1_3;
+        candidate.features_1_1.p_next = &candidate.features_1_2;
+        var features2: vk.PhysicalDeviceFeatures2 = .{
+            .p_next = &candidate.features_1_1,
+            .features = undefined,
+        };
+        instance.getPhysicalDeviceFeatures2(candidate.device, &features2);
+        candidate.features = features2.features;
+        candidate.features_1_1.p_next = null;
+        candidate.features_1_2.p_next = null;
+        candidate.features_1_3.p_next = null;
+
+        // graphics queue must support graphics (and compute and transfer)
+        // present queue should preferably be same as graphics
+        const queue_families =
+            try instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(dev, arena);
+        for (queue_families, 0..) |family, i| {
+            if (!family.queue_flags.graphics) continue;
+            if (try instance.getPhysicalDeviceSurfaceSupportKHR(
+                candidate.device,
+                @intCast(i),
+                surface,
+            ) != .true) continue;
+            candidate.graphics_queue_family = @intCast(i);
+            candidate.present_queue_family = @intCast(i);
+            break;
+        } else {
+            // no graphics + present
+            // select graphics
+            for (queue_families, 0..) |family, i| {
+                if (!family.queue_flags.graphics) continue;
+                candidate.graphics_queue_family = @intCast(i);
+                break;
+            }
+            // select present
+            for (queue_families, 0..) |_, i| {
+                if (try instance.getPhysicalDeviceSurfaceSupportKHR(
+                    candidate.device,
+                    @intCast(i),
+                    surface,
+                ) != .true) continue;
+                candidate.present_queue_family = @intCast(i);
+                break;
+            }
+        }
+
+        return candidate;
+    }
+
+    fn checkExtensionSupport(
+        candidate: *const PhysicalDeviceCandidate,
+        arena: std.mem.Allocator,
+        instance: vk.InstanceProxy,
+        config: Config,
+    ) !bool {
+        const available_exts = try instance.enumerateDeviceExtensionPropertiesAlloc(
+            candidate.device,
+            null,
+            arena,
+        );
+
+        for (if (config.enable_validation)
+            device_extensions ++ debug_device_extensions
+        else
+            device_extensions) |req|
+        {
+            const req_name = std.mem.sliceTo(req, 0);
+            var supported = false;
+
+            for (available_exts) |ava| {
+                const ava_name = std.mem.sliceTo(&ava.extension_name, 0);
+                if (!std.mem.eql(u8, req_name, ava_name)) continue;
+                supported = true;
+                break;
+            }
+
+            if (!supported) {
+                log.info("Unsupported instance extension: {s}", .{req_name});
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn checkFeatureSupport(candidate: *const PhysicalDeviceCandidate) !bool {
+        const features_info = @typeInfo(vk.PhysicalDeviceFeatures).@"struct";
+        inline for (features_info.field_names, features_info.field_types) |n, t| {
+            if (t != vk.Bool32) continue;
+            if (@field(device_features, n) == .false) continue;
+            if (@field(candidate.features, n) == .false) {
+                log.debug("Unsupported physical device feature: {s}", .{n});
+                return false;
+            }
+        }
+        const features_1_1_info = @typeInfo(vk.PhysicalDeviceVulkan11Features).@"struct";
+        inline for (features_1_1_info.field_names, features_1_1_info.field_types) |n, t| {
+            if (t != vk.Bool32) continue;
+            if (@field(device_features_1_1, n) == .false) continue;
+            if (@field(candidate.features_1_1, n) == .false) {
+                log.debug("Unsupported physical device feature: {s}", .{n});
+                return false;
+            }
+        }
+        const features_1_2_info = @typeInfo(vk.PhysicalDeviceVulkan12Features).@"struct";
+        inline for (features_1_2_info.field_names, features_1_2_info.field_types) |n, t| {
+            if (t != vk.Bool32) continue;
+            if (@field(device_features_1_2, n) == .false) continue;
+            if (@field(candidate.features_1_2, n) == .false) {
+                log.debug("Unsupported physical device feature: {s}", .{n});
+
+                return false;
+            }
+        }
+        const features_1_3_info = @typeInfo(vk.PhysicalDeviceVulkan13Features).@"struct";
+        inline for (features_1_3_info.field_names, features_1_3_info.field_types) |n, t| {
+            if (t != vk.Bool32) continue;
+            if (@field(device_features_1_3, n) == .false) continue;
+            if (@field(candidate.features_1_3, n) == .false) {
+                log.debug("Unsupported physical device feature: {s}", .{n});
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// pick the discrete gpu with the most memory
+    fn cmp(ctx: void, a: PhysicalDeviceCandidate, b: PhysicalDeviceCandidate) bool {
+        _ = ctx;
+        if (cmpDeviceType(a, b)) |result| return result;
+        if (cmpMemory(a, b)) |result| return result;
+
+        return true;
+    }
+
+    fn cmpDeviceType(a: PhysicalDeviceCandidate, b: PhysicalDeviceCandidate) ?bool {
+        const dta: i32 = switch (a.properties.device_type) {
+            .discrete_gpu => 2,
+            .integrated_gpu, .virtual_gpu => 1,
+            else => 0,
+        };
+        const dtb: i32 = switch (b.properties.device_type) {
+            .discrete_gpu => 2,
+            .integrated_gpu, .virtual_gpu => 1,
+            else => 0,
+        };
+        if (dtb == dta) return null;
+        return dta > dtb;
+    }
+
+    fn cmpMemory(a: PhysicalDeviceCandidate, b: PhysicalDeviceCandidate) ?bool {
+        var ha: i64 = 0;
+        for (a.memory_properties.memory_heaps[0..a.memory_properties.memory_heap_count]) |heap| {
+            if (!heap.flags.device_local) continue;
+            ha += @intCast(heap.size);
+        }
+        var hb: i64 = 0;
+        for (b.memory_properties.memory_heaps[0..b.memory_properties.memory_heap_count]) |heap| {
+            if (!heap.flags.device_local) continue;
+            hb += @intCast(heap.size);
+        }
+        if (ha == hb) return null;
+        return hb > ha;
+    }
+};
+
+fn initDevice(
     ctx: *Context,
     arena: std.mem.Allocator,
     config: Config,
     window: ?rhi.Window,
-) !PhysicalDeviceCandidate {
+) !void {
     const devices = try ctx.instance.enumeratePhysicalDevicesAlloc(arena);
     var candidates: std.ArrayList(PhysicalDeviceCandidate) =
         try .initCapacity(arena, devices.len);
@@ -2325,29 +532,23 @@ fn pickPhysicalDevice(
         const name = std.mem.sliceTo(&candidate.properties.device_name, 0);
 
         if (!try candidate.checkExtensionSupport(arena, ctx.instance, config)) {
-            log.info("Did not pick {s}: Unsupported device extensions", .{name});
+            log.debug("Cannot pick {s}: Unsupported device extensions", .{name});
             continue;
         }
-
         if (!try candidate.checkFeatureSupport()) {
-            log.info("Did not pick {s}: Unsupported device extensions", .{name});
+            log.debug("Cannot pick {s}: Unsupported physical device features", .{name});
+            continue;
+        }
+        if (candidate.graphics_queue_family == std.math.maxInt(u32)) {
+            log.debug("Cannot pick {s}: No graphics queue", .{name});
+            continue;
+        }
+        if (candidate.present_queue_family == std.math.maxInt(u32)) {
+            log.debug("Cannot pick {s}: No present queue", .{name});
             continue;
         }
 
-        if (!candidate.queue_families.contains(.graphics)) {
-            log.info("Did not pick {s}: No graphics queue", .{name});
-            continue;
-        }
-        if (!candidate.queue_families.contains(.present)) {
-            log.info("Did not pick {s}: No present queue", .{name});
-            continue;
-        }
-
-        std.debug.assert(candidate.queue_families.contains(.graphics));
-        std.debug.assert(candidate.queue_families.contains(.compute));
-        std.debug.assert(candidate.queue_families.contains(.transfer));
-        std.debug.assert(candidate.queue_families.contains(.present));
-
+        log.debug("Added {s} as a candidate physical device", .{name});
         candidates.appendAssumeCapacity(candidate);
     }
 
@@ -2361,43 +562,31 @@ fn pickPhysicalDevice(
         {},
         PhysicalDeviceCandidate.cmp,
     );
+    const candidate = candidates.items[0];
     log.info(
         "Selected physical device: {s}",
-        .{std.mem.sliceTo(&candidates.items[0].properties.device_name, 0)},
+        .{std.mem.sliceTo(&candidate.properties.device_name, 0)},
     );
     log.debug(
-        "- graphics queue family: {}",
-        .{candidates.items[0].queue_families.getAssertContains(.graphics)},
+        "Graphics queue family: {}",
+        .{candidates.items[0].graphics_queue_family},
     );
     log.debug(
-        "- compute queue family: {}",
-        .{candidates.items[0].queue_families.getAssertContains(.compute)},
+        "Present queue family: {}",
+        .{candidates.items[0].present_queue_family},
     );
-    log.debug(
-        "- transfer queue family: {}",
-        .{candidates.items[0].queue_families.getAssertContains(.transfer)},
-    );
-    log.debug(
-        "- present queue family: {}",
-        .{candidates.items[0].queue_families.getAssertContains(.present)},
-    );
-    return candidates.items[0];
-}
 
-fn initDevice(
-    ctx: *Context,
-    arena: std.mem.Allocator,
-    candidate: PhysicalDeviceCandidate,
-) !void {
     var queue_create_infos: std.AutoArrayHashMapUnmanaged(u32, vk.DeviceQueueCreateInfo) = .empty;
-    for ([_]Queue{ .graphics, .compute, .transfer, .present }) |queue| {
-        const queue_family_index = candidate.queue_families.getAssertContains(queue);
-        try queue_create_infos.put(arena, queue_family_index, .{
-            .queue_family_index = queue_family_index,
-            .queue_count = 1,
-            .p_queue_priorities = @ptrCast(&@as(f32, 1.0)),
-        });
-    }
+    try queue_create_infos.put(arena, candidate.graphics_queue_family, .{
+        .queue_family_index = candidate.graphics_queue_family,
+        .queue_count = 1,
+        .p_queue_priorities = @ptrCast(&@as(f32, 1.0)),
+    });
+    try queue_create_infos.put(arena, candidate.present_queue_family, .{
+        .queue_family_index = candidate.present_queue_family,
+        .queue_count = 1,
+        .p_queue_priorities = @ptrCast(&@as(f32, 1.0)),
+    });
     const create_info = vk.DeviceCreateInfo{
         .queue_create_info_count = @intCast(queue_create_infos.count()),
         .p_queue_create_infos = queue_create_infos.values().ptr,
@@ -2432,10 +621,11 @@ fn initDevice(
         }, null) catch return error.Unknown; // TODO
 
         // then assign it to all queues that share that family
-        for ([_]Queue{ .graphics, .compute, .transfer, .present }) |queue| {
-            if (candidate.queue_families.getAssertContains(queue) == queue_family_index) {
-                ctx.queues.set(queue, physical_queue);
-            }
+        if (candidate.graphics_queue_family == queue_family_index) {
+            ctx.graphics_queue = physical_queue;
+        }
+        if (candidate.present_queue_family == queue_family_index) {
+            ctx.present_queue = physical_queue;
         }
         ctx.queue_family_indices[i] = queue_family_index;
     }
@@ -2454,6 +644,14 @@ fn initDevice(
 }
 
 fn deinitDevice(ctx: *Context) void {
+    if (ctx.present_queue != ctx.graphics_queue) {
+        ctx.device.destroySemaphore(ctx.present_queue.semaphore, null);
+        ctx.gpa.destroy(ctx.present_queue);
+    }
+    ctx.device.destroySemaphore(ctx.graphics_queue.semaphore, null);
+    ctx.gpa.destroy(ctx.graphics_queue);
+    ctx.gpa.free(ctx.queue_family_indices);
+
     ctx.device.destroyDevice(null);
     ctx.gpa.destroy(ctx.device.wrapper);
     ctx.physical_device = undefined;
@@ -2533,1095 +731,11 @@ fn initPipelineLayout(ctx: *Context) !void {
         .descriptor_set_count = 1,
         .p_set_layouts = @ptrCast(&ctx.descriptor_set_layout),
     }, @ptrCast(&ctx.descriptor_set));
-
-    ctx.texture_view_slots = try .init(ctx.gpa, 128 * 1024);
-    ctx.sampler_slots = try .init(ctx.gpa, 1024);
 }
 
 fn deinitPipelineLayout(ctx: *Context) void {
-    ctx.sampler_slots.deinit(ctx.gpa);
-    ctx.texture_view_slots.deinit(ctx.gpa);
     // NOTE freeing the pool frees the set
     ctx.device.destroyDescriptorPool(ctx.descriptor_pool, null);
     ctx.device.destroyPipelineLayout(ctx.pipeline_layout, null);
     ctx.device.destroyDescriptorSetLayout(ctx.descriptor_set_layout, null);
 }
-
-fn pickSwapchainFormat(
-    swapchain_composition: rhi.Composition,
-    available_formats: []vk.SurfaceFormatKHR,
-) ?vk.SurfaceFormatKHR {
-    std.debug.assert(available_formats.len > 0);
-
-    const requested_formats: []const vk.SurfaceFormatKHR = switch (swapchain_composition) {
-        .sdr => &.{
-            .{ .format = .b8g8r8a8_srgb, .color_space = .srgb_nonlinear_khr },
-            .{ .format = .r8g8b8a8_srgb, .color_space = .srgb_nonlinear_khr },
-        },
-    };
-
-    for (requested_formats) |req| {
-        for (available_formats) |ava| {
-            if (std.meta.eql(req, ava)) return req;
-        }
-    }
-
-    log.warn("None of the requested swapchain surface formats were found", .{});
-    return null;
-}
-
-fn pickSwapchainPresentMode(
-    present_mode: rhi.PresentMode,
-    available_modes: []vk.PresentModeKHR,
-) ?vk.PresentModeKHR {
-    const requested_mode: vk.PresentModeKHR = switch (present_mode) {
-        .fifo => .fifo_khr,
-        .mailbox => .mailbox_khr,
-    };
-
-    for (available_modes) |ava| {
-        if (requested_mode == ava) return requested_mode;
-    }
-    return null;
-}
-
-fn getSwapchainExtent(
-    platform: Platform,
-    capabilities: vk.SurfaceCapabilitiesKHR,
-    window: rhi.Window,
-) !vk.Extent2D {
-    if (capabilities.current_extent.width != 0xFFFFFFFF and
-        capabilities.current_extent.height != 0xFFFFFFFF)
-    {
-        return capabilities.current_extent;
-    }
-    var extent = try platform.getFramebufferSize(window);
-    if (extent.width == 0 and extent.height == 0) return error.Minimized;
-    extent.width = std.math.clamp(
-        extent.width,
-        capabilities.min_image_extent.width,
-        capabilities.max_image_extent.width,
-    );
-    extent.height = std.math.clamp(
-        extent.height,
-        capabilities.min_image_extent.height,
-        capabilities.max_image_extent.height,
-    );
-    return extent;
-}
-
-fn getSwapchainImageCount(capabilities: vk.SurfaceCapabilitiesKHR) u32 {
-    var count = @max(capabilities.min_image_count, 2); // avoid having any extras, minimize delays
-    if (capabilities.max_image_count > 0) count = @min(count, capabilities.max_image_count);
-    return count;
-}
-
-fn getCommandPool(ctx: *Context, queue: Queue, fence: Fence) !CommandPool {
-    const command_pool = ctx.command_pool_depots.getPtr(queue).pop(fence.get(queue)) orelse blk: {
-        const pool = try ctx.device.createCommandPool(&.{
-            .flags = .{},
-            .queue_family_index = ctx.queues.get(queue).family,
-        }, null);
-        errdefer ctx.device.destroyCommandPool(pool, null);
-        var buffers: [3]vk.CommandBuffer = undefined;
-        try ctx.device.allocateCommandBuffers(&.{
-            .command_pool = pool,
-            .level = .primary,
-            .command_buffer_count = 3,
-        }, @ptrCast(&buffers[0]));
-        errdefer ctx.device.freeCommandBuffers(pool, 3, &buffers);
-        break :blk CommandPool{
-            .pool = pool,
-            .prefix = buffers[0],
-            .body = buffers[1],
-            .suffix = buffers[2],
-        };
-    };
-    try ctx.device.resetCommandPool(command_pool.pool, .{});
-    return command_pool;
-}
-
-const PhysicalDeviceCandidate = struct {
-    device: vk.PhysicalDevice,
-
-    properties: vk.PhysicalDeviceProperties,
-    descriptor_indexing_properties: vk.PhysicalDeviceDescriptorIndexingProperties,
-    memory_properties: vk.PhysicalDeviceMemoryProperties,
-    features: vk.PhysicalDeviceFeatures,
-    features_1_1: vk.PhysicalDeviceVulkan11Features,
-    features_1_2: vk.PhysicalDeviceVulkan12Features,
-    features_1_3: vk.PhysicalDeviceVulkan13Features,
-
-    queue_families: std.EnumMap(Queue, u32),
-
-    fn init(
-        arena: std.mem.Allocator,
-        instance: vk.InstanceProxy,
-        dev: vk.PhysicalDevice,
-        surface: vk.SurfaceKHR,
-    ) !PhysicalDeviceCandidate {
-        var candidate = PhysicalDeviceCandidate{
-            .device = dev,
-            .properties = undefined,
-            .descriptor_indexing_properties = undefined,
-            .memory_properties = instance.getPhysicalDeviceMemoryProperties(dev),
-            .features = undefined,
-            .features_1_1 = .{},
-            .features_1_2 = .{},
-            .features_1_3 = .{},
-            .queue_families = .{},
-        };
-
-        var descriptor_indexing_properties: vk.PhysicalDeviceDescriptorIndexingProperties = undefined;
-        descriptor_indexing_properties.s_type = .physical_device_descriptor_indexing_properties;
-        descriptor_indexing_properties.p_next = null;
-        var properties2: vk.PhysicalDeviceProperties2 = .{
-            .p_next = &descriptor_indexing_properties,
-            .properties = undefined,
-        };
-        instance.getPhysicalDeviceProperties2(dev, &properties2);
-        candidate.properties = properties2.properties;
-        candidate.descriptor_indexing_properties = descriptor_indexing_properties;
-
-        candidate.features_1_2.p_next = &candidate.features_1_3;
-        candidate.features_1_1.p_next = &candidate.features_1_2;
-        var features2: vk.PhysicalDeviceFeatures2 = .{
-            .p_next = &candidate.features_1_1,
-            .features = undefined,
-        };
-        instance.getPhysicalDeviceFeatures2(candidate.device, &features2);
-        candidate.features = features2.features;
-        candidate.features_1_1.p_next = null;
-        candidate.features_1_2.p_next = null;
-        candidate.features_1_3.p_next = null;
-
-        // graphics queue must support graphics (and compute and transfer)
-        // compute should preferably be compute-only queue (and transfer)
-        //   otherwise same as graphics
-        // transfer should preferably be transfer-only queue,
-        //   otherwise same as compute
-        // present queue should preferably be same as graphics
-        const queue_families =
-            try instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(dev, arena);
-        for (queue_families, 0..) |family, i| {
-            if (family.queue_flags.graphics) continue;
-            if (family.queue_flags.compute) continue;
-            if (!family.queue_flags.transfer) continue;
-            candidate.queue_families.put(.transfer, @intCast(i));
-            break;
-        }
-        for (queue_families, 0..) |family, i| {
-            if (family.queue_flags.graphics) continue;
-            if (!family.queue_flags.compute) continue;
-            candidate.queue_families.put(.compute, @intCast(i));
-            break;
-        }
-        for (queue_families, 0..) |family, i| {
-            if (!family.queue_flags.graphics) continue;
-            if (try instance.getPhysicalDeviceSurfaceSupportKHR(
-                candidate.device,
-                @intCast(i),
-                surface,
-            ) != .true) continue;
-            candidate.queue_families.put(.graphics, @intCast(i));
-            candidate.queue_families.put(.present, @intCast(i));
-            break;
-        }
-
-        // no graphics + present
-        if (candidate.queue_families.get(.graphics) == null) {
-            // select graphics
-            for (queue_families, 0..) |family, i| {
-                if (!family.queue_flags.graphics) continue;
-                candidate.queue_families.put(.graphics, @intCast(i));
-                break;
-            }
-            // select present
-            for (queue_families, 0..) |_, i| {
-                if (try instance.getPhysicalDeviceSurfaceSupportKHR(
-                    candidate.device,
-                    @intCast(i),
-                    surface,
-                ) != .true) continue;
-                candidate.queue_families.put(.present, @intCast(i));
-                break;
-            }
-        }
-
-        // no transfer, select compute if compute exists
-        if (candidate.queue_families.get(.compute)) |compute_queue_family| {
-            if (!candidate.queue_families.contains(.transfer)) {
-                candidate.queue_families.put(.transfer, compute_queue_family);
-            }
-        }
-
-        // no transfer or compute, select graphics if graphics exists
-        if (candidate.queue_families.get(.graphics)) |graphics_queue_family| {
-            if (!candidate.queue_families.contains(.compute)) {
-                candidate.queue_families.put(.compute, graphics_queue_family);
-            }
-            if (!candidate.queue_families.contains(.transfer)) {
-                candidate.queue_families.put(.transfer, graphics_queue_family);
-            }
-        }
-
-        return candidate;
-    }
-
-    fn checkExtensionSupport(
-        candidate: *const PhysicalDeviceCandidate,
-        arena: std.mem.Allocator,
-        instance: vk.InstanceProxy,
-        config: Config,
-    ) !bool {
-        const available_exts = try instance.enumerateDeviceExtensionPropertiesAlloc(
-            candidate.device,
-            null,
-            arena,
-        );
-
-        for (if (config.enable_validation)
-            device_extensions ++ debug_device_extensions
-        else
-            device_extensions) |req|
-        {
-            const req_name = std.mem.sliceTo(req, 0);
-            var supported = false;
-
-            for (available_exts) |ava| {
-                const ava_name = std.mem.sliceTo(&ava.extension_name, 0);
-                if (!std.mem.eql(u8, req_name, ava_name)) continue;
-                supported = true;
-                break;
-            }
-
-            if (!supported) {
-                log.err("Unsupported instance extension: {s}", .{req_name});
-                return false;
-            }
-        }
-        return true;
-    }
-
-    fn checkFeatureSupport(candidate: *const PhysicalDeviceCandidate) !bool {
-        const features_info = @typeInfo(vk.PhysicalDeviceFeatures).@"struct";
-        inline for (features_info.field_names, features_info.field_types) |n, t| {
-            if (t != vk.Bool32) continue;
-            if (@field(device_features, n) == .false) continue;
-            if (@field(candidate.features, n) == .false) return false;
-        }
-        const features_1_1_info = @typeInfo(vk.PhysicalDeviceVulkan11Features).@"struct";
-        inline for (features_1_1_info.field_names, features_1_1_info.field_types) |n, t| {
-            if (t != vk.Bool32) continue;
-            if (@field(device_features_1_1, n) == .false) continue;
-            if (@field(candidate.features_1_1, n) == .false) return false;
-        }
-        const features_1_2_info = @typeInfo(vk.PhysicalDeviceVulkan12Features).@"struct";
-        inline for (features_1_2_info.field_names, features_1_2_info.field_types) |n, t| {
-            if (t != vk.Bool32) continue;
-            if (@field(device_features_1_2, n) == .false) continue;
-            if (@field(candidate.features_1_2, n) == .false) return false;
-        }
-        const features_1_3_info = @typeInfo(vk.PhysicalDeviceVulkan13Features).@"struct";
-        inline for (features_1_3_info.field_names, features_1_3_info.field_types) |n, t| {
-            if (t != vk.Bool32) continue;
-            if (@field(device_features_1_3, n) == .false) continue;
-            if (@field(candidate.features_1_3, n) == .false) return false;
-        }
-        return true;
-    }
-
-    /// pick the discrete gpu with the most memory
-    fn cmp(ctx: void, a: PhysicalDeviceCandidate, b: PhysicalDeviceCandidate) bool {
-        _ = ctx;
-        if (cmpDeviceType(a, b)) |result| return result;
-        if (cmpMemory(a, b)) |result| return result;
-
-        return true;
-    }
-
-    fn cmpDeviceType(a: PhysicalDeviceCandidate, b: PhysicalDeviceCandidate) ?bool {
-        const dta: i32 = switch (a.properties.device_type) {
-            .discrete_gpu => 2,
-            .integrated_gpu, .virtual_gpu => 1,
-            else => 0,
-        };
-        const dtb: i32 = switch (b.properties.device_type) {
-            .discrete_gpu => 2,
-            .integrated_gpu, .virtual_gpu => 1,
-            else => 0,
-        };
-        if (dtb == dta) return null;
-        return dta > dtb;
-    }
-
-    fn cmpMemory(a: PhysicalDeviceCandidate, b: PhysicalDeviceCandidate) ?bool {
-        var ha: i64 = 0;
-        for (a.memory_properties.memory_heaps[0..a.memory_properties.memory_heap_count]) |heap| {
-            if (!heap.flags.device_local) continue;
-            ha += @intCast(heap.size);
-        }
-        var hb: i64 = 0;
-        for (b.memory_properties.memory_heaps[0..b.memory_properties.memory_heap_count]) |heap| {
-            if (!heap.flags.device_local) continue;
-            hb += @intCast(heap.size);
-        }
-        if (ha == hb) return null;
-        return hb > ha;
-    }
-};
-
-const TextureAllocator = struct {
-    const Slab = struct {
-        const slab_size = 256 * 1024 * 1024;
-        const granularity = 4096;
-
-        memory_type_index: u32,
-        flags: vk.MemoryAllocateFlags,
-        allocator: OffsetAllocator,
-        memory: vk.DeviceMemory,
-    };
-
-    ctx: *Context,
-    slabs: std.ArrayList(Slab),
-
-    fn init(ctx: *Context) !TextureAllocator {
-        return .{
-            .ctx = ctx,
-            .slabs = .empty,
-        };
-    }
-
-    fn deinit(allocator: *TextureAllocator) void {
-        for (allocator.slabs.items) |*slab| {
-            allocator.ctx.device.freeMemory(slab.memory, null);
-            slab.allocator.deinit(allocator.ctx.gpa);
-        }
-        allocator.slabs.deinit(allocator.ctx.gpa);
-        allocator.* = undefined;
-    }
-
-    fn alloc(
-        allocator: *TextureAllocator,
-        memory_type_index: u32,
-        flags: vk.MemoryAllocateFlags,
-        size: u64,
-    ) !struct {
-        allocation: Allocation,
-        slab: *Slab,
-    } {
-        const granule_size: u32 = @intCast((size + Slab.granularity - 1) / Slab.granularity);
-
-        // ideally there should be some allocation policy where we try to match flags
-        // and we try to allocate into the most full slab first (i think?)
-        for (allocator.slabs.items) |*slab| {
-            if (slab.memory_type_index != memory_type_index) continue;
-            if (slab.flags.toInt() & flags.toInt() != flags.toInt()) continue;
-
-            // slab is usable
-            const allocation = slab.allocator.allocate(granule_size) catch continue;
-            return .{
-                .allocation = allocation,
-                .slab = slab,
-            };
-        }
-
-        // no allocation possible with extant slabs, make a new one
-        const alloc_flags: vk.MemoryAllocateFlagsInfo = .{
-            .flags = flags,
-            .device_mask = 0,
-        };
-        const memory = try allocator.ctx.device.allocateMemory(&.{
-            .allocation_size = Slab.slab_size,
-            .memory_type_index = memory_type_index,
-            .p_next = &alloc_flags,
-        }, null);
-        errdefer allocator.ctx.device.freeMemory(memory, null);
-
-        const slab = try allocator.slabs.addOne(allocator.ctx.gpa);
-        errdefer _ = allocator.slabs.pop();
-        slab.* = .{
-            .memory_type_index = memory_type_index,
-            .flags = flags,
-            .memory = memory,
-            .allocator = try .init(
-                allocator.ctx.gpa,
-                Slab.slab_size / Slab.granularity,
-                Slab.slab_size / Slab.granularity,
-            ),
-        };
-
-        const allocation = try slab.allocator.allocate(granule_size);
-        return .{
-            .slab = slab,
-            .allocation = allocation,
-        };
-    }
-
-    fn createTexture(
-        allocator: *TextureAllocator,
-        texture_create_info: rhi.TextureCreateInfo,
-    ) !*Texture {
-        const multiformat: bool = blk: {
-            const base_format = texture_create_info.format;
-            for (texture_create_info.views) |view| {
-                if (view.format) |format| {
-                    if (format != base_format) break :blk true;
-                }
-            }
-            break :blk false;
-        };
-
-        const arrayview: bool = blk: {
-            if (texture_create_info.texture_type != .texture_3d) break :blk false;
-            for (texture_create_info.views) |view| {
-                if (view.view_type == .view_2d_array) break :blk true;
-            }
-            break :blk false;
-        };
-
-        const depth_stencil_format: bool = switch (texture_create_info.format) {
-            .d16_unorm,
-            .d16_unorm_s8_uint,
-            .d24_unorm_s8_uint,
-            .d32_sfloat,
-            .d32_sfloat_s8_uint,
-            => true,
-            else => false,
-        };
-
-        const color_attachment = texture_create_info.usage.attachment and !depth_stencil_format;
-        const depth_stencil_attachment = texture_create_info.usage.attachment and depth_stencil_format;
-
-        const image_info: vk.ImageCreateInfo = .{
-            .flags = .{
-                .mutable_format = multiformat,
-                .cube_compatible = texture_create_info.texture_type == .texture_cube or
-                    texture_create_info.texture_type == .texture_cube_array,
-                .@"2d_array_compatible" = arrayview,
-            },
-            .image_type = vulkanImageType(texture_create_info.texture_type),
-            .format = vulkanFormat(texture_create_info.format),
-            .extent = .{
-                .width = texture_create_info.size[0],
-                .height = texture_create_info.size[1],
-                .depth = if (texture_create_info.texture_type == .texture_3d)
-                    texture_create_info.size[2]
-                else
-                    1,
-            },
-            .mip_levels = texture_create_info.mip_levels,
-            .array_layers = if (texture_create_info.texture_type == .texture_3d)
-                1
-            else
-                texture_create_info.size[2],
-            .samples = vulkanSampleCount(texture_create_info.samples),
-            .tiling = .optimal,
-            .usage = .{
-                .storage = texture_create_info.usage.storage,
-                .sampled = texture_create_info.usage.sampled,
-                .transfer_src = texture_create_info.usage.transfer_src,
-                .transfer_dst = texture_create_info.usage.transfer_dst,
-                .color_attachment = color_attachment,
-                .depth_stencil_attachment = depth_stencil_attachment,
-            },
-            .sharing_mode = .exclusive,
-            .initial_layout = .undefined,
-        };
-        const image = try allocator.ctx.device.createImage(&image_info, null);
-        errdefer allocator.ctx.device.destroyImage(image, null);
-
-        var dedicated_memreq: vk.MemoryDedicatedRequirements = .{
-            .prefers_dedicated_allocation = .false,
-            .requires_dedicated_allocation = .false,
-        };
-        var image_memreq: vk.MemoryRequirements2 = .{
-            .p_next = &dedicated_memreq,
-            .memory_requirements = undefined,
-        };
-        allocator.ctx.device.getImageMemoryRequirements2(&.{
-            .image = image,
-        }, &image_memreq);
-
-        var memory_type_index: u32 = undefined;
-        var best_score: i32 = -999;
-
-        const memory_types = allocator.ctx.physical_device_memory_properties.memory_types;
-        const memory_type_count = allocator.ctx.physical_device_memory_properties.memory_type_count;
-        for (memory_types[0..memory_type_count], 0..) |memory_type, i| {
-            // hard requirements
-            if (image_memreq.memory_requirements.memory_type_bits &
-                (@as(u32, 1) << @intCast(i)) == 0) continue;
-            // soft requirements
-            var score: i32 = 0;
-            if (memory_type.property_flags.device_local) score += 1;
-            if (score > best_score) {
-                best_score = score;
-                memory_type_index = @intCast(i);
-            }
-        }
-
-        var texture = try allocator.ctx.texture_pool.create(allocator.ctx.gpa);
-        errdefer allocator.ctx.texture_pool.destroy(texture);
-        texture.image = image;
-
-        if (dedicated_memreq.requires_dedicated_allocation == .true or
-            (dedicated_memreq.prefers_dedicated_allocation == .true and
-                texture_create_info.usage.attachment == true) or
-            image_memreq.memory_requirements.size > Slab.slab_size / 2)
-        {
-            // dedicated allocation
-            const dedicated_info: vk.MemoryDedicatedAllocateInfo = .{
-                .image = image,
-            };
-            const alloc_flags: vk.MemoryAllocateFlagsInfo = .{
-                .device_mask = 0,
-                .p_next = &dedicated_info,
-            };
-            const memory = try allocator.ctx.device.allocateMemory(&.{
-                .allocation_size = image_memreq.memory_requirements.size,
-                .memory_type_index = memory_type_index,
-                .p_next = &alloc_flags,
-            }, null);
-            errdefer allocator.ctx.device.freeMemory(memory, null);
-            try allocator.ctx.device.bindImageMemory(image, memory, 0);
-
-            texture.memory = .{ .dedicated = memory };
-        } else {
-            // suballocate
-            const suballoc = try allocator.alloc(
-                memory_type_index,
-                .{ .device_address = true },
-                if (image_memreq.memory_requirements.alignment <= Slab.granularity)
-                    image_memreq.memory_requirements.size
-                else
-                    image_memreq.memory_requirements.size + image_memreq.memory_requirements.alignment,
-            );
-
-            try allocator.ctx.device.bindImageMemory(
-                image,
-                suballoc.slab.memory,
-                std.mem.alignForward(
-                    u32,
-                    suballoc.allocation.offset,
-                    @intCast(image_memreq.memory_requirements.alignment),
-                ),
-            );
-
-            texture.memory = .{ .slab = .{
-                .allocation = suballoc.allocation,
-                .slab = suballoc.slab,
-            } };
-        }
-
-        const default_view_info: vk.ImageViewCreateInfo = .{
-            .image = image,
-            .view_type = vulkanImageViewType(texture_create_info.texture_type),
-            .format = vulkanFormat(texture_create_info.format),
-            .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
-            .subresource_range = .{
-                .base_mip_level = 0,
-                .level_count = texture_create_info.mip_levels,
-                .base_array_layer = 0,
-                .layer_count = texture_create_info.size[2],
-                .aspect_mask = switch (texture_create_info.format) {
-                    .s8_uint => .{ .stencil = true },
-                    .d16_unorm,
-                    .d16_unorm_s8_uint,
-                    .d24_unorm_s8_uint,
-                    .d32_sfloat,
-                    .d32_sfloat_s8_uint,
-                    => .{ .depth = true },
-                    else => .{ .color = true },
-                },
-            },
-        };
-        const default_view = try allocator.ctx.device.createImageView(&default_view_info, null);
-        errdefer allocator.ctx.device.destroyImageView(default_view, null);
-
-        const default_view_slot = try allocator.ctx.texture_view_slots.acquire();
-        errdefer allocator.ctx.texture_view_slots.release(default_view_slot);
-
-        const default_view_2 = try allocator.ctx.view_pool.create(allocator.ctx.gpa);
-        errdefer allocator.ctx.view_pool.destroy(default_view_2);
-        default_view_2.* = .{
-            .public = .{
-                .device_address = @intCast(default_view_slot),
-                .texture = &texture.public,
-                .info = .{
-                    .view_type = switch (texture_create_info.texture_type) {
-                        .texture_2d => .view_2d,
-                        .texture_3d => .view_3d,
-                        .texture_cube => .view_cube,
-                        .texture_2d_array => .view_2d_array,
-                        .texture_cube_array => .view_cube_array,
-                    },
-                    .format = texture_create_info.format,
-                    .swizzle = .{},
-                    .range = .{
-                        .base_mip_level = 0,
-                        .level_count = texture_create_info.mip_levels,
-                        .base_array_layer = 0,
-                        .layer_count = if (texture_create_info.texture_type == .texture_3d)
-                            1
-                        else
-                            texture_create_info.size[2],
-                    }, // cmon
-                    .name = &.{},
-                },
-            },
-            .view = default_view,
-        };
-        texture.public.default_view = &default_view_2.public;
-
-        const descriptor_image_info: vk.DescriptorImageInfo = .{
-            .sampler = .null,
-            .image_view = default_view,
-            .image_layout = .shader_read_only_optimal,
-        };
-        const write_descriptor_set: vk.WriteDescriptorSet = .{
-            .dst_set = allocator.ctx.descriptor_set,
-            .dst_binding = 0,
-            .dst_array_element = default_view_slot,
-            .descriptor_count = 1,
-            .descriptor_type = .sampled_image,
-            .p_image_info = @ptrCast(&descriptor_image_info),
-        };
-        allocator.ctx.device.updateDescriptorSets(&.{write_descriptor_set}, null);
-
-        if (texture_create_info.group) |group| {
-            _ = group;
-            @panic("TODO");
-        } else {
-            const group = try allocator.ctx.group_pool.create(allocator.ctx.gpa);
-            group.* = .{
-                .public = .{
-                    .info = .{ .name = "" },
-                },
-                .last_used = .{},
-                .textures = .empty,
-                .buffer_count = 0,
-                .texture_state = .{
-                    .owner = null,
-                    .layout = .undefined,
-                },
-                .texture_state_overrides = .empty,
-                .last_write_epoch = 0,
-                .last_write_stage_mask = .{},
-                .last_read_epoch = 0,
-                .last_read_stage_mask = .{},
-            };
-            texture.public.group = &group.public;
-        }
-        // FIXME cleanup of group is very hard on errdefer, so don't have errors after it
-
-        // TODO create the other views
-
-        texture.public.info = .{
-            .usage = texture_create_info.usage,
-            .size = texture_create_info.size,
-            .format = texture_create_info.format,
-            .mip_levels = texture_create_info.mip_levels,
-            .sample_count = texture_create_info.samples,
-            .texture_type = texture_create_info.texture_type,
-            .name = texture_create_info.name,
-        };
-        texture.public.views = &.{};
-
-        return texture;
-    }
-};
-
-const BufferAllocator = struct {
-    const Slab = struct {
-        const slab_size = 256 * 1024 * 1024;
-        const granularity = 4096;
-
-        memory_type_index: u32,
-        flags: vk.MemoryAllocateFlags,
-        allocator: OffsetAllocator,
-        memory: vk.DeviceMemory,
-    };
-
-    ctx: *Context,
-    slabs: std.ArrayList(Slab),
-
-    fn init(ctx: *Context) !BufferAllocator {
-        return .{
-            .ctx = ctx,
-            .slabs = .empty,
-        };
-    }
-
-    fn deinit(allocator: *BufferAllocator) void {
-        for (allocator.slabs.items) |*slab| {
-            allocator.ctx.device.freeMemory(slab.memory, null);
-            slab.allocator.deinit(allocator.ctx.gpa);
-        }
-        allocator.slabs.deinit(allocator.ctx.gpa);
-        allocator.* = undefined;
-    }
-
-    fn alloc(
-        allocator: *BufferAllocator,
-        memory_type_index: u32,
-        flags: vk.MemoryAllocateFlags,
-        size: u64,
-    ) !struct {
-        allocation: Allocation,
-        slab: *Slab,
-    } {
-        const granule_size: u32 = @intCast((size + Slab.granularity - 1) / Slab.granularity);
-
-        // ideally there should be some allocation policy where we try to match flags
-        // and we try to allocate into the most full slab first (i think?)
-        for (allocator.slabs.items) |*slab| {
-            if (slab.memory_type_index != memory_type_index) continue;
-            if (slab.flags.toInt() & flags.toInt() != flags.toInt()) continue;
-
-            // slab is usable
-            const allocation = slab.allocator.allocate(granule_size) catch continue;
-            return .{
-                .allocation = allocation,
-                .slab = slab,
-            };
-        }
-
-        // no allocation possible with extant slabs, make a new one
-        const alloc_flags: vk.MemoryAllocateFlagsInfo = .{
-            .flags = flags,
-            .device_mask = 0,
-        };
-        const memory = try allocator.ctx.device.allocateMemory(&.{
-            .allocation_size = Slab.slab_size,
-            .memory_type_index = memory_type_index,
-            .p_next = &alloc_flags,
-        }, null);
-        errdefer allocator.ctx.device.freeMemory(memory, null);
-
-        const slab = try allocator.slabs.addOne(allocator.ctx.gpa);
-        errdefer _ = allocator.slabs.pop();
-        slab.* = .{
-            .memory_type_index = memory_type_index,
-            .flags = flags,
-            .memory = memory,
-            .allocator = try .init(
-                allocator.ctx.gpa,
-                Slab.slab_size / Slab.granularity,
-                Slab.slab_size / Slab.granularity,
-            ),
-        };
-
-        const allocation = try slab.allocator.allocate(granule_size);
-        return .{
-            .slab = slab,
-            .allocation = allocation,
-        };
-    }
-
-    fn createBuffer(
-        allocator: *BufferAllocator,
-        buffer_create_info: rhi.BufferCreateInfo,
-    ) !*Buffer {
-        const buffer_info: vk.BufferCreateInfo = .{
-            .size = buffer_create_info.size + 16, // extra padding for wide reads near the end
-            .flags = .{ .device_address_capture_replay = allocator.ctx.config.enable_debug },
-            .usage = .{
-                .transfer_src = buffer_create_info.usage.transfer_src,
-                .transfer_dst = buffer_create_info.usage.transfer_dst,
-                .storage_buffer = buffer_create_info.usage.storage,
-                .index_buffer = buffer_create_info.usage.index,
-                .indirect_buffer = buffer_create_info.usage.indirect,
-                .shader_device_address = true,
-            },
-            .sharing_mode = .concurrent,
-            .p_queue_family_indices = @ptrCast(allocator.ctx.queue_family_indices),
-            .queue_family_index_count = @intCast(allocator.ctx.queue_family_indices.len),
-        };
-        const device_buffer = try allocator.ctx.device.createBuffer(&buffer_info, null);
-        errdefer allocator.ctx.device.destroyBuffer(device_buffer, null);
-
-        var dedicated_memreq: vk.MemoryDedicatedRequirements = .{
-            .prefers_dedicated_allocation = .false,
-            .requires_dedicated_allocation = .false,
-        };
-        var buffer_memreq: vk.MemoryRequirements2 = .{
-            .p_next = &dedicated_memreq,
-            .memory_requirements = undefined,
-        };
-        allocator.ctx.device.getBufferMemoryRequirements2(&.{
-            .buffer = device_buffer,
-        }, &buffer_memreq);
-
-        var memory_type_index: u32 = undefined;
-        var best_score: i32 = -999;
-
-        const memory_types = allocator.ctx.physical_device_memory_properties.memory_types;
-        const memory_type_count = allocator.ctx.physical_device_memory_properties.memory_type_count;
-        for (memory_types[0..memory_type_count], 0..) |memory_type, i| {
-            // hard requirements
-            if (buffer_memreq.memory_requirements.memory_type_bits &
-                (@as(u32, 1) << @intCast(i)) == 0) continue;
-            // soft requirements
-            var score: i32 = 0;
-            if (memory_type.property_flags.device_local) score += 1;
-            if (score > best_score) {
-                best_score = score;
-                memory_type_index = @intCast(i);
-            }
-        }
-
-        var buffer = try allocator.ctx.buffer_pool.create(allocator.ctx.gpa);
-        errdefer allocator.ctx.buffer_pool.destroy(buffer);
-        buffer.buffer = device_buffer;
-
-        if (dedicated_memreq.requires_dedicated_allocation == .true or
-            buffer_memreq.memory_requirements.size > Slab.slab_size / 2)
-        {
-            // dedicated allocation
-            const dedicated_info: vk.MemoryDedicatedAllocateInfo = .{
-                .buffer = device_buffer,
-            };
-            const alloc_flags: vk.MemoryAllocateFlagsInfo = .{
-                .device_mask = 0,
-                .p_next = &dedicated_info,
-            };
-            const memory = try allocator.ctx.device.allocateMemory(&.{
-                .allocation_size = buffer_memreq.memory_requirements.size,
-                .memory_type_index = memory_type_index,
-                .p_next = &alloc_flags,
-            }, null);
-            errdefer allocator.ctx.device.freeMemory(memory, null);
-            try allocator.ctx.device.bindBufferMemory(device_buffer, memory, 0);
-
-            buffer.memory = .{ .dedicated = memory };
-        } else {
-            // suballocate
-            const suballoc = try allocator.alloc(
-                memory_type_index,
-                .{ .device_address = true },
-                if (buffer_memreq.memory_requirements.alignment <= Slab.granularity)
-                    buffer_memreq.memory_requirements.size
-                else
-                    buffer_memreq.memory_requirements.size + buffer_memreq.memory_requirements.alignment,
-            );
-
-            try allocator.ctx.device.bindBufferMemory(
-                device_buffer,
-                suballoc.slab.memory,
-                std.mem.alignForward(
-                    u32,
-                    suballoc.allocation.offset * Slab.granularity,
-                    @intCast(buffer_memreq.memory_requirements.alignment),
-                ),
-            );
-
-            buffer.memory = .{ .slab = .{
-                .allocation = suballoc.allocation,
-                .slab = suballoc.slab,
-            } };
-        }
-
-        if (buffer_create_info.group) |group| {
-            _ = group;
-            @panic("TODO");
-        } else {
-            const group = try allocator.ctx.group_pool.create(allocator.ctx.gpa);
-            group.* = .{
-                .public = .{
-                    .info = .{
-                        .name = "",
-                    },
-                },
-                .last_used = .{},
-                .textures = .empty,
-                .buffer_count = 1,
-                .texture_state = .{
-                    .owner = null,
-                    .layout = .undefined,
-                },
-                .texture_state_overrides = .empty,
-                .last_write_epoch = 0,
-                .last_write_stage_mask = .{},
-                .last_read_epoch = 0,
-                .last_read_stage_mask = .{},
-            };
-            buffer.public.group = &group.public;
-        }
-        // FIXME cleanup of group is very hard on errdefer, so don't have errors after it
-
-        buffer.public.info = .{
-            .usage = buffer_create_info.usage,
-            .size = buffer_create_info.size,
-            .name = buffer_create_info.name,
-        };
-
-        buffer.public.device_address = allocator.ctx.device.getBufferDeviceAddress(&.{
-            .buffer = device_buffer,
-        });
-
-        return buffer;
-    }
-};
-
-const StagingAllocator = struct {
-    ctx: *Context,
-    memory: vk.DeviceMemory,
-    mapped_memory: []u8,
-    buffer: vk.Buffer,
-    allocator: OffsetAllocator,
-    allocations: []Allocation,
-
-    const granularity = 4096;
-
-    fn init(ctx: *Context, usage: rhi.StagingAllocatorUsage) !StagingAllocator {
-        const size = switch (usage) {
-            .upload => ctx.config.upload_staging_size,
-            .download => ctx.config.download_staging_size,
-        };
-        const granule_size: u32 = @intCast((size + granularity - 1) / granularity);
-
-        const buffer = try ctx.device.createBuffer(&.{
-            .size = size,
-            .usage = .{
-                .transfer_src = usage == .upload,
-                .transfer_dst = usage == .download,
-            },
-            .sharing_mode = .concurrent,
-            .p_queue_family_indices = @ptrCast(ctx.queue_family_indices),
-            .queue_family_index_count = @intCast(ctx.queue_family_indices.len),
-        }, null);
-        errdefer ctx.device.destroyBuffer(buffer, null);
-
-        if (ctx.config.enable_debug) {
-            try ctx.device.setDebugUtilsObjectNameEXT(&.{
-                .object_type = .buffer,
-                .object_handle = @backingInt(buffer),
-                .p_object_name = switch (usage) {
-                    .upload => "UPLOAD_STAGING_BUFFER",
-                    .download => "DOWNLOAD_STAGING_BUFFER",
-                },
-            });
-        }
-
-        const optimal_alignment = ctx.physical_device_properties.limits
-            .optimal_buffer_copy_offset_alignment;
-        var buffer_memreq = ctx.device.getBufferMemoryRequirements(buffer);
-        buffer_memreq.alignment = @max(buffer_memreq.alignment, optimal_alignment);
-
-        var memory_type_index: u32 = undefined;
-        var best_score: i32 = -999;
-
-        const memory_types = ctx.physical_device_memory_properties.memory_types;
-        const memory_type_count = ctx.physical_device_memory_properties.memory_type_count;
-        for (memory_types[0..memory_type_count], 0..) |memory_type, i| {
-            // hard requirements
-            if (buffer_memreq.memory_type_bits &
-                (@as(u32, 1) << @intCast(i)) == 0) continue;
-            if (!memory_type.property_flags.host_visible) continue;
-            if (usage == .upload and !memory_type.property_flags.host_coherent) continue;
-            // soft requirements
-            var score: i32 = 0;
-            if (memory_type.property_flags.device_local) score -= 1;
-            if (usage == .download and memory_type.property_flags.host_coherent) score += 2;
-            if (usage == .download and memory_type.property_flags.host_cached) score += 4;
-            if (score > best_score) {
-                best_score = score;
-                memory_type_index = @intCast(i);
-            }
-        }
-
-        const memory = try ctx.device.allocateMemory(&.{
-            .allocation_size = size,
-            .memory_type_index = memory_type_index,
-        }, null);
-        errdefer ctx.device.freeMemory(memory, null);
-
-        try ctx.device.bindBufferMemory(buffer, memory, 0);
-        const buffer_ptr: [*]u8 = @ptrCast((try ctx.device.mapMemory(memory, 0, size, .{})).?);
-
-        const allocations = try ctx.gpa.alloc(Allocation, granule_size);
-        errdefer ctx.gpa.free(allocations);
-
-        return .{
-            .ctx = ctx,
-            .mapped_memory = buffer_ptr[0..size],
-            .memory = memory,
-            .buffer = buffer,
-            .allocator = try .init(
-                ctx.gpa,
-                @intCast(size / granularity),
-                @intCast(size / granularity),
-            ),
-            .allocations = allocations,
-        };
-    }
-
-    fn deinit(allocator: *StagingAllocator) void {
-        allocator.ctx.device.destroyBuffer(allocator.buffer, null);
-        allocator.ctx.device.freeMemory(allocator.memory, null);
-        allocator.allocator.deinit(allocator.ctx.gpa);
-        allocator.ctx.gpa.free(allocator.allocations);
-        allocator.* = undefined;
-    }
-
-    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
-        const allocator: *StagingAllocator = @ptrCast(@alignCast(ctx));
-        _ = ret_addr;
-
-        const granule_size: u32 = @intCast((len + granularity - 1) / granularity);
-
-        if (alignment.toByteUnits() > granularity) {
-            log.info("TODO: implement large alignment", .{});
-            return null;
-        }
-        const allocation = allocator.allocator.allocate(granule_size) catch return null;
-        const slot = allocation.offset;
-        allocator.allocations[slot] = allocation;
-
-        return allocator.mapped_memory[allocation.offset * granularity .. allocation.offset * granularity + len].ptr;
-    }
-
-    fn resize(
-        ctx: *anyopaque,
-        memory: []u8,
-        alignment: std.mem.Alignment,
-        new_len: usize,
-        ret_addr: usize,
-    ) bool {
-        const allocator: *StagingAllocator = @ptrCast(@alignCast(ctx));
-        _ = allocator;
-        _ = memory;
-        _ = alignment;
-        _ = new_len;
-        _ = ret_addr;
-        @panic("TODO: implement resize");
-    }
-
-    fn remap(
-        ctx: *anyopaque,
-        memory: []u8,
-        alignment: std.mem.Alignment,
-        new_len: usize,
-        ret_addr: usize,
-    ) ?[*]u8 {
-        const allocator: *StagingAllocator = @ptrCast(@alignCast(ctx));
-        _ = allocator;
-        _ = memory;
-        _ = alignment;
-        _ = new_len;
-        _ = ret_addr;
-        @panic("TODO: implement remap");
-    }
-
-    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
-        const allocator: *StagingAllocator = @ptrCast(@alignCast(ctx));
-        const allocation = allocator.allocations[
-            (@intFromPtr(memory.ptr) - @intFromPtr(allocator.mapped_memory.ptr)) / granularity
-        ];
-        allocator.allocator.free(allocation);
-
-        _ = alignment;
-        _ = ret_addr;
-    }
-};

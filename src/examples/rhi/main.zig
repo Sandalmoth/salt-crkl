@@ -21,6 +21,8 @@ pub fn main() !void {
     defer _ = arena_struct.deinit();
     const arena = arena_struct.allocator();
 
+    _ = arena;
+
     try sdl.init(sdl.c.SDL_INIT_VIDEO);
     defer sdl.quit();
 
@@ -32,7 +34,7 @@ pub fn main() !void {
     );
     defer sdl.destroyWindow(window);
 
-    const ctx = try rhi.Vulkan.init(gpa, .{
+    const ctx = try rhi.Vulkan.init(gpa, io, .{
         .getInstanceProcAddress = &getInstanceProcAddress,
         .getRequiredInstanceExtensions = &getRequiredInstanceExtensions,
         .createWindowSurface = &createWindowSurface,
@@ -42,154 +44,154 @@ pub fn main() !void {
     }, window);
     defer rhi.Vulkan.deinit(ctx);
 
-    const swapchain = try ctx.createSwapchain(.{ .window = window });
-    defer ctx.destroySwapchain(swapchain);
+    // const swapchain = try ctx.createSwapchain(.{ .window = window });
+    // defer ctx.destroySwapchain(swapchain);
 
-    const vertex_shader = try ctx.createShader(.{
-        .stage = .vertex,
-        .src = &shader_vertex_spv,
-    });
-    defer ctx.destroyShader(vertex_shader);
-    const fragment_shader = try ctx.createShader(.{
-        .stage = .fragment,
-        .src = &shader_fragment_spv,
-    });
-    defer ctx.destroyShader(fragment_shader);
+    // const vertex_shader = try ctx.createShader(.{
+    //     .stage = .vertex,
+    //     .src = &shader_vertex_spv,
+    // });
+    // defer ctx.destroyShader(vertex_shader);
+    // const fragment_shader = try ctx.createShader(.{
+    //     .stage = .fragment,
+    //     .src = &shader_fragment_spv,
+    // });
+    // defer ctx.destroyShader(fragment_shader);
 
-    const pipeline = try ctx.createGraphicsPipeline(.{
-        .vertex_shader = vertex_shader,
-        .fragment_shader = fragment_shader,
-        .color_attachments = &.{.{
-            .format = .r8g8b8a8_srgb,
-        }},
-        .depth_attachment_format = null,
-        .stencil_attachment_format = null,
-    });
-    defer ctx.destroyGraphicsPipeline(pipeline);
+    // const pipeline = try ctx.createGraphicsPipeline(.{
+    //     .vertex_shader = vertex_shader,
+    //     .fragment_shader = fragment_shader,
+    //     .color_attachments = &.{.{
+    //         .format = .r8g8b8a8_srgb,
+    //     }},
+    //     .depth_attachment_format = null,
+    //     .stencil_attachment_format = null,
+    // });
+    // defer ctx.destroyGraphicsPipeline(pipeline);
 
-    const color_target = try ctx.createTexture(.{
-        .usage = .{
-            .attachment = true,
-            .sampled = true,
-        },
-        .texture_type = .texture_2d,
-        .mip_levels = 1,
-        .size = .{ 640, 480, 1 },
-        .format = .r8g8b8a8_srgb,
-        .name = "color_target",
-    });
-    defer ctx.destroyTexture(color_target);
+    // const color_target = try ctx.createTexture(.{
+    //     .usage = .{
+    //         .attachment = true,
+    //         .sampled = true,
+    //     },
+    //     .texture_type = .texture_2d,
+    //     .mip_levels = 1,
+    //     .size = .{ 640, 480, 1 },
+    //     .format = .r8g8b8a8_srgb,
+    //     .name = "color_target",
+    // });
+    // defer ctx.destroyTexture(color_target);
 
-    const index_buffer = try ctx.createBuffer(.{
-        .usage = .{
-            .index = true,
-            .transfer_dst = true,
-        },
-        .size = @sizeOf(u32) * 6,
-        .name = "index_buffer",
-    });
-    defer ctx.destroyBuffer(index_buffer);
+    // const index_buffer = try ctx.createBuffer(.{
+    //     .usage = .{
+    //         .index = true,
+    //         .transfer_dst = true,
+    //     },
+    //     .size = @sizeOf(u32) * 6,
+    //     .name = "index_buffer",
+    // });
+    // defer ctx.destroyBuffer(index_buffer);
 
-    const vertex_buffer = try ctx.createBuffer(.{
-        .usage = .{
-            .storage = true,
-            .transfer_dst = true,
-        },
-        .size = @sizeOf([3]f32) * 4,
-        .name = "vertex_buffer",
-    });
-    defer ctx.destroyBuffer(vertex_buffer);
+    // const vertex_buffer = try ctx.createBuffer(.{
+    //     .usage = .{
+    //         .storage = true,
+    //         .transfer_dst = true,
+    //     },
+    //     .size = @sizeOf([3]f32) * 4,
+    //     .name = "vertex_buffer",
+    // });
+    // defer ctx.destroyBuffer(vertex_buffer);
 
-    const upload_allocator = ctx.stagingAllocator(.upload);
+    // const upload_allocator = ctx.stagingAllocator(.upload);
 
-    {
-        var command_buffer: rhi.CommandBuffer = .init(arena, .graphics);
+    // {
+    //     var command_buffer: rhi.CommandBuffer = .init(arena, .graphics);
 
-        // FIXME i think the defers here are dangerous
-        // FIXME the bufferUpload copy doesn't to happen
-        // FIXME until after the submit fence
+    //     // FIXME i think the defers here are dangerous
+    //     // FIXME the bufferUpload copy doesn't to happen
+    //     // FIXME until after the submit fence
 
-        const indices = try upload_allocator.alloc(u32, 6);
-        // defer upload_allocator.free(indices);
-        indices[0..6].* = .{ 0, 1, 2, 1, 3, 2 };
-        try command_buffer.bufferUpload(indices, index_buffer, 0);
+    //     const indices = try upload_allocator.alloc(u32, 6);
+    //     // defer upload_allocator.free(indices);
+    //     indices[0..6].* = .{ 0, 1, 2, 1, 3, 2 };
+    //     try command_buffer.bufferUpload(indices, index_buffer, 0);
 
-        const vertices = try upload_allocator.alloc([4]f32, 4);
-        // defer upload_allocator.free(vertices);
-        vertices[0..4].* = .{
-            .{ 1.0, 1.0, 0.5, 0.0 },
-            .{ 1.0, -1.0, 0.5, 0.0 },
-            .{ -1.0, 1.0, 0.5, 0.0 },
-            .{ -1.0, -1.0, 0.5, 0.0 },
-        };
-        try command_buffer.bufferUpload(vertices, vertex_buffer, 0);
+    //     const vertices = try upload_allocator.alloc([4]f32, 4);
+    //     // defer upload_allocator.free(vertices);
+    //     vertices[0..4].* = .{
+    //         .{ 1.0, 1.0, 0.5, 0.0 },
+    //         .{ 1.0, -1.0, 0.5, 0.0 },
+    //         .{ -1.0, 1.0, 0.5, 0.0 },
+    //         .{ -1.0, -1.0, 0.5, 0.0 },
+    //     };
+    //     try command_buffer.bufferUpload(vertices, vertex_buffer, 0);
 
-        const fence = try ctx.submit(io, &.{command_buffer}, &.{});
-        _ = fence; // FIXME just waiting on this would fix it for example
-    }
+    //     const fence = try ctx.submit(io, &.{command_buffer}, &.{});
+    //     _ = fence; // FIXME just waiting on this would fix it for example
+    // }
 
-    main_loop: while (true) {
-        std.debug.print("yo\n", .{});
-        _ = arena_struct.reset(.retain_capacity);
+    // main_loop: while (true) {
+    //     std.debug.print("yo\n", .{});
+    //     _ = arena_struct.reset(.retain_capacity);
 
-        var event: sdl.Event = undefined;
-        while (sdl.pollEvent(&event)) {
-            if (event.type == sdl.c.SDL_EVENT_QUIT) break :main_loop;
-            if (event.type == sdl.c.SDL_EVENT_KEY_DOWN) switch (event.key.key) {
-                sdl.c.SDLK_ESCAPE => break :main_loop,
-                else => {},
-            };
-        }
+    //     var event: sdl.Event = undefined;
+    //     while (sdl.pollEvent(&event)) {
+    //         if (event.type == sdl.c.SDL_EVENT_QUIT) break :main_loop;
+    //         if (event.type == sdl.c.SDL_EVENT_KEY_DOWN) switch (event.key.key) {
+    //             sdl.c.SDLK_ESCAPE => break :main_loop,
+    //             else => {},
+    //         };
+    //     }
 
-        try io.sleep(.fromMilliseconds(10), .real);
+    //     try io.sleep(.fromMilliseconds(10), .real);
 
-        if (!try ctx.acquireSwapchain(swapchain, 100_000_000)) continue :main_loop;
+    //     if (!try ctx.acquireSwapchain(swapchain, 100_000_000)) continue :main_loop;
 
-        var command_buffer: rhi.CommandBuffer = .init(arena, .graphics);
-        try command_buffer.beginRenderPass(
-            &.{.{
-                .view = color_target.default_view,
-                .load_op = .clear,
-                .store_op = .store,
-                .clear_value = .float(.{ 0, 1.0, 0, 1.0 }),
-            }},
-            null,
-            null,
-            &.{},
-            &.{},
-            &.{},
-        );
-        try command_buffer.bindGraphicsPipeline(pipeline, .{
-            .viewport = .{
-                .x = 0,
-                .y = 0,
-                .width = 640,
-                .height = 480,
-                .min_depth = 0,
-                .max_depth = 1,
-            },
-            .scissor = .{
-                .x = 0,
-                .y = 0,
-                .width = 640,
-                .height = 480,
-            },
-        });
-        try command_buffer.pushConstant(vertex_buffer.device_address);
-        try command_buffer.drawIndexed(index_buffer, 6, 1);
-        try command_buffer.endRenderPass();
+    //     var command_buffer: rhi.CommandBuffer = .init(arena, .graphics);
+    //     try command_buffer.beginRenderPass(
+    //         &.{.{
+    //             .view = color_target.default_view,
+    //             .load_op = .clear,
+    //             .store_op = .store,
+    //             .clear_value = .float(.{ 0, 1.0, 0, 1.0 }),
+    //         }},
+    //         null,
+    //         null,
+    //         &.{},
+    //         &.{},
+    //         &.{},
+    //     );
+    //     try command_buffer.bindGraphicsPipeline(pipeline, .{
+    //         .viewport = .{
+    //             .x = 0,
+    //             .y = 0,
+    //             .width = 640,
+    //             .height = 480,
+    //             .min_depth = 0,
+    //             .max_depth = 1,
+    //         },
+    //         .scissor = .{
+    //             .x = 0,
+    //             .y = 0,
+    //             .width = 640,
+    //             .height = 480,
+    //         },
+    //     });
+    //     try command_buffer.pushConstant(vertex_buffer.device_address);
+    //     try command_buffer.drawIndexed(index_buffer, 6, 1);
+    //     try command_buffer.endRenderPass();
 
-        // try command_buffer.bindIndexBuffer(index_buffer, 0);
-        // try command_buffer.pushConstant(u64, vertex_buffer.buffer_device_address);
-        // try command_buffer.drawIndexedInstanced(6, 1, 0, 0, 0);
-        // try command_buffer.endRenderPass();
+    //     // try command_buffer.bindIndexBuffer(index_buffer, 0);
+    //     // try command_buffer.pushConstant(u64, vertex_buffer.buffer_device_address);
+    //     // try command_buffer.drawIndexedInstanced(6, 1, 0, 0, 0);
+    //     // try command_buffer.endRenderPass();
 
-        _ = try ctx.submit(io, &.{
-            command_buffer,
-        }, &.{
-            .{ .swapchain = swapchain, .texture = color_target },
-        });
-    }
+    //     _ = try ctx.submit(io, &.{
+    //         command_buffer,
+    //     }, &.{
+    //         .{ .swapchain = swapchain, .texture = color_target },
+    //     });
+    // }
 
     // const ctx: *rhi.Context = try .create(gpa, .{
     //     .getInstanceProcAddress = &getInstanceProcAddress,
