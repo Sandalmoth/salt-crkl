@@ -20,13 +20,29 @@ pub const BufferAllocator = struct {
         device_address: u64,
     };
 
+    const SubAllocation = struct {
+        slab: *Slab,
+        allocation: OffsetAllocation,
+        device_address: u64,
+        size: u64,
+    };
+
+    const Deferred = struct {
+        semaphore_value: u64,
+        device_address: u64,
+    };
+
     ctx: *Context,
     slabs: std.ArrayList(Slab),
+    subs: std.ArrayList(SubAllocation),
+    queue: std.ArrayList(Deferred),
 
     pub fn init(ctx: *Context) !BufferAllocator {
         return .{
             .ctx = ctx,
             .slabs = .empty,
+            .subs = .empty,
+            .queue = .empty,
         };
     }
 
@@ -38,6 +54,91 @@ pub const BufferAllocator = struct {
         }
         allocator.slabs.deinit(allocator.ctx.gpa);
         allocator.* = undefined;
+    }
+
+    /// semaphore_value should be the current value of the semaphore
+    pub fn alloc(
+        allocator: *BufferAllocator,
+        size: u64,
+        semaphore_value: u64,
+    ) !u64 {
+        const granule_size: u32 = @intCast((size + Slab.granularity - 1) / Slab.granularity);
+
+        // free suballocations that are no longer in use
+        var i = allocator.queue.items.len;
+        while (i > 0) {
+            if (semaphore_value >= allocator.queue.items[i - 1].semaphore_value) {
+                const device_address = allocator.queue.items[i - 1].device_address;
+                allocator.queue.swapRemove(i - 1);
+                for (allocator.subs.items, 0..) |sub, j| {
+                    if (device_address < sub.device_address) continue;
+                    if (device_address >= sub.device_address + sub.size) continue;
+                    sub.slab.allocator.free(sub.allocation);
+                    allocator.subs.swapRemove(j);
+                    break;
+                }
+            } else {
+                i -= 1;
+            }
+        }
+        // ensure that we have a spot for this allocation in the deferred destruction queue
+        try allocator.queue.ensureUnusedCapacity(allocator.ctx.gpa, allocator.subs.items.len + 1);
+
+        // ideally there should be some allocation policy where we
+        // try to allocate into the most full slab first (i think?)
+        // because emptying slabs as much as possible is defragmentation
+        for (allocator.slabs.items) |*slab| {
+            try allocator.subs.ensureUnusedCapacity(allocator.ctx.gpa, 1);
+            const allocation = slab.allocator.allocate(granule_size) catch continue;
+            const device_address = slab.device_address + allocation.offset * Slab.granularity;
+            std.debug.assert(device_address % Slab.granularity == 0);
+            const suballocation = allocator.subs.addOneAssumeCapacity();
+            suballocation.* = .{
+                .slab = slab,
+                .allocation = allocation,
+                .device_address = device_address,
+                .size = size,
+            };
+            return device_address;
+        }
+
+        // no allocation possible with extant slabs, make a new one
+        try allocator.addSlab();
+        return allocator.alloc(size, semaphore_value);
+    }
+
+    //// semaphore_value should be the value when the final use is done
+    pub fn queueFree(
+        allocator: *BufferAllocator,
+        device_address: u64,
+        semaphore_value: u64,
+    ) void {
+        allocator.queue.appendAssumeCapacity(.{
+            .semaphore_value = semaphore_value,
+            .device_address = device_address,
+        });
+    }
+
+    pub fn bufferOffset(
+        allocator: *BufferAllocator,
+        device_address: u64,
+    ) struct {
+        buffer: vk.Buffer,
+        offset: u64,
+    } {
+        for (allocator.subs.items) |sub| {
+            if (device_address < sub.device_address) continue;
+            if (device_address >= sub.device_address + sub.size) continue;
+            return .{
+                .buffer = sub.slab.buffer,
+                .offset = sub.allocation.offset,
+            };
+        }
+        unreachable; // pointer is invalid
+        // NOTE should this be an error instead?
+        // i don't think so, it's equivalent to dereferencing an invalid pointer
+        // which is also not a runtime error but a panic in debug (at best)
+        // so this is equivalent semantics
     }
 
     fn addSlab(allocator: *BufferAllocator) !void {
@@ -93,6 +194,7 @@ pub const BufferAllocator = struct {
                 memory_type_index = @intCast(i);
             }
         }
+        if (best_score == -999) return error.NoMemoryType;
 
         // dedicated allocation
         const dedicated_info: vk.MemoryDedicatedAllocateInfo = .{
@@ -130,26 +232,6 @@ pub const BufferAllocator = struct {
             .buffer = device_buffer,
             .device_address = device_address,
         };
-    }
-
-    pub fn alloc(
-        allocator: *BufferAllocator,
-        size: u64,
-        alignment: u64,
-    ) !u64 {
-        const granule_size: u32 = @intCast((size + Slab.granularity - 1) / Slab.granularity);
-
-        // ideally there should be some allocation policy where we
-        // try to allocate into the most full slab first (i think?)
-        // because emptying slabs as much as possible is defragmentation
-        for (allocator.slabs.items) |*slab| {
-            const allocation = slab.allocator.allocate(granule_size) catch continue;
-            return slab.device_address + allocation.offset * Slab.granularity;
-        }
-
-        // no allocation possible with extant slabs, make a new one
-        try allocator.addSlab();
-        return allocator.alloc(size, alignment);
     }
 };
 
