@@ -4,6 +4,8 @@ pub const vk = @import("vulkan");
 const rhi = @import("root.zig");
 const allocators = @import("allocators.zig");
 
+const log = std.log.scoped(.rhi_vulkan_buffer_allocator);
+
 const Context = @import("VulkanContext.zig");
 const SlotPool = @import("SlotPool.zig");
 const OffsetAllocator = @import("OffsetAllocator.zig").Allocator;
@@ -47,6 +49,30 @@ pub const BufferAllocator = struct {
     }
 
     pub fn deinit(allocator: *BufferAllocator) void {
+        // free suballocations that are no longer in use
+        var i = allocator.queue.items.len;
+        while (i > 0) {
+            const device_address = allocator.queue.items[i - 1].device_address;
+            _ = allocator.queue.swapRemove(i - 1);
+            for (allocator.subs.items, 0..) |sub, j| {
+                if (device_address < sub.device_address) continue;
+                if (device_address >= sub.device_address + sub.size) continue;
+                sub.slab.allocator.free(sub.allocation);
+                _ = allocator.subs.swapRemove(j);
+                break;
+            } else {
+                i -= 1;
+            }
+        }
+        for (allocator.subs.items) |sub| {
+            log.debug(
+                "Buffer allocation (device_address: {} size: {}) leaked",
+                .{ sub.device_address, sub.size },
+            );
+        }
+        allocator.subs.deinit(allocator.ctx.gpa);
+        allocator.queue.deinit(allocator.ctx.gpa);
+
         for (allocator.slabs.items) |*slab| {
             allocator.ctx.device.destroyBuffer(slab.buffer, null);
             allocator.ctx.device.freeMemory(slab.memory, null);
@@ -69,12 +95,12 @@ pub const BufferAllocator = struct {
         while (i > 0) {
             if (semaphore_value >= allocator.queue.items[i - 1].semaphore_value) {
                 const device_address = allocator.queue.items[i - 1].device_address;
-                allocator.queue.swapRemove(i - 1);
+                _ = allocator.queue.swapRemove(i - 1);
                 for (allocator.subs.items, 0..) |sub, j| {
                     if (device_address < sub.device_address) continue;
                     if (device_address >= sub.device_address + sub.size) continue;
                     sub.slab.allocator.free(sub.allocation);
-                    allocator.subs.swapRemove(j);
+                    _ = allocator.subs.swapRemove(j);
                     break;
                 }
             } else {
