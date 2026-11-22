@@ -583,7 +583,7 @@ pub const Context = struct {
         destroyComputePipeline: *const fn (*anyopaque, *const ComputePipeline) void,
 
         stagingAllocator: *const fn (*anyopaque, StagingAllocatorUsage) std.mem.Allocator,
-        alloc: *const fn (*anyopaque, u64, u64) Error!u64, // size alignment
+        alloc: *const fn (*anyopaque, u64) Error!u64, // size
         free: *const fn (*anyopaque, u64) void, // device_address
 
         flush: *const fn (*anyopaque, []const u8) void, // for download staging allocator, call before reading, possibly a noop

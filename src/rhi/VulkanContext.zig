@@ -209,6 +209,12 @@ pub fn deinit(rhi_ctx: rhi.Context) void {
     ctx.gpa.destroy(ctx);
 }
 
+fn alloc(ptr: *anyopaque, size: u64) rhi.Context.Error!u64 {
+    const ctx: *Context = @ptrCast(@alignCast(ptr));
+    const semaphore_value = try ctx.device.getSemaphoreCounterValue(ctx.graphics_queue.semaphore);
+    return ctx.buffer_allocator.alloc(size, semaphore_value);
+}
+
 fn initInstance(
     ctx: *Context,
     arena: std.mem.Allocator,
