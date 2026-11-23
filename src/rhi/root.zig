@@ -2,37 +2,17 @@ const std = @import("std");
 
 pub const Vulkan = @import("VulkanContext.zig");
 
-// overall design
-// bindless oriented, buffers are (almost) always by address
-// textures and samplers are in one large heap
-
-// intended to run on anything from the last 10-ish years
-
-// there is an upload and download staging buffer built in
-// they have transfer src/dst and are mapped and have a destruction queue
-// but you cannot access their device address, they are just for staging
-
-// the command buffer has access to an all-usages temp memory buffer
-// you can push data into that and it's available for that submit (replaces uniforms)
-// shaders take a single address for their data (e.g. in temp buffer)
-
-// there is also general buffer memory that is on device, but it's not mapped
-
-// context funcitions are thread safe (like create/destroy)
-// destroy is automatically deferred until safe
-
-// command buffers are not (generally) threadsafe (intended to be single thread used)
-
-// gpu buffers are handled via their device address
-// which can be translated on the backend to buffer + offset using e.g. a segment tree
-
-// all buffers (except the upload/download staging) support
-// storage, transfer src/dst, indirect, index
-
-// no vertex buffers (vertex pulling only)
-// we assume that there is something equivalent to gl_draw_id available for multidrawindirect
-
 pub const Window = *anyopaque;
+
+pub const GroupCreateInfo = struct {
+    name: [:0]const u8 = &.{},
+};
+
+pub const Group = struct {
+    info: struct {
+        name: [:0]const u8,
+    },
+};
 
 pub const TextureCreateInfo = struct {
     usage: TextureUsage,
@@ -42,10 +22,12 @@ pub const TextureCreateInfo = struct {
     size: [3]u32, // x, y, z or layer_count
     samples: SampleCount = .count_1,
     views: []const ViewCreateInfo = &.{},
+    group: ?*const Group = null,
     name: [:0]const u8 = &.{},
 };
 
 pub const Texture = struct {
+    group: *const Group,
     default_view: *const View,
     views: []const View,
 
@@ -64,12 +46,12 @@ pub const ViewCreateInfo = struct {
     view_type: ?ViewType = null,
     format: ?Format = null,
     swizzle: ViewSwizzle = .{},
-    range: ?ViewRange = null,
+    range: ?ViewRange,
     name: [:0]const u8 = &.{},
 };
 
 pub const View = struct {
-    device_address: u20,
+    device_address: u18,
     texture: *const Texture,
 
     info: struct {
@@ -77,6 +59,24 @@ pub const View = struct {
         format: Format,
         swizzle: ViewSwizzle,
         range: ViewRange,
+        name: [:0]const u8,
+    },
+};
+
+pub const BufferCreateInfo = struct {
+    usage: BufferUsage,
+    size: usize,
+    group: ?*const Group = null,
+    name: [:0]const u8 = &.{},
+};
+
+pub const Buffer = struct {
+    group: *const Group,
+    device_address: u64,
+
+    info: struct {
+        usage: BufferUsage,
+        size: usize,
         name: [:0]const u8,
     },
 };
@@ -115,6 +115,19 @@ pub const Sampler = struct {
     },
 };
 
+pub const ShaderCreateInfo = struct {
+    stage: Stage,
+    src: []const u8,
+    name: [:0]const u8 = &.{},
+};
+
+pub const Shader = struct {
+    info: struct {
+        stage: Stage,
+        name: [:0]const u8,
+    },
+};
+
 pub const GraphicsPipelineCreateInfo = struct {
     vertex_shader: *const Shader,
     fragment_shader: ?*const Shader,
@@ -140,11 +153,13 @@ pub const GraphicsPipeline = struct {
 
 pub const ComputePipelineCreateInfo = struct {
     shader: *const Shader,
+    local_size: [3]u32,
     name: [:0]const u8 = &.{},
 };
 
 pub const ComputePipeline = struct {
     info: struct {
+        local_size: [3]u32,
         name: [:0]const u8,
     },
 };
@@ -154,7 +169,6 @@ pub const SwapchainCreateInfo = struct {
     window: Window,
     present_mode: PresentMode = .fifo,
     composition: Composition = .sdr,
-    recreate: ?*Swapchain = null,
 };
 
 pub const Swapchain = struct {
@@ -165,20 +179,6 @@ pub const Swapchain = struct {
         size: [3]u32,
     },
 };
-
-pub const ShaderCreateInfo = struct {
-    stage: ShaderStage,
-    src: []const u8,
-    name: [:0]const u8 = &.{},
-};
-
-pub const Shader = struct {
-    info: struct {
-        stage: ShaderStage,
-        name: [:0]const u8,
-    },
-};
-
 pub const MultisampleState = struct {
     sample_count: SampleCount = .count_1,
     enable_alpha_to_coverage: bool = false,
@@ -197,6 +197,14 @@ pub const ColorWriteMask = struct {
     g: bool = true,
     b: bool = true,
     a: bool = true,
+};
+
+pub const BufferUsage = struct {
+    storage: bool = false,
+    transfer_src: bool = false,
+    transfer_dst: bool = false,
+    index: bool = false,
+    indirect: bool = false,
 };
 
 pub const BlendState = struct {
@@ -257,7 +265,7 @@ pub const CompareOp = enum {
     always,
 };
 
-pub const ShaderStage = enum { vertex, fragment, compute };
+pub const Stage = enum { vertex, fragment, compute };
 
 pub const PresentMode = enum {
     fifo,
@@ -348,8 +356,6 @@ pub const ViewType = enum {
     view_cube_array,
 };
 
-pub const Fence = enum(u64) { _ };
-
 pub const TextureRegion = struct {
     bounds: [2][3]u32,
     mip_level: u32,
@@ -374,6 +380,20 @@ pub const RenderingAttachment = struct {
     load_op: LoadOp,
     store_op: StoreOp,
     clear_value: ?ClearValue = null,
+};
+
+pub const RenderPassAccess = struct {
+    color_attachments: []const RenderingAttachment = &.{},
+    depth_attachment: ?RenderingAttachment = null,
+    stencil_attachment: ?RenderingAttachment = null,
+    vertex_read_groups: []const Group = &.{},
+    fragment_read_groups: []const Group = &.{},
+    fragment_write_groups: []const Group = &.{},
+};
+
+pub const ComputePassAccess = struct {
+    read_groups: []const Group = &.{},
+    write_groups: []const Group = &.{},
 };
 
 pub const ClearValue = union(enum) {
@@ -520,39 +540,7 @@ pub const DispatchIndirectCommand = extern struct {
     z: u32,
 };
 
-const Stage = struct {
-    transfer: bool = false,
-    indirect: bool = false,
-    compute: bool = false,
-    vertex: bool = false,
-    fragment: bool = false,
-
-    const all = .{
-        .transfer = true,
-        .indirect = true,
-        .compute = true,
-        .vertex = true,
-        .fragment = true,
-    };
-};
-
-const Access = struct {
-    read: bool = false,
-    write: bool = false,
-};
-
-const Layout = enum {
-    general,
-    attachment,
-    read_only,
-};
-
-const Scope = struct {
-    src_stages: Stage,
-    src_access: Access,
-    dst_stages: Stage,
-    dst_access: Access,
-};
+pub const Fence = enum(u64) { _ };
 
 pub const Context = struct {
     pub const Error = error{
@@ -570,12 +558,16 @@ pub const Context = struct {
         destroySwapchain: *const fn (*anyopaque, *const Swapchain) void,
         acquireSwapchain: *const fn (*anyopaque, *const Swapchain, u64) Error!void,
 
+        createGroup: *const fn (*anyopaque, GroupCreateInfo) Error!*const Group,
+        createBuffer: *const fn (*anyopaque, BufferCreateInfo) Error!*const Buffer,
         createTexture: *const fn (*anyopaque, TextureCreateInfo) Error!*const Texture,
         createSampler: *const fn (*anyopaque, SamplerCreateInfo) Error!*const Sampler,
         createShader: *const fn (*anyopaque, ShaderCreateInfo) Error!*const Shader,
         createGraphicsPipeline: *const fn (*anyopaque, GraphicsPipelineCreateInfo) Error!*const GraphicsPipeline,
         createComputePipeline: *const fn (*anyopaque, ComputePipelineCreateInfo) Error!*const ComputePipeline,
 
+        destroyGroup: *const fn (*anyopaque, *const Group) void,
+        destroyBuffer: *const fn (*anyopaque, *const Buffer) void,
         destroyTexture: *const fn (*anyopaque, *const Texture) void,
         destroySampler: *const fn (*anyopaque, *const Sampler) void,
         destroyShader: *const fn (*anyopaque, *const Shader) void,
@@ -583,15 +575,15 @@ pub const Context = struct {
         destroyComputePipeline: *const fn (*anyopaque, *const ComputePipeline) void,
 
         stagingAllocator: *const fn (*anyopaque, StagingAllocatorUsage) std.mem.Allocator,
-        alloc: *const fn (*anyopaque, u64) Error!u64, // size
-        free: *const fn (*anyopaque, u64) void, // device_address
-
         flush: *const fn (*anyopaque, []const u8) void, // for download staging allocator, call before reading, possibly a noop
 
         acquireCommandList: *const fn (*anyopaque) CommandList,
         submit: *const fn (*anyopaque, []const CommandList) Error!Fence,
 
         wait: *const fn (*anyopaque, Fence, u64) Error!void,
+
+        setBufferGroup: *const fn (*anyopaque, *const Buffer, ?*const Group) void,
+        setTextureGroup: *const fn (*anyopaque, *const Texture, ?*const Group) void,
 
         // some more things to consider
         // textureSupported
@@ -627,13 +619,6 @@ pub const Context = struct {
     pub fn stagingAllocator(ctx: Context, usage: StagingAllocatorUsage) std.mem.Allocator {
         return ctx.vtable.stagingAllocator(ctx.ptr, usage);
     }
-    pub fn alloc(ctx: Context, size: u64, alignment: u64) u64 {
-        std.debug.assert(std.math.isPowerOfTwo(alignment));
-        return ctx.vtable.alloc(ctx.ptr, size, alignment);
-    }
-    pub fn free(ctx: Context, device_address: u64) void {
-        return ctx.vtable.free(ctx.ptr, device_address);
-    }
 
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -647,18 +632,16 @@ pub const CommandList = struct {
     pub const VTable = struct {
         // in principle anything could fail (from e.g. out of memory when appending the command)
         // but such failures will just error on submit instead to make the handling easier
-        // device addresses are used to replace buffer ids and offsets
-        // they can be translated on the backend into buffer + offset (probably using like a segment tree)
 
         // copies to/from upload/download staging buffers (from a stagingAllocator)
         // (which are handled via mapped as []u8 cpu memory)
-        upload: *const fn (*anyopaque, []const u8, u64) void,
-        download: *const fn (*anyopaque, u64, []const u8) void,
+        bufferUpload: *const fn (*anyopaque, []const u8, *const Buffer, u64) void,
+        bufferDownload: *const fn (*anyopaque, *const Buffer, u64, []const u8) void,
         textureUpload: *const fn (*anyopaque, []const u8, *const Texture, TextureRegion) void,
         textureDownload: *const fn (*anyopaque, *const Texture, TextureRegion, []u8) void,
 
         // copies between gpu side buffers or textures
-        copy: *const fn (*anyopaque, u64, u64, u64) void, // src_dev_addr, dst_dev_addr, size
+        bufferCopy: *const fn (*anyopaque, *const Buffer, u64, *const Buffer, u64) void,
         textureCopy: *const fn (*anyopaque, *const Texture, *const Texture, TextureCopyRegion) void,
         blit: *const fn (*anyopaque, *const Texture, BlitRegion, *const Texture, BlitRegion, Filter) void,
 
@@ -670,22 +653,19 @@ pub const CommandList = struct {
         bindGraphicsPipeline: *const fn (*anyopaque, *const GraphicsPipeline, DynamicState) void,
         // takes a single gpu pointer for data (which could be in a buffer or from pushTmp)
         // we don't need to specify an instance buffer or offset, just use a device address
-        drawIndexed: *const fn (*anyopaque, u64, u64, u32, u32) void, // root_data index_dev_addr index_count instance_count
+        drawIndexed: *const fn (*anyopaque, u64, *const Buffer, u64, u32, u32) void, // root_data index_buffer & offset, index_count instance_count
         // note that we assume stride == @sizeOf(DrawIndexedIndirectCommand), a packed buffer
-        drawIndexedIndirect: *const fn (*anyopaque, u64, u64, u64, u32) void, // root_data, index_dev_addr, indirect_dev_addr, draw_count
-        drawIndexedIndirectCount: *const fn (*anyopaque, u64, u64, u64, u64, u32) void, // root_data, index_dev_addr, indirect_dev_addr, count_dev_addr, max_count
+        drawIndexedIndirect: *const fn (*anyopaque, u64, *const Buffer, u64, *const Buffer, u64, u32) void, // root_data, index_buffer & offset, indirect buffer & offset, draw_count
+        drawIndexedIndirectCount: *const fn (*anyopaque, u64, *const Buffer, u64, *const Buffer, u64, *const Buffer, u64, u32) void, // root_data, index_buffer & offset, indirect_buffer & offset, count buffer & offset, max_count
         endRenderPass: *const fn (*anyopaque) void,
 
         beginComputePass: *const fn (*anyopaque) void,
         bindComputePipeline: *const fn (*anyopaque, *const ComputePipeline) void,
         dispatch: *const fn (*anyopaque, u64, u32, u32, u32) void, // root_data x y z
-        dispatchIndirect: *const fn (*anyopaque, u64, u64) void, // root_data indirect_dev_addr
+        dispatchIndirect: *const fn (*anyopaque, u64, *const Buffer, u64) void, // root_data indirect_buffer & offset
         endComputePass: *const fn (*anyopaque) void,
 
         present: *const fn (*anyopaque, *const Texture, *const Swapchain) void,
-
-        barrier: *const fn (*anyopaque, Scope) void,
-        transition: *const fn (*anyopaque, Scope, *const Texture, Layout, bool) void, // bool is whether to discard contents
 
         // some more things to consider
         // debugLabel
