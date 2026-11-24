@@ -22,6 +22,7 @@ pub const TextureCreateInfo = struct {
     size: [3]u32, // x, y, z or layer_count
     samples: SampleCount = .count_1,
     views: []const ViewCreateInfo = &.{},
+    temporary: bool = false,
     group: ?*const Group = null,
     name: [:0]const u8 = &.{},
 };
@@ -64,8 +65,8 @@ pub const View = struct {
 };
 
 pub const BufferCreateInfo = struct {
-    usage: BufferUsage,
     size: usize,
+    temporary: bool = false,
     group: ?*const Group = null,
     name: [:0]const u8 = &.{},
 };
@@ -75,7 +76,6 @@ pub const Buffer = struct {
     device_address: u64,
 
     info: struct {
-        usage: BufferUsage,
         size: usize,
         name: [:0]const u8,
     },
@@ -197,14 +197,6 @@ pub const ColorWriteMask = struct {
     g: bool = true,
     b: bool = true,
     a: bool = true,
-};
-
-pub const BufferUsage = struct {
-    storage: bool = false,
-    transfer_src: bool = false,
-    transfer_dst: bool = false,
-    index: bool = false,
-    indirect: bool = false,
 };
 
 pub const BlendState = struct {
@@ -556,7 +548,7 @@ pub const Context = struct {
     pub const VTable = struct {
         createSwapchain: *const fn (*anyopaque, SwapchainCreateInfo, ?*const Swapchain) Error!*const Swapchain,
         destroySwapchain: *const fn (*anyopaque, *const Swapchain) void,
-        acquireSwapchain: *const fn (*anyopaque, *const Swapchain, u64) Error!void,
+        acquireSwapchain: *const fn (*anyopaque, *const Swapchain, u64) Error!bool,
 
         createGroup: *const fn (*anyopaque, GroupCreateInfo) Error!*const Group,
         createBuffer: *const fn (*anyopaque, BufferCreateInfo) Error!*const Buffer,
@@ -589,8 +581,8 @@ pub const Context = struct {
         // textureSupported
     };
 
-    pub fn createSwapchain(ctx: Context, create_info: SwapchainCreateInfo) Error!*const Swapchain {
-        return ctx.vtable.createSwapchain(ctx.ptr, create_info);
+    pub fn createSwapchain(ctx: Context, create_info: SwapchainCreateInfo, recreate: ?*const Swapchain) Error!*const Swapchain {
+        return ctx.vtable.createSwapchain(ctx.ptr, create_info, recreate);
     }
     pub fn destroySwapchain(ctx: Context, swapchain: *const Swapchain) void {
         ctx.vtable.destroySwapchain(ctx.ptr, swapchain);
@@ -636,12 +628,12 @@ pub const CommandList = struct {
         // copies to/from upload/download staging buffers (from a stagingAllocator)
         // (which are handled via mapped as []u8 cpu memory)
         bufferUpload: *const fn (*anyopaque, []const u8, *const Buffer, u64) void,
-        bufferDownload: *const fn (*anyopaque, *const Buffer, u64, []const u8) void,
+        bufferDownload: *const fn (*anyopaque, *const Buffer, u64, []u8) void,
         textureUpload: *const fn (*anyopaque, []const u8, *const Texture, TextureRegion) void,
         textureDownload: *const fn (*anyopaque, *const Texture, TextureRegion, []u8) void,
 
         // copies between gpu side buffers or textures
-        bufferCopy: *const fn (*anyopaque, *const Buffer, u64, *const Buffer, u64) void,
+        bufferCopy: *const fn (*anyopaque, *const Buffer, u64, *const Buffer, u64, u64) void,
         textureCopy: *const fn (*anyopaque, *const Texture, *const Texture, TextureCopyRegion) void,
         blit: *const fn (*anyopaque, *const Texture, BlitRegion, *const Texture, BlitRegion, Filter) void,
 

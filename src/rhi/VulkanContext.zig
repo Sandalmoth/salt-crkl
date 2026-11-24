@@ -2,11 +2,14 @@ const std = @import("std");
 pub const vk = @import("vulkan");
 
 const rhi = @import("root.zig");
-const allocators = @import("allocators.zig");
 
 const log = std.log.scoped(.rhi_vulkan);
 
 const Context = @This();
+
+const SlotPool = @import("SlotPool.zig");
+const OffsetAllocator = @import("OffsetAllocator.zig").Allocator;
+const OffsetAllocation = @import("OffsetAllocator.zig").Allocation;
 
 pub const PlatformError = error{Platform};
 pub const Platform = struct {
@@ -91,23 +94,46 @@ const vtable: rhi.Context.VTable = .{
     .createSwapchain = undefined,
     .destroySwapchain = undefined,
     .acquireSwapchain = undefined,
+    .createGroup = undefined,
+    .createBuffer = undefined,
     .createTexture = undefined,
     .createSampler = undefined,
     .createShader = undefined,
     .createGraphicsPipeline = undefined,
     .createComputePipeline = undefined,
+    .destroyBuffer = undefined,
+    .destroyGroup = undefined,
     .destroyTexture = undefined,
     .destroySampler = undefined,
     .destroyShader = undefined,
     .destroyGraphicsPipeline = undefined,
     .destroyComputePipeline = undefined,
     .stagingAllocator = undefined,
-    .alloc = undefined,
-    .free = undefined,
     .flush = undefined,
     .acquireCommandList = undefined,
     .submit = undefined,
     .wait = undefined,
+    .setBufferGroup = undefined,
+    .setTextureGroup = undefined,
+};
+
+const Buffer = struct {
+    public: rhi.Buffer,
+    slab: *BufferAllocator.Slab,
+    allocation: OffsetAllocation,
+
+    fn vulkan(buffer: *Buffer) struct { buffer: vk.Buffer, offset: u64 } {
+        return .{
+            .buffer = buffer.slab.buffer,
+            .offset = buffer.allocation.offset * BufferAllocator.Slab.granularity,
+        };
+    }
+};
+
+const Group = struct {
+    public: rhi.Group,
+    managed: bool,
+    buffer_count: u32 = 0,
 };
 
 gpa: std.mem.Allocator,
@@ -133,10 +159,11 @@ pipeline_layout: vk.PipelineLayout,
 descriptor_pool: vk.DescriptorPool,
 descriptor_set: vk.DescriptorSet,
 
-buffer_allocator: allocators.BufferAllocator,
-texture_allocator: allocators.TextureAllocator,
-upload_allocator: allocators.StagingAllocator,
-download_allocator: allocators.StagingAllocator,
+group_pool: std.heap.MemoryPool(Group),
+buffer_allocator: BufferAllocator,
+// texture_allocator: allocators.TextureAllocator,
+// upload_allocator: allocators.StagingAllocator,
+// download_allocator: allocators.StagingAllocator,
 
 pub fn init(
     gpa: std.mem.Allocator,
@@ -164,11 +191,6 @@ pub fn init(
     errdefer ctx.deinitDevice();
     try ctx.initPipelineLayout();
     errdefer ctx.deinitPipelineLayout();
-    // const physical_device_candidate = try ctx.pickPhysicalDevice(arena, config, window);
-    // try ctx.initDevice(arena, physical_device_candidate);
-    // errdefer ctx.deinitDevice();
-    // try ctx.initPipelineLayout();
-    // errdefer ctx.deinitPipelineLayout();
 
     // ctx.command_pool_depots = .initFill(.init(gpa));
     // ctx.acquire_semaphore_depot = .init(gpa);
@@ -183,9 +205,13 @@ pub fn init(
     // ctx.download_allocator = try .init(ctx, .download);
     // errdefer ctx.download_allocator.deinit();
 
+    ctx.group_pool = .empty;
     ctx.buffer_allocator = try .init(ctx);
-    std.debug.print("{}\n", .{try ctx.buffer_allocator.alloc(123, 0)});
-    std.debug.print("{}\n", .{try ctx.buffer_allocator.alloc(456, 0)});
+
+    const buffer = try ctx.buffer_allocator.create(.{
+        .size = 123,
+    });
+    std.debug.print("{}\n", .{buffer.*});
 
     return .{
         .ptr = ctx,
@@ -201,18 +227,13 @@ pub fn deinit(rhi_ctx: rhi.Context) void {
     };
 
     ctx.buffer_allocator.deinit();
+    ctx.group_pool.deinit(ctx.gpa);
 
     ctx.deinitPipelineLayout();
     ctx.deinitDevice();
     ctx.deinitInstance();
 
     ctx.gpa.destroy(ctx);
-}
-
-fn alloc(ptr: *anyopaque, size: u64) rhi.Context.Error!u64 {
-    const ctx: *Context = @ptrCast(@alignCast(ptr));
-    const semaphore_value = try ctx.device.getSemaphoreCounterValue(ctx.graphics_queue.semaphore);
-    return ctx.buffer_allocator.alloc(size, semaphore_value);
 }
 
 fn initInstance(
@@ -745,3 +766,213 @@ fn deinitPipelineLayout(ctx: *Context) void {
     ctx.device.destroyPipelineLayout(ctx.pipeline_layout, null);
     ctx.device.destroyDescriptorSetLayout(ctx.descriptor_set_layout, null);
 }
+
+const BufferAllocator = struct {
+    const Slab = struct {
+        const slab_size = 256 * 1024 * 1024;
+        const granularity = 64;
+
+        allocator: OffsetAllocator,
+        memory: vk.DeviceMemory,
+        buffer: vk.Buffer,
+        device_address: u64,
+    };
+
+    const Deferred = struct {
+        semaphore_value: u64,
+        buffer: *Buffer,
+    };
+
+    ctx: *Context,
+    pool: std.heap.MemoryPool(Buffer),
+    slabs: std.ArrayList(Slab),
+    queue: std.ArrayList(Deferred),
+    counter: u32,
+
+    fn init(ctx: *Context) !BufferAllocator {
+        return .{
+            .ctx = ctx,
+            .pool = .empty,
+            .slabs = .empty,
+            .queue = .empty,
+            .counter = 0,
+        };
+    }
+
+    fn deinit(alloc: *BufferAllocator) void {
+        // TODO add some debug printing if we haven't freed everything?
+        alloc.pool.deinit(alloc.ctx.gpa);
+        alloc.queue.deinit(alloc.ctx.gpa);
+        for (alloc.slabs.items) |*slab| {
+            alloc.ctx.device.destroyBuffer(slab.buffer, null);
+            alloc.ctx.device.freeMemory(slab.memory, null);
+            slab.allocator.deinit(alloc.ctx.gpa);
+        }
+        alloc.slabs.deinit(alloc.ctx.gpa);
+        alloc.* = undefined;
+    }
+
+    fn create(alloc: *BufferAllocator, create_info: rhi.BufferCreateInfo) !*Buffer {
+        if (create_info.temporary) log.debug("BufferCreateInfo.temporary not implemented yet", .{});
+        if (create_info.size > Slab.slab_size) return error.OutOfMemory;
+
+        const granule_size: u32 = @intCast(
+            (create_info.size + Slab.granularity - 1) / Slab.granularity,
+        );
+
+        // ensure that we have a spot for this allocation in the deferred destruction queue
+        try alloc.queue.ensureUnusedCapacity(alloc.ctx.gpa, alloc.counter + 1);
+
+        const buffer = try alloc.pool.create(alloc.ctx.gpa);
+        errdefer alloc.pool.destroy(buffer);
+        const group = try alloc.ctx.group_pool.create(alloc.ctx.gpa);
+        group.* = .{
+            .public = .{ .info = .{ .name = &.{} } },
+            .managed = true,
+        };
+        errdefer alloc.ctx.group_pool.destroy(group);
+
+        for (alloc.slabs.items) |*slab| {
+            const allocation = slab.allocator.allocate(granule_size) catch continue;
+            buffer.* = .{
+                .public = .{
+                    .group = &group.public, // TODO FIXME
+                    .device_address = slab.device_address + allocation.offset * Slab.granularity,
+                    .info = .{
+                        .size = create_info.size,
+                        .name = create_info.name,
+                    },
+                },
+                .slab = slab,
+                .allocation = allocation,
+            };
+            alloc.counter += 1;
+            return buffer;
+        }
+
+        // no allocation possible with extant slabs, make a new one
+        try alloc.addSlab();
+        alloc.pool.destroy(buffer); // will be created again in the recursive call, so don't leak
+        return alloc.create(create_info);
+    }
+
+    /// semaphore_value should be the value when the final use is done
+    fn queueDestroy(
+        alloc: *BufferAllocator,
+        buffer: *Buffer,
+        semaphore_value: u64,
+    ) void {
+        alloc.queue.appendAssumeCapacity(.{
+            .semaphore_value = semaphore_value,
+            .buffer = buffer,
+        });
+    }
+
+    /// semaphore_value should be the current value of the semaphore
+    fn sweep(alloc: *BufferAllocator, semaphore_value: u64) !void {
+        var i = alloc.queue.items.len;
+        while (i > 0) {
+            if (semaphore_value >= alloc.queue.items[i - 1].semaphore_value) {
+                const buffer = alloc.queue.items[i - 1].buffer;
+                buffer.slab.allocator.free(buffer.allocation);
+                alloc.pool.destroy(buffer);
+                alloc.counter -= 1;
+            } else {
+                i -= 1;
+            }
+        }
+    }
+
+    fn addSlab(allocator: *BufferAllocator) !void {
+        // TODO ensure that the slab size is within supported limits
+        const buffer_info: vk.BufferCreateInfo = .{
+            .size = Slab.slab_size,
+            .flags = .{ .device_address_capture_replay = allocator.ctx.config.enable_debug },
+            .usage = .{
+                .transfer_src = true,
+                .transfer_dst = true,
+                .storage_buffer = true,
+                .index_buffer = true,
+                .indirect_buffer = true,
+                .shader_device_address = true,
+            },
+            .sharing_mode = .exclusive,
+            .p_queue_family_indices = @ptrCast(&allocator.ctx.graphics_queue.family),
+            .queue_family_index_count = 1,
+        };
+        const device_buffer = try allocator.ctx.device.createBuffer(&buffer_info, null);
+        errdefer allocator.ctx.device.destroyBuffer(device_buffer, null);
+
+        var dedicated_memreq: vk.MemoryDedicatedRequirements = .{
+            .prefers_dedicated_allocation = .false,
+            .requires_dedicated_allocation = .false,
+        };
+        var buffer_memreq: vk.MemoryRequirements2 = .{
+            .p_next = &dedicated_memreq,
+            .memory_requirements = undefined,
+        };
+        allocator.ctx.device.getBufferMemoryRequirements2(&.{
+            .buffer = device_buffer,
+        }, &buffer_memreq);
+        buffer_memreq.memory_requirements.alignment = @max(
+            buffer_memreq.memory_requirements.alignment,
+            Slab.granularity,
+        );
+
+        var memory_type_index: u32 = undefined;
+        var best_score: i32 = -999999;
+
+        const memory_types = allocator.ctx.physical_device_memory_properties.memory_types;
+        const memory_type_count = allocator.ctx.physical_device_memory_properties.memory_type_count;
+        for (memory_types[0..memory_type_count], 0..) |memory_type, i| {
+            // hard requirements
+            if (buffer_memreq.memory_requirements.memory_type_bits &
+                (@as(u32, 1) << @intCast(i)) == 0) continue;
+            // soft requirements
+            var score: i32 = 0;
+            if (memory_type.property_flags.device_local) score += 1;
+            if (score > best_score) {
+                best_score = score;
+                memory_type_index = @intCast(i);
+            }
+        }
+        std.debug.assert(best_score != -999999);
+
+        // dedicated allocation
+        const dedicated_info: vk.MemoryDedicatedAllocateInfo = .{
+            .buffer = device_buffer,
+        };
+        const alloc_flags: vk.MemoryAllocateFlagsInfo = .{
+            .device_mask = 0,
+            .p_next = &dedicated_info,
+            .flags = .{
+                .device_address = true,
+                .device_address_capture_replay = allocator.ctx.config.enable_debug,
+            },
+        };
+        const memory = try allocator.ctx.device.allocateMemory(&.{
+            .allocation_size = buffer_memreq.memory_requirements.size,
+            .memory_type_index = memory_type_index,
+            .p_next = &alloc_flags,
+        }, null);
+        errdefer allocator.ctx.device.freeMemory(memory, null);
+        try allocator.ctx.device.bindBufferMemory(device_buffer, memory, 0);
+
+        const device_address = allocator.ctx.device.getBufferDeviceAddress(&.{
+            .buffer = device_buffer,
+        });
+
+        const slab = try allocator.slabs.addOne(allocator.ctx.gpa);
+        errdefer _ = allocator.slabs.pop();
+        slab.* = .{
+            .memory = memory,
+            .allocator = try .init(
+                allocator.ctx.gpa,
+                Slab.slab_size / Slab.granularity,
+                Slab.slab_size / Slab.granularity,
+            ),
+            .buffer = device_buffer,
+            .device_address = device_address,
+        };
+    }
+};

@@ -6,10 +6,11 @@ const allocators = @import("allocators.zig");
 
 const log = std.log.scoped(.rhi_vulkan_buffer_allocator);
 
+const MemoryPool = std.heap.MemoryPool;
 const Context = @import("VulkanContext.zig");
 const SlotPool = @import("SlotPool.zig");
 const OffsetAllocator = @import("OffsetAllocator.zig").Allocator;
-const OffsetAllocation = @import("OffsetAllocator.zig").Allocation;
+pub const OffsetAllocation = @import("OffsetAllocator.zig").Allocation;
 
 pub const BufferAllocator = struct {
     const Slab = struct {
