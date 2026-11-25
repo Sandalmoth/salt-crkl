@@ -567,7 +567,7 @@ pub const Context = struct {
         destroyComputePipeline: *const fn (*anyopaque, *const ComputePipeline) void,
 
         stagingAllocator: *const fn (*anyopaque, StagingAllocatorUsage) std.mem.Allocator,
-        flush: *const fn (*anyopaque, []const u8) void, // for download staging allocator, call before reading, possibly a noop
+        invalidate: *const fn (*anyopaque, []const u8) void, // for download staging allocator, call before reading, possibly a noop
 
         acquireCommandList: *const fn (*anyopaque) CommandList,
         submit: *const fn (*anyopaque, []const CommandList) Error!Fence,

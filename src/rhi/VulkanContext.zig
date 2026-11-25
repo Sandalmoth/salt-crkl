@@ -109,7 +109,7 @@ const vtable: rhi.Context.VTable = .{
     .destroyGraphicsPipeline = undefined,
     .destroyComputePipeline = undefined,
     .stagingAllocator = undefined,
-    .flush = undefined,
+    .invalidate = undefined,
     .acquireCommandList = undefined,
     .submit = undefined,
     .wait = undefined,
@@ -162,8 +162,8 @@ descriptor_set: vk.DescriptorSet,
 group_pool: std.heap.MemoryPool(Group),
 buffer_allocator: BufferAllocator,
 // texture_allocator: allocators.TextureAllocator,
-// upload_allocator: allocators.StagingAllocator,
-// download_allocator: allocators.StagingAllocator,
+upload_allocator: StagingAllocator,
+download_allocator: StagingAllocator,
 
 pub fn init(
     gpa: std.mem.Allocator,
@@ -207,6 +207,11 @@ pub fn init(
 
     ctx.group_pool = .empty;
     ctx.buffer_allocator = try .init(ctx);
+    errdefer ctx.buffer_allocator.deinit();
+    ctx.upload_allocator = try .init(ctx, .upload);
+    errdefer ctx.upload_allocator.deinit();
+    ctx.download_allocator = try .init(ctx, .download);
+    errdefer ctx.download_allocator.deinit();
 
     const buffer = try ctx.buffer_allocator.create(.{
         .size = 123,
@@ -226,6 +231,8 @@ pub fn deinit(rhi_ctx: rhi.Context) void {
         log.warn("Failed deviceWaitIdle in deinit: {}", .{e});
     };
 
+    ctx.download_allocator.deinit();
+    ctx.upload_allocator.deinit();
     ctx.buffer_allocator.deinit();
     ctx.group_pool.deinit(ctx.gpa);
 
@@ -829,6 +836,7 @@ const BufferAllocator = struct {
         group.* = .{
             .public = .{ .info = .{ .name = &.{} } },
             .managed = true,
+            .buffer_count = 1,
         };
         errdefer alloc.ctx.group_pool.destroy(group);
 
@@ -903,6 +911,14 @@ const BufferAllocator = struct {
         const device_buffer = try allocator.ctx.device.createBuffer(&buffer_info, null);
         errdefer allocator.ctx.device.destroyBuffer(device_buffer, null);
 
+        if (allocator.ctx.config.enable_debug) {
+            try allocator.ctx.device.setDebugUtilsObjectNameEXT(&.{
+                .object_type = .buffer,
+                .object_handle = @backingInt(device_buffer),
+                .p_object_name = "BUFFER_ALLOCATOR_SLAB",
+            });
+        }
+
         var dedicated_memreq: vk.MemoryDedicatedRequirements = .{
             .prefers_dedicated_allocation = .false,
             .requires_dedicated_allocation = .false,
@@ -974,5 +990,181 @@ const BufferAllocator = struct {
             .buffer = device_buffer,
             .device_address = device_address,
         };
+    }
+};
+
+const StagingAllocator = struct {
+    const min_granularity = 64;
+
+    ctx: *Context,
+    granularity: usize,
+    memory: vk.DeviceMemory,
+    mapped_memory: []u8,
+    buffer: vk.Buffer,
+    allocator: OffsetAllocator,
+    allocations: []OffsetAllocation,
+
+    fn init(ctx: *Context, usage: rhi.StagingAllocatorUsage) !StagingAllocator {
+        const granularity = @max(
+            switch (usage) {
+                .upload => 1,
+                .download => ctx.physical_device_properties.limits.non_coherent_atom_size,
+            },
+            ctx.physical_device_properties.limits.optimal_buffer_copy_offset_alignment,
+            min_granularity,
+        );
+        const size = switch (usage) {
+            .upload => ctx.config.upload_staging_size,
+            .download => ctx.config.download_staging_size,
+        };
+        const granule_size: u32 = @intCast((size + granularity - 1) / granularity);
+
+        const buffer = try ctx.device.createBuffer(&.{
+            .size = size,
+            .usage = .{
+                .transfer_src = usage == .upload,
+                .transfer_dst = usage == .download,
+            },
+            .sharing_mode = .exclusive,
+            .p_queue_family_indices = @ptrCast(&ctx.graphics_queue.family),
+            .queue_family_index_count = 1,
+        }, null);
+        errdefer ctx.device.destroyBuffer(buffer, null);
+
+        if (ctx.config.enable_debug) {
+            try ctx.device.setDebugUtilsObjectNameEXT(&.{
+                .object_type = .buffer,
+                .object_handle = @backingInt(buffer),
+                .p_object_name = switch (usage) {
+                    .upload => "UPLOAD_STAGING_BUFFER",
+                    .download => "DOWNLOAD_STAGING_BUFFER",
+                },
+            });
+        }
+
+        var buffer_memreq = ctx.device.getBufferMemoryRequirements(buffer);
+        buffer_memreq.alignment = @max(buffer_memreq.alignment, granularity);
+
+        var memory_type_index: u32 = undefined;
+        var best_score: i32 = -999999;
+
+        const memory_types = ctx.physical_device_memory_properties.memory_types;
+        const memory_type_count = ctx.physical_device_memory_properties.memory_type_count;
+        for (memory_types[0..memory_type_count], 0..) |memory_type, i| {
+            // hard requirements
+            if (buffer_memreq.memory_type_bits &
+                (@as(u32, 1) << @intCast(i)) == 0) continue;
+            if (!memory_type.property_flags.host_visible) continue;
+            if (usage == .upload and !memory_type.property_flags.host_coherent) continue;
+            // soft requirements
+            var score: i32 = 0;
+            if (memory_type.property_flags.device_local) score -= 1;
+            if (usage == .download and memory_type.property_flags.host_coherent) score += 2;
+            if (usage == .download and memory_type.property_flags.host_cached) score += 4;
+            if (score > best_score) {
+                best_score = score;
+                memory_type_index = @intCast(i);
+            }
+        }
+        if (best_score == -999999) {
+            log.err("{} StagingAllocator memory type unsupported", .{usage});
+            return error.Unsupported;
+        }
+
+        const memory = try ctx.device.allocateMemory(&.{
+            .allocation_size = size,
+            .memory_type_index = memory_type_index,
+        }, null);
+        errdefer ctx.device.freeMemory(memory, null);
+
+        try ctx.device.bindBufferMemory(buffer, memory, 0);
+        const buffer_ptr: [*]u8 = @ptrCast((try ctx.device.mapMemory(memory, 0, size, .{})).?);
+
+        const allocations = try ctx.gpa.alloc(OffsetAllocation, granule_size);
+        errdefer ctx.gpa.free(allocations);
+
+        return .{
+            .ctx = ctx,
+            .mapped_memory = buffer_ptr[0..size],
+            .memory = memory,
+            .buffer = buffer,
+            .allocator = try .init(
+                ctx.gpa,
+                @intCast(size / granularity),
+                @intCast(size / granularity),
+            ),
+            .allocations = allocations,
+            .granularity = granularity,
+        };
+    }
+
+    fn deinit(allocator: *StagingAllocator) void {
+        allocator.ctx.device.destroyBuffer(allocator.buffer, null);
+        allocator.ctx.device.freeMemory(allocator.memory, null);
+        allocator.allocator.deinit(allocator.ctx.gpa);
+        allocator.ctx.gpa.free(allocator.allocations);
+        allocator.* = undefined;
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const allocator: *StagingAllocator = @ptrCast(@alignCast(ctx));
+        _ = ret_addr;
+
+        const granule_size: u32 = @intCast((len + allocator.granularity - 1) / allocator.granularity);
+
+        if (alignment.toByteUnits() > allocator.granularity) {
+            log.info("TODO: implement large alignment", .{});
+            return null;
+        }
+        const allocation = allocator.allocator.allocate(granule_size) catch return null;
+        const slot = allocation.offset;
+        allocator.allocations[slot] = allocation;
+
+        return allocator.mapped_memory[allocation.offset * allocator.granularity .. allocation.offset * allocator.granularity + len].ptr;
+    }
+
+    fn resize(
+        ctx: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) bool {
+        const allocator: *StagingAllocator = @ptrCast(@alignCast(ctx));
+        _ = allocator;
+        _ = memory;
+        _ = alignment;
+        _ = new_len;
+        _ = ret_addr;
+        log.info("TODO: implement resize", .{});
+        return false;
+    }
+
+    fn remap(
+        ctx: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const allocator: *StagingAllocator = @ptrCast(@alignCast(ctx));
+        _ = allocator;
+        _ = memory;
+        _ = alignment;
+        _ = new_len;
+        _ = ret_addr;
+        log.info("TODO: implement remap", .{});
+        return null;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const allocator: *StagingAllocator = @ptrCast(@alignCast(ctx));
+        const allocation = allocator.allocations[
+            (@intFromPtr(memory.ptr) - @intFromPtr(allocator.mapped_memory.ptr)) / allocator.granularity
+        ];
+        allocator.allocator.free(allocation);
+
+        _ = alignment;
+        _ = ret_addr;
     }
 };
