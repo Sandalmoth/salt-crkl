@@ -18,7 +18,7 @@ pub const TextureCreateInfo = struct {
     usage: TextureUsage,
     format: Format,
     texture_type: TextureType,
-    mip_levels: u32,
+    mip_levels: u32 = 1,
     size: [3]u32, // x, y, z or layer_count
     samples: SampleCount = .count_1,
     views: []const ViewCreateInfo = &.{},
@@ -310,6 +310,7 @@ pub const SampleCount = enum {
     count_2,
     count_4,
     count_8,
+    count_16,
 };
 
 pub const Aspect = enum {

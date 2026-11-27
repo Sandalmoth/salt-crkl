@@ -91,9 +91,9 @@ const device_features_1_3 = vk.PhysicalDeviceVulkan13Features{
 };
 
 const vtable: rhi.Context.VTable = .{
-    .createSwapchain = undefined,
-    .destroySwapchain = undefined,
-    .acquireSwapchain = undefined,
+    .createSwapchain = createSwapchain,
+    .destroySwapchain = destroySwapchain,
+    .acquireSwapchain = acquireSwapchain,
     .createGroup = undefined,
     .createBuffer = undefined,
     .createTexture = undefined,
@@ -130,10 +130,45 @@ const Buffer = struct {
     }
 };
 
+const Texture = struct {
+    public: rhi.Texture,
+    image: vk.Image,
+    memory: union(enum) {
+        slab: struct {
+            allocation: OffsetAllocation,
+            slab: *TextureAllocator.Slab,
+        },
+        dedicated: vk.DeviceMemory,
+    },
+};
+
+const View = struct {
+    public: rhi.View,
+    view: vk.ImageView,
+};
+
 const Group = struct {
     public: rhi.Group,
     managed: bool,
     buffer_count: u32 = 0,
+};
+
+const Swapchain = struct {
+    public: rhi.Swapchain,
+    acquired: bool,
+    window: rhi.Window,
+    surface: vk.SurfaceKHR,
+    swapchain: vk.SwapchainKHR,
+    images: []vk.Image,
+    views: []vk.ImageView,
+    release_semaphores: []vk.Semaphore,
+    image_index: ?u32,
+    acquire_semaphore: vk.Semaphore,
+};
+
+const CommandPool = struct {
+    pool: vk.CommandPool,
+    buffer: vk.CommandBuffer,
 };
 
 gpa: std.mem.Allocator,
@@ -159,9 +194,13 @@ pipeline_layout: vk.PipelineLayout,
 descriptor_pool: vk.DescriptorPool,
 descriptor_set: vk.DescriptorSet,
 
+graphics_command_depot: Depot(CommandPool),
+present_command_depot: Depot(CommandPool),
+acquire_semaphore_depot: Depot(vk.Semaphore),
+
 group_pool: std.heap.MemoryPool(Group),
 buffer_allocator: BufferAllocator,
-// texture_allocator: allocators.TextureAllocator,
+texture_allocator: TextureAllocator,
 upload_allocator: StagingAllocator,
 download_allocator: StagingAllocator,
 
@@ -192,31 +231,19 @@ pub fn init(
     try ctx.initPipelineLayout();
     errdefer ctx.deinitPipelineLayout();
 
-    // ctx.command_pool_depots = .initFill(.init(gpa));
-    // ctx.acquire_semaphore_depot = .init(gpa);
-
-    // // TODO init all allocators
-    // ctx.texture_allocator = try .init(ctx);
-    // errdefer ctx.texture_allocator.deinit();
-    // ctx.buffer_allocator = try .init(ctx);
-    // errdefer ctx.buffer_allocator.deinit();
-    // ctx.upload_allocator = try .init(ctx, .upload);
-    // errdefer ctx.upload_allocator.deinit();
-    // ctx.download_allocator = try .init(ctx, .download);
-    // errdefer ctx.download_allocator.deinit();
+    ctx.graphics_command_pool_depot = .init(gpa);
+    ctx.present_command_pool_depot = .init(gpa);
+    ctx.acquire_semaphore_depot = .init(gpa);
 
     ctx.group_pool = .empty;
     ctx.buffer_allocator = try .init(ctx);
     errdefer ctx.buffer_allocator.deinit();
+    ctx.texture_allocator = try .init(ctx);
+    errdefer ctx.texture_allocator.deinit();
     ctx.upload_allocator = try .init(ctx, .upload);
     errdefer ctx.upload_allocator.deinit();
     ctx.download_allocator = try .init(ctx, .download);
     errdefer ctx.download_allocator.deinit();
-
-    const buffer = try ctx.buffer_allocator.create(.{
-        .size = 123,
-    });
-    std.debug.print("{}\n", .{buffer.*});
 
     return .{
         .ptr = ctx,
@@ -231,8 +258,13 @@ pub fn deinit(rhi_ctx: rhi.Context) void {
         log.warn("Failed deviceWaitIdle in deinit: {}", .{e});
     };
 
+    ctx.graphics_command_depot.deinit();
+    ctx.present_command_depot.deinit();
+    ctx.acquire_semaphore_depot.deinit();
+
     ctx.download_allocator.deinit();
     ctx.upload_allocator.deinit();
+    ctx.texture_allocator.deinit();
     ctx.buffer_allocator.deinit();
     ctx.group_pool.deinit(ctx.gpa);
 
@@ -241,6 +273,115 @@ pub fn deinit(rhi_ctx: rhi.Context) void {
     ctx.deinitInstance();
 
     ctx.gpa.destroy(ctx);
+}
+
+fn createSwapchain(
+    ptr: *anyopaque,
+    create_info: rhi.SwapchainCreateInfo,
+) rhi.Context.Error!*const rhi.Swapchain {
+    const ctx: *Context = @ptrCast(@alignCast(ptr));
+    const swapchain: *Swapchain = try ctx.swapchain_pool.create(ctx.gpa);
+
+    const surface = try ctx.platform.createWindowSurface(ctx.instance.handle, create_info.window);
+    errdefer ctx.instance.destroySurfaceKHR(surface, null);
+
+    swapchain.* = Swapchain{
+        .public = .{ .info = .{
+            .name = create_info.name,
+            .composition = .sdr,
+            .present_mode = .fifo,
+            .size = .{ 0, 0, 0 },
+        } },
+        .acquired = false,
+        .surface = surface,
+        .window = create_info.window,
+        .swapchain = .null,
+        .images = &.{},
+        .views = &.{},
+        .release_semaphores = &.{},
+        .image_index = null,
+        .acquire_semaphore = .null,
+    };
+
+    return &swapchain.public;
+}
+
+fn destroySwapchain(ptr: *anyopaque, rhi_swapchain: *const rhi.Swapchain) void {
+    const ctx: *Context = @ptrCast(@alignCast(ptr));
+    const swapchain: *Swapchain = @alignCast(@constCast(
+        @fieldParentPtr("public", rhi_swapchain),
+    ));
+
+    // needs idle to make sure it's not in use since we can't wait on present
+    ctx.device.deviceWaitIdle() catch |e| {
+        log.warn("Failed deviceWaitIdle in destroySwapchain: {}", .{e});
+    };
+
+    if (swapchain.swapchain != .null) {
+        for (0..swapchain.images.len) |i| {
+            ctx.device.destroySemaphore(swapchain.release_semaphores[i], null);
+            ctx.device.destroyImageView(swapchain.views[i], null);
+        }
+        ctx.device.destroySwapchainKHR(swapchain.swapchain, null);
+        ctx.gpa.free(swapchain.release_semaphores);
+        ctx.gpa.free(swapchain.views);
+        ctx.gpa.free(swapchain.images);
+    }
+
+    ctx.instance.destroySurfaceKHR(swapchain.surface, null);
+
+    ctx.swapchain_pool.destroy(swapchain);
+}
+
+fn acquireSwapchain(
+    ptr: *anyopaque,
+    rhi_swapchain: *const rhi.Swapchain,
+    timeout: u64,
+) rhi.Context.Error!bool {
+    const ctx: *Context = @ptrCast(@alignCast(ptr));
+    const swapchain: *Swapchain = @alignCast(@constCast(
+        @fieldParentPtr("public", rhi_swapchain),
+    ));
+
+    std.debug.assert(!swapchain.acquired);
+
+    if (swapchain.swapchain == .null) {
+        try ctx.recreateSwapchain(swapchain);
+    }
+
+    const acquire_semaphore = ctx.acquire_semaphore_depot.pop(
+        try ctx.device.getSemaphoreCounterValue(ctx.queues.get(.present).semaphore),
+    ) orelse
+        ctx.device.createSemaphore(&.{}, null) catch return false;
+    // FIXME if we return early, this needs to be pushed
+
+    const result = ctx.device.acquireNextImageKHR(
+        swapchain.swapchain,
+        timeout,
+        acquire_semaphore,
+        .null,
+    ) catch |e| switch (e) {
+        error.OutOfDateKHR => vk.DeviceWrapper.AcquireNextImageKHRResult{
+            .result = .error_out_of_date_khr,
+            .image_index = undefined,
+        },
+        else => return e,
+    };
+    switch (result.result) {
+        .success => {
+            swapchain.acquired = true;
+            swapchain.image_index = result.image_index;
+            swapchain.acquire_semaphore = acquire_semaphore;
+        },
+        .timeout => {},
+        .not_ready => {},
+        .suboptimal_khr, .error_out_of_date_khr => {
+            try ctx.recreateSwapchain(swapchain);
+        },
+        else => unreachable,
+    }
+
+    return swapchain.acquired;
 }
 
 fn initInstance(
@@ -832,6 +973,7 @@ const BufferAllocator = struct {
 
         const buffer = try alloc.pool.create(alloc.ctx.gpa);
         errdefer alloc.pool.destroy(buffer);
+        // TODO group in create info
         const group = try alloc.ctx.group_pool.create(alloc.ctx.gpa);
         group.* = .{
             .public = .{ .info = .{ .name = &.{} } },
@@ -885,9 +1027,9 @@ const BufferAllocator = struct {
                 buffer.slab.allocator.free(buffer.allocation);
                 alloc.pool.destroy(buffer);
                 alloc.counter -= 1;
-            } else {
-                i -= 1;
+                _ = alloc.queue.swapRemove(i - 1);
             }
+            i -= 1;
         }
     }
 
@@ -954,7 +1096,6 @@ const BufferAllocator = struct {
         }
         std.debug.assert(best_score != -999999);
 
-        // dedicated allocation
         const dedicated_info: vk.MemoryDedicatedAllocateInfo = .{
             .buffer = device_buffer,
         };
@@ -989,6 +1130,413 @@ const BufferAllocator = struct {
             ),
             .buffer = device_buffer,
             .device_address = device_address,
+        };
+    }
+};
+
+const TextureAllocator = struct {
+    const Slab = struct {
+        const slab_size = 256 * 1024 * 1024;
+        const granularity = 64;
+
+        memory_type_index: u32,
+        allocator: OffsetAllocator,
+        memory: vk.DeviceMemory,
+    };
+
+    const Deferred = struct {
+        semaphore_value: u64,
+        texture: *Texture,
+    };
+
+    ctx: *Context,
+    slabs: std.ArrayList(Slab),
+    slots: SlotPool,
+    texture_pool: std.heap.MemoryPool(Texture),
+    view_pool: std.heap.MemoryPool(View),
+    queue: std.ArrayList(Deferred),
+    counter: u32,
+
+    fn init(ctx: *Context) !TextureAllocator {
+        return .{
+            .ctx = ctx,
+            .slabs = .empty,
+            .slots = try .init(ctx.gpa, 256 * 1024),
+            .texture_pool = .empty,
+            .view_pool = .empty,
+            .queue = .empty,
+            .counter = 0,
+        };
+    }
+
+    fn deinit(alloc: *TextureAllocator) void {
+        for (alloc.slabs.items) |*slab| {
+            alloc.ctx.device.freeMemory(slab.memory, null);
+            slab.allocator.deinit(alloc.ctx.gpa);
+        }
+        alloc.slabs.deinit(alloc.ctx.gpa);
+        alloc.slots.deinit(alloc.ctx.gpa);
+        alloc.texture_pool.deinit(alloc.ctx.gpa);
+        alloc.view_pool.deinit(alloc.ctx.gpa);
+        alloc.queue.deinit(alloc.ctx.gpa);
+        alloc.* = undefined;
+    }
+
+    fn create(alloc: *TextureAllocator, create_info: rhi.TextureCreateInfo) !*Texture {
+        // TODO validation of create_info
+
+        const multiformat: bool = blk: {
+            const base_format = create_info.format;
+            for (create_info.views) |view| {
+                if (view.format) |format| {
+                    if (format != base_format) break :blk true;
+                }
+            }
+            break :blk false;
+        };
+        const arrayview: bool = blk: {
+            if (create_info.texture_type != .texture_3d) break :blk false;
+            for (create_info.views) |view| {
+                if (view.view_type == .view_2d_array) break :blk true;
+            }
+            break :blk false;
+        };
+        const depth_stencil_format: bool = switch (create_info.format) {
+            .s8_uint,
+            .d16_unorm,
+            .d24_unorm_s8_uint,
+            .d32_sfloat,
+            .d32_sfloat_s8_uint,
+            => true,
+            else => false,
+        };
+        const color_attachment = create_info.usage.attachment and !depth_stencil_format;
+        const depth_stencil_attachment = create_info.usage.attachment and depth_stencil_format;
+
+        const image_info: vk.ImageCreateInfo = .{
+            .flags = .{
+                .mutable_format = multiformat,
+                .cube_compatible = create_info.texture_type == .texture_cube or
+                    create_info.texture_type == .texture_cube_array,
+                .@"2d_array_compatible" = arrayview,
+            },
+            .image_type = vulkanImageType(create_info.texture_type),
+            .format = vulkanFormat(create_info.format),
+            .extent = .{
+                .width = create_info.size[0],
+                .height = create_info.size[1],
+                .depth = if (create_info.texture_type == .texture_3d)
+                    create_info.size[2]
+                else
+                    1,
+            },
+            .mip_levels = create_info.mip_levels,
+            .array_layers = if (create_info.texture_type == .texture_3d)
+                1
+            else
+                create_info.size[2],
+            .samples = vulkanSampleCount(create_info.samples),
+            .tiling = .optimal,
+            .usage = .{
+                .storage = create_info.usage.storage,
+                .sampled = create_info.usage.sampled,
+                .transfer_src = create_info.usage.transfer_src,
+                .transfer_dst = create_info.usage.transfer_dst,
+                .color_attachment = color_attachment,
+                .depth_stencil_attachment = depth_stencil_attachment,
+            },
+            .sharing_mode = .exclusive,
+            .initial_layout = .undefined,
+        };
+        const image = try alloc.ctx.device.createImage(&image_info, null);
+        errdefer alloc.ctx.device.destroyImage(image, null);
+
+        if (alloc.ctx.config.enable_debug) {
+            try alloc.ctx.device.setDebugUtilsObjectNameEXT(&.{
+                .object_type = .image,
+                .object_handle = @backingInt(image),
+                .p_object_name = create_info.name,
+            });
+        }
+
+        var dedicated_memreq: vk.MemoryDedicatedRequirements = .{
+            .prefers_dedicated_allocation = .false,
+            .requires_dedicated_allocation = .false,
+        };
+        var image_memreq: vk.MemoryRequirements2 = .{
+            .p_next = &dedicated_memreq,
+            .memory_requirements = undefined,
+        };
+        alloc.ctx.device.getImageMemoryRequirements2(&.{
+            .image = image,
+        }, &image_memreq);
+        var memory_type_index: u32 = undefined;
+        var best_score: i32 = -999999;
+        const memory_types = alloc.ctx.physical_device_memory_properties.memory_types;
+        const memory_type_count = alloc.ctx.physical_device_memory_properties.memory_type_count;
+        for (memory_types[0..memory_type_count], 0..) |memory_type, i| {
+            // hard requirements
+            if (image_memreq.memory_requirements.memory_type_bits &
+                (@as(u32, 1) << @intCast(i)) == 0) continue;
+            // soft requirements
+            var score: i32 = 0;
+            if (memory_type.property_flags.device_local) score += 1;
+            if (score > best_score) {
+                best_score = score;
+                memory_type_index = @intCast(i);
+            }
+        }
+        std.debug.assert(best_score != -999999);
+
+        var texture = try alloc.texture_pool.create(alloc.ctx.gpa);
+        errdefer alloc.texture_pool.destroy(texture);
+        texture.image = image;
+
+        if (dedicated_memreq.requires_dedicated_allocation == .true or
+            (dedicated_memreq.prefers_dedicated_allocation == .true and
+                create_info.usage.attachment == true) or
+            image_memreq.memory_requirements.size > Slab.slab_size / 2)
+        {
+            // dedicated allocation
+            const dedicated_info: vk.MemoryDedicatedAllocateInfo = .{
+                .image = image,
+            };
+            const alloc_flags: vk.MemoryAllocateFlagsInfo = .{
+                .device_mask = 0,
+                .p_next = &dedicated_info,
+            };
+            const memory = try alloc.ctx.device.allocateMemory(&.{
+                .allocation_size = image_memreq.memory_requirements.size,
+                .memory_type_index = memory_type_index,
+                .p_next = &alloc_flags,
+            }, null);
+            errdefer alloc.ctx.device.freeMemory(memory, null);
+            try alloc.ctx.device.bindImageMemory(image, memory, 0);
+
+            texture.memory = .{ .dedicated = memory };
+        } else {
+            // slab allocation
+            const size = if (image_memreq.memory_requirements.alignment <= Slab.granularity)
+                image_memreq.memory_requirements.size
+            else
+                image_memreq.memory_requirements.size + image_memreq.memory_requirements.alignment;
+            const suballoc = try alloc.suballocate(memory_type_index, size);
+            try alloc.ctx.device.bindImageMemory(
+                image,
+                suballoc.slab.memory,
+                std.mem.alignForward(
+                    u32,
+                    suballoc.allocation.offset,
+                    @intCast(image_memreq.memory_requirements.alignment),
+                ),
+            );
+            texture.memory = .{ .slab = .{
+                .allocation = suballoc.allocation,
+                .slab = suballoc.slab,
+            } };
+        }
+
+        const default_view_info: vk.ImageViewCreateInfo = .{
+            .image = image,
+            .view_type = vulkanImageViewType(create_info.texture_type),
+            .format = vulkanFormat(create_info.format),
+            .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
+            .subresource_range = .{
+                .base_mip_level = 0,
+                .level_count = create_info.mip_levels,
+                .base_array_layer = 0,
+                .layer_count = create_info.size[2],
+                .aspect_mask = switch (create_info.format) {
+                    .s8_uint => .{ .stencil = true },
+                    .d16_unorm,
+                    .d24_unorm_s8_uint,
+                    .d32_sfloat,
+                    .d32_sfloat_s8_uint,
+                    => .{ .depth = true },
+                    else => .{ .color = true },
+                },
+            },
+        };
+        const default_view = try alloc.ctx.device.createImageView(&default_view_info, null);
+        errdefer alloc.ctx.device.destroyImageView(default_view, null);
+
+        const default_view_slot = try alloc.slots.acquire();
+        errdefer alloc.slots.release(default_view_slot);
+
+        const default_view_2 = try alloc.view_pool.create(alloc.ctx.gpa);
+        errdefer alloc.view_pool.destroy(default_view_2);
+        default_view_2.* = .{
+            .public = .{
+                .device_address = @intCast(default_view_slot),
+                .texture = &texture.public,
+                .info = .{
+                    .view_type = switch (create_info.texture_type) {
+                        .texture_2d => .view_2d,
+                        .texture_3d => .view_3d,
+                        .texture_cube => .view_cube,
+                        .texture_2d_array => .view_2d_array,
+                        .texture_cube_array => .view_cube_array,
+                    },
+                    .format = create_info.format,
+                    .swizzle = .{},
+                    .range = .{
+                        .base_mip_level = 0,
+                        .level_count = create_info.mip_levels,
+                        .base_array_layer = 0,
+                        .layer_count = if (create_info.texture_type == .texture_3d)
+                            1
+                        else
+                            create_info.size[2],
+                    },
+                    .name = &.{},
+                },
+            },
+            .view = default_view,
+        };
+        texture.public.default_view = &default_view_2.public;
+
+        const descriptor_image_info: vk.DescriptorImageInfo = .{
+            .sampler = .null,
+            .image_view = default_view,
+            .image_layout = .shader_read_only_optimal,
+        };
+        const write_descriptor_set: vk.WriteDescriptorSet = .{
+            .dst_set = alloc.ctx.descriptor_set,
+            .dst_binding = 0,
+            .dst_array_element = default_view_slot,
+            .descriptor_count = 1,
+            .descriptor_type = .sampled_image,
+            .p_image_info = @ptrCast(&descriptor_image_info),
+        };
+        alloc.ctx.device.updateDescriptorSets(&.{write_descriptor_set}, null);
+
+        alloc.counter += 1;
+        errdefer alloc.counter -= 1;
+        try alloc.queue.ensureUnusedCapacity(alloc.ctx.gpa, alloc.counter);
+
+        if (create_info.group) |group| {
+            _ = group;
+            @panic("TODO");
+        } else {
+            const group = try alloc.ctx.group_pool.create(alloc.ctx.gpa);
+            group.* = .{
+                .public = .{
+                    .info = .{ .name = &.{} },
+                },
+                .managed = true,
+                // .last_used = .{},
+                // .textures = .empty,
+                // .buffer_count = 0,
+                // .texture_state = .{
+                //     .owner = null,
+                //     .layout = .undefined,
+                // },
+                // .texture_state_overrides = .empty,
+                // .last_write_epoch = 0,
+                // .last_write_stage_mask = .{},
+                // .last_read_epoch = 0,
+                // .last_read_stage_mask = .{},
+            };
+            texture.public.group = &group.public;
+        }
+        // FIXME cleanup of group is very hard on errdefer, so don't have errors after it
+
+        // TODO create the other views
+
+        texture.public.info = .{
+            .usage = create_info.usage,
+            .size = create_info.size,
+            .format = create_info.format,
+            .mip_levels = create_info.mip_levels,
+            .sample_count = create_info.samples,
+            .texture_type = create_info.texture_type,
+            .name = create_info.name,
+        };
+        texture.public.views = &.{};
+
+        return texture;
+    }
+
+    /// semaphore_value should be the value when the final use is done
+    fn queueDestroy(alloc: *TextureAllocator, texture: *Texture, semaphore_value: u64) void {
+        alloc.queue.appendAssumeCapacity(.{
+            .semaphore_value = semaphore_value,
+            .texture = texture,
+        });
+    }
+
+    fn sweep(alloc: *TextureAllocator, semaphore_value: u64) void {
+        var i = alloc.queue.items.len;
+        std.debug.print("{}\n", .{i});
+        while (i > 0) {
+            if (semaphore_value >= alloc.queue.items[i - 1].semaphore_value) {
+                const texture = alloc.queue.items[i - 1].texture;
+                switch (texture.memory) {
+                    .slab => |suballoc| {
+                        suballoc.slab.allocator.free(suballoc.allocation);
+                    },
+                    .dedicated => |memory| {
+                        alloc.ctx.device.freeMemory(memory, null);
+                    },
+                }
+                const view: *View = @alignCast(@constCast(
+                    @fieldParentPtr("public", texture.public.default_view),
+                ));
+                // TODO non-default views
+                alloc.ctx.device.destroyImageView(view.view, null);
+                alloc.ctx.device.destroyImage(texture.image, null);
+                alloc.texture_pool.destroy(texture);
+                alloc.view_pool.destroy(view);
+                alloc.counter -= 1;
+                _ = alloc.queue.swapRemove(i - 1);
+            }
+            i -= 1;
+        }
+    }
+
+    fn suballocate(alloc: *TextureAllocator, memory_type_index: u32, size: u64) !struct {
+        allocation: OffsetAllocation,
+        slab: *Slab,
+    } {
+        const granule_size: u32 = @intCast((size + Slab.granularity - 1) / Slab.granularity);
+
+        for (alloc.slabs.items) |*slab| {
+            if (slab.memory_type_index != memory_type_index) continue;
+            const allocation = slab.allocator.allocate(granule_size) catch continue;
+            return .{
+                .allocation = allocation,
+                .slab = slab,
+            };
+        }
+
+        // no allocation possible with extant slabs, make a new one
+        const alloc_flags: vk.MemoryAllocateFlagsInfo = .{
+            .flags = .{},
+            .device_mask = 0,
+        };
+        const memory = try alloc.ctx.device.allocateMemory(&.{
+            .allocation_size = Slab.slab_size,
+            .memory_type_index = memory_type_index,
+            .p_next = &alloc_flags,
+        }, null);
+        errdefer alloc.ctx.device.freeMemory(memory, null);
+
+        const slab = try alloc.slabs.addOne(alloc.ctx.gpa);
+        errdefer _ = alloc.slabs.pop();
+        slab.* = .{
+            .memory_type_index = memory_type_index,
+            .memory = memory,
+            .allocator = try .init(
+                alloc.ctx.gpa,
+                Slab.slab_size / Slab.granularity,
+                Slab.slab_size / Slab.granularity,
+            ),
+        };
+
+        const allocation = try slab.allocator.allocate(granule_size);
+        return .{
+            .slab = slab,
+            .allocation = allocation,
         };
     }
 };
@@ -1168,3 +1716,113 @@ const StagingAllocator = struct {
         _ = ret_addr;
     }
 };
+
+/// object pool that doesn't release items until their semaphore has passed
+fn Depot(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        const Node = struct {
+            data: T,
+            semaphore_value: u64,
+        };
+
+        gpa: std.mem.Allocator,
+        data: std.ArrayList(Node),
+
+        fn init(gpa: std.mem.Allocator) Self {
+            return .{
+                .gpa = gpa,
+                .data = .empty,
+            };
+        }
+
+        fn deinit(depot: *Self) void {
+            depot.data.deinit(depot.gpa);
+            depot.* = undefined;
+        }
+
+        /// semaphore value when the data will be safe to use again
+        fn push(depot: *Self, data: T, semaphore_value: u64) !void {
+            try depot.data.append(depot.gpa, .{
+                .data = data,
+                .semaphore_value = semaphore_value,
+            });
+        }
+
+        /// current semaphore value
+        fn pop(depot: *Self, semaphore_value: u64) ?T {
+            for (depot.data.items, 0..) |data, i| {
+                if (data.semaphore_value > semaphore_value) continue;
+                return depot.data.swapRemove(i).data;
+            }
+            return null;
+        }
+
+        fn debugPrint(depot: *Self) void {
+            std.debug.print("Depot <{s}> [ ", .{@typeName(T)});
+
+            for (depot.data.items) |item| {
+                std.debug.print("{} ", .{item});
+            }
+            std.debug.print("]\n", .{});
+        }
+    };
+}
+
+fn vulkanImageType(texture_type: rhi.TextureType) vk.ImageType {
+    return switch (texture_type) {
+        .texture_2d => .@"2d",
+        .texture_3d => .@"3d",
+        .texture_cube => .@"2d",
+        .texture_2d_array => .@"2d",
+        .texture_cube_array => .@"2d",
+    };
+}
+
+fn vulkanImageViewType(texture_view_type: anytype) vk.ImageViewType {
+    const T = @TypeOf(texture_view_type);
+    if (T == rhi.TextureType) {
+        return switch (texture_view_type) {
+            .texture_2d => .@"2d",
+            .texture_3d => .@"3d",
+            .texture_cube => .cube,
+            .texture_2d_array => .@"2d_array",
+            .texture_cube_array => .cube_array,
+        };
+    }
+    if (T == rhi.ViewType) {
+        return switch (texture_view_type) {
+            .view_2d => .@"2d",
+            .view_3d => .@"3d",
+            .view_cube => .cube,
+            .view_2d_array => .@"2d_array",
+            .view_cube_array => .cube_array,
+        };
+    }
+    @compileError("vulkanImageViewType takes either an rhi.TextureType or an rhi.ViewType");
+}
+
+fn vulkanFormat(format: rhi.Format) vk.Format {
+    return switch (format) {
+        .r8g8b8a8_unorm => .r8g8b8a8_unorm,
+        .r8g8b8a8_srgb => .r8g8b8a8_srgb,
+        .r16g16b16a16_sfloat => .r16g16b16a16_sfloat,
+        .r32_uint => .r32_uint,
+        .s8_uint => .s8_uint,
+        .d16_unorm => .d16_unorm,
+        .d24_unorm_s8_uint => .d24_unorm_s8_uint,
+        .d32_sfloat => .d32_sfloat,
+        .d32_sfloat_s8_uint => .d32_sfloat_s8_uint,
+    };
+}
+
+fn vulkanSampleCount(sample_count: rhi.SampleCount) vk.SampleCountFlags {
+    return .{
+        .@"1" = sample_count == .count_1,
+        .@"2" = sample_count == .count_2,
+        .@"4" = sample_count == .count_4,
+        .@"8" = sample_count == .count_8,
+        .@"16" = sample_count == .count_16,
+    };
+}
